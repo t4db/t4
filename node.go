@@ -69,8 +69,9 @@ type Node struct {
 	mu sync.Mutex
 
 	// leader-only
-	peerSrv *peer.Server
-	peerLis net.Listener
+	peerSrv  *peer.Server
+	peerLis  net.Listener
+	peerGRPC *grpc.Server
 
 	// follower-only (WAL stream); owned exclusively by followLoop after startup.
 	peerCli *peer.Client
@@ -80,6 +81,7 @@ type Node struct {
 
 	entriesSinceCheckpoint int64
 	cancelBg               context.CancelFunc
+	closeOnce              sync.Once
 }
 
 func (n *Node) loadRole() nodeRole   { return nodeRole(n.role.Load()) }
@@ -302,6 +304,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.term = rec.Term
 	n.peerSrv = peerSrv
 	n.peerLis = lis
+	n.peerGRPC = grpcSrv
 	n.leaderCli.Store(nil) // leader does not forward writes
 	n.storeRole(roleLeader)
 	n.mu.Unlock()
@@ -551,17 +554,23 @@ func msgToKV(m *peer.KVMsg) *KeyValue {
 
 // Close shuts down the node cleanly.
 func (n *Node) Close() error {
-	n.cancelBg()
-	if cli := n.leaderCli.Load(); cli != nil {
-		cli.Close()
-	}
-	if n.peerLis != nil {
-		n.peerLis.Close()
-	}
-	if err := n.wal.Close(); err != nil {
-		logrus.Errorf("strata: wal close: %v", err)
-	}
-	return n.db.Close()
+	var err error
+	n.closeOnce.Do(func() {
+		n.cancelBg()
+		if cli := n.leaderCli.Load(); cli != nil {
+			cli.Close()
+		}
+		if n.peerGRPC != nil {
+			n.peerGRPC.Stop() // terminates all active streams immediately
+		} else if n.peerLis != nil {
+			n.peerLis.Close()
+		}
+		if werr := n.wal.Close(); werr != nil {
+			logrus.Errorf("strata: wal close: %v", werr)
+		}
+		err = n.db.Close()
+	})
+	return err
 }
 
 // ── Write path (leader / single-node execute; follower forwards) ──────────────

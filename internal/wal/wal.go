@@ -43,8 +43,9 @@ type WAL struct {
 	active *SegmentWriter
 	closed bool
 
-	uploadC chan uploadTask
-	wg      sync.WaitGroup
+	uploadC     chan uploadTask
+	wg          sync.WaitGroup
+	cancelLoops context.CancelFunc // cancels rotationLoop and uploadLoop
 }
 
 type uploadTask struct {
@@ -96,9 +97,11 @@ func WithSegmentMaxAge(d time.Duration) Option {
 
 // Start launches background goroutines. Must be called before Append.
 func (w *WAL) Start(ctx context.Context) {
+	loopCtx, cancel := context.WithCancel(ctx)
+	w.cancelLoops = cancel
 	w.wg.Add(2)
-	go w.rotationLoop(ctx)
-	go w.uploadLoop(ctx)
+	go w.rotationLoop(loopCtx)
+	go w.uploadLoop(loopCtx)
 }
 
 // Append writes e to the active segment and fsyncs.
@@ -244,6 +247,9 @@ func (w *WAL) Close() error {
 		w.active = nil
 	}
 	w.mu.Unlock()
+	if w.cancelLoops != nil {
+		w.cancelLoops()
+	}
 	w.wg.Wait()
 	return nil
 }
