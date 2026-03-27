@@ -130,9 +130,10 @@ func (w *WAL) rotateLocked() {
 		return
 	}
 	seg := w.active
-	w.active = nil
 	nextRev := seg.FirstRev() + int64(seg.EntryCount())
 	if err := seg.Seal(); err != nil {
+		// Seal failed; keep the old (unsealed) segment as active so the next
+		// Append returns an error rather than panicking on a nil dereference.
 		logrus.Errorf("wal: seal segment %q: %v", seg.Path(), err)
 		return
 	}
@@ -147,7 +148,10 @@ func (w *WAL) rotateLocked() {
 	logrus.Debugf("wal: sealed segment %q (%d entries, %d bytes)", seg.Path(), seg.EntryCount(), seg.Size())
 	sw, err := OpenSegmentWriter(w.dir, w.term, nextRev)
 	if err != nil {
+		// Cannot open the next segment. Keep the sealed segment as active so
+		// the next Append call returns a write error rather than panicking.
 		logrus.Errorf("wal: open new segment after rotation: %v", err)
+		w.active = seg
 		return
 	}
 	w.active = sw
@@ -172,8 +176,10 @@ func (w *WAL) rotationLoop(ctx context.Context) {
 				old := w.active
 				sw, err := OpenSegmentWriter(w.dir, w.term, rev)
 				if err != nil {
+					// Keep the sealed segment as active so Append returns an
+					// error rather than panicking on a nil dereference.
 					logrus.Errorf("wal: age-rotate open new segment: %v", err)
-					w.active = nil
+					w.active = old
 					w.mu.Unlock()
 					continue
 				}
@@ -227,7 +233,9 @@ func (w *WAL) uploadLoop(ctx context.Context) {
 	}
 }
 
-// Close seals the active segment (if any) and waits for background goroutines.
+// Close seals the active segment (if any), uploads it synchronously so that
+// all acknowledged writes are durable before this call returns, then stops
+// background goroutines.
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	if w.closed {
@@ -235,10 +243,13 @@ func (w *WAL) Close() error {
 		return nil
 	}
 	w.closed = true
+	var finalSeg *SegmentWriter
 	if w.active != nil {
 		if w.active.EntryCount() > 0 {
 			if err := w.active.Seal(); err != nil {
 				logrus.Errorf("wal: close seal: %v", err)
+			} else {
+				finalSeg = w.active
 			}
 		} else {
 			w.active.Close()
@@ -247,6 +258,17 @@ func (w *WAL) Close() error {
 		w.active = nil
 	}
 	w.mu.Unlock()
+
+	// Upload the final segment synchronously before cancelling the upload loop
+	// so a replacement node can recover all acknowledged writes from object
+	// storage. The upload loop is still running at this point.
+	if finalSeg != nil && w.uploader != nil {
+		objKey := ObjectKey(finalSeg.Term(), finalSeg.FirstRev())
+		if err := w.uploader(context.Background(), finalSeg.Path(), objKey); err != nil {
+			logrus.Errorf("wal: close upload final segment: %v", err)
+		}
+	}
+
 	if w.cancelLoops != nil {
 		w.cancelLoops()
 	}

@@ -399,8 +399,13 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			if err := n.wal.Append(&e); err != nil {
 				return err
 			}
+			if err := n.db.Apply([]wal.Entry{e}); err != nil {
+				return err
+			}
+			// Advance only after a successful apply so a reconnect retries
+			// the same revision rather than skipping it.
 			fromRev = e.Revision + 1
-			return n.db.Apply([]wal.Entry{e})
+			return nil
 		})
 
 		if bgCtx.Err() != nil {

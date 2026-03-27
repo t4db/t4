@@ -122,11 +122,14 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 		}
 	}
 
-	if _, err := s.node.Delete(ctx, key); err != nil {
+	newRev, err := s.node.Delete(ctx, key)
+	if err != nil {
 		return nil, err
 	}
 	resp.Header = s.header()
-	resp.Deleted = 1
+	if newRev > 0 {
+		resp.Deleted = 1
+	}
 	return resp, nil
 }
 
