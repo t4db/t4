@@ -139,3 +139,63 @@ var ErrNotLeader error  // write on a follower when the leader is unreachable
 ```
 
 Both are suitable for use with `errors.Is`.
+
+---
+
+## Point-in-time restore
+
+A `RestorePoint` tells a node to bootstrap from a specific moment captured
+in S3, rather than from the latest checkpoint in its own prefix. It is applied
+once, on first boot (when the local data directory does not yet exist), and
+ignored on subsequent restarts.
+
+```go
+type PinnedObject struct {
+    Key       string // object key in S3
+    VersionID string // S3 version ID of that object
+}
+
+type RestorePoint struct {
+    // Store to read pinned objects from. Typically the source node's S3 prefix.
+    // May differ from Config.ObjectStore (the new node's write prefix).
+    Store object.VersionedStore
+
+    // Checkpoint archive to restore from. If Key is empty, no checkpoint is
+    // restored and WALSegments are replayed into a fresh database.
+    CheckpointArchive PinnedObject
+
+    // WAL segments to replay after the checkpoint, in ascending sequence order.
+    WALSegments []PinnedObject
+}
+```
+
+Set `Config.RestorePoint` to activate:
+
+```go
+node, err := strata.Open(strata.Config{
+    DataDir:      "/var/lib/strata-branch",
+    ObjectStore:  branchStore,   // new node's own S3 prefix for future writes
+    RestorePoint: &strata.RestorePoint{
+        Store:             sourceStore,
+        CheckpointArchive: strata.PinnedObject{Key: "...", VersionID: "..."},
+        WALSegments: []strata.PinnedObject{
+            {Key: "wal/000042.seg", VersionID: "..."},
+        },
+    },
+})
+```
+
+### object.VersionedStore
+
+`RestorePoint.Store` must implement `object.VersionedStore`:
+
+```go
+type VersionedStore interface {
+    Store
+    GetVersioned(ctx context.Context, key, versionID string) (io.ReadCloser, error)
+}
+```
+
+`object.S3Store` satisfies this interface automatically. S3 versioning must be
+enabled on the source bucket. `GetVersioned` maps directly to `s3:GetObject`
+with a `VersionId` — no data is copied within S3.

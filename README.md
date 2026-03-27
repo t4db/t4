@@ -84,5 +84,5 @@ Multi-node and production setup: see [docs/operations.md](docs/operations.md).
 |---|---|
 | [docs/api.md](docs/api.md) | Full Go API reference — methods, types, errors |
 | [docs/configuration.md](docs/configuration.md) | All config fields and CLI flags |
-| [docs/operations.md](docs/operations.md) | Multi-node, S3, mTLS, observability, scaling |
+| [docs/operations.md](docs/operations.md) | Multi-node, S3, mTLS, observability, point-in-time restore |
 | [docs/architecture.md](docs/architecture.md) | Internals — WAL, checkpoints, election, replication |

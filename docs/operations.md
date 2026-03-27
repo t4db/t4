@@ -182,3 +182,79 @@ Steps 4–5 ensure that no committed write is lost even if the node is killed be
 ### S3 unavailability
 
 S3 failures are non-blocking on the write path. WAL segment uploads and checkpoints retry in the background. Writes continue to succeed locally. On restart, local WAL segments are replayed first, so no data written to the local WAL is lost even if it was never uploaded.
+
+---
+
+## Point-in-time restore
+
+Because all durable state (checkpoints and WAL segments) lives in S3 as
+individually versioned objects, you can bootstrap a new node from any past
+moment without copying data. The restore point is a lightweight manifest of
+S3 version IDs; the new node reads those specific object versions on first
+boot, then writes all future WAL segments to its own prefix.
+
+### Requirements
+
+- S3 versioning must be enabled on the bucket **before** the first write.
+- Capturing a restore point does not require the source node to be paused.
+
+### Capturing a restore point
+
+External automation lists the current objects and records their S3 version IDs
+at the desired moment. Using the AWS CLI:
+
+```bash
+# Find the current checkpoint key from the manifest.
+aws s3 cp s3://my-bucket/source-prefix/manifest/latest - | jq .
+
+# List WAL segments and their current version IDs.
+aws s3api list-object-versions \
+  --bucket my-bucket \
+  --prefix source-prefix/wal/ \
+  --query 'Versions[?IsLatest==`true`].[Key,VersionId]' \
+  --output json
+```
+
+Using the Go SDK:
+
+```go
+manifest, _ := checkpoint.ReadManifest(ctx, sourceStore)
+walKeys, _   := sourceStore.List(ctx, "wal/")
+
+// Use s3:ListObjectVersions to resolve a version ID per key, then build:
+rp := &strata.RestorePoint{
+    Store:             sourceStore,
+    CheckpointArchive: strata.PinnedObject{Key: manifest.CheckpointKey, VersionID: cpVersionID},
+    WALSegments:       walSegs, // []PinnedObject in ascending sequence order
+}
+```
+
+### Starting a node from a restore point
+
+```go
+node, err := strata.Open(strata.Config{
+    DataDir:      "/var/lib/strata-branch",
+    ObjectStore:  branchStore,  // separate prefix for this node's own writes
+    RestorePoint: rp,
+})
+```
+
+On first boot the node restores the pinned checkpoint, replays the pinned WAL
+segments, then starts writing to `branchStore`. On subsequent restarts
+`RestorePoint` is ignored — the node recovers normally from its own prefix.
+
+### Use cases
+
+**Point-in-time recovery** — restore to a known-good revision after a bad
+write or accidental deletion.
+
+**Copy-free branching** — two nodes diverge from the same restore point, each
+writing to its own S3 prefix. Creating a branch costs one
+`ListObjectVersions` call; no bytes are copied in S3.
+
+**Blue/green deployments** — start a shadow node from a restore point, apply
+and test a migration against real data, then promote or discard with no
+production downtime.
+
+**DR drill** — spin up a replica in a different region from a restore point
+captured in the primary region, verify integrity, then shut it down.
