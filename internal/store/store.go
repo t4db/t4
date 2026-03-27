@@ -219,12 +219,42 @@ func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
 	if err := b.Set(metaCompactKey, encodeRev(compactRev), pebble.NoSync); err != nil {
 		return err
 	}
-	// Delete log entries below the compact revision.
 	lo := logKey(atomic.LoadInt64(&s.compactRev))
 	hi := logKey(compactRev)
-	if err := b.DeleteRange(lo, hi, pebble.NoSync); err != nil {
-		return fmt.Errorf("store: delete compact range: %w", err)
+
+	// Scan log entries in [lo, hi) and delete only those that are safe to
+	// remove. A log entry at revision R for key K is safe to delete when:
+	//   (a) the entry is a delete operation (key no longer exists), or
+	//   (b) the index for K points to a revision > R (key has since been updated).
+	// Entries where the index still points to R are the current value of a live
+	// key and must be preserved, otherwise a subsequent Get would fail with
+	// "pebble: not found" for a key that still exists.
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if err != nil {
+		return fmt.Errorf("store: compact iter: %w", err)
 	}
+	defer iter.Close()
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		entryRev := decodeLogKey(iter.Key())
+		r, err := unmarshalRecord(iter.Value())
+		if err == nil && !r.delete {
+			idxRev, err := s.getIdxRev(r.key)
+			if err != nil {
+				return fmt.Errorf("store: compact idx lookup %q: %w", r.key, err)
+			}
+			if idxRev == entryRev {
+				continue // live key at its current revision — keep
+			}
+		}
+		if err := b.Delete(iter.Key(), pebble.NoSync); err != nil {
+			return fmt.Errorf("store: compact delete rev=%d: %w", entryRev, err)
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("store: compact scan: %w", err)
+	}
+
 	atomic.StoreInt64(&s.compactRev, compactRev)
 	return nil
 }
