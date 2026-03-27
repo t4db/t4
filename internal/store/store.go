@@ -190,6 +190,23 @@ func (s *Store) Recover(entries []wal.Entry) error {
 
 func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
 	lk := logKey(e.Revision)
+
+	// Term-conflict cleanup: during WAL replay after a leader change, a newer
+	// term may write a different key at the same revision as an older term.
+	// Before overwriting the log entry, remove any stale index pointer left by
+	// the old term to prevent idx[oldKey]=rev from dangling after the log entry
+	// at rev is replaced. This is a no-op on the normal write path (new
+	// revisions never exist in the DB yet) thanks to Bloom filter short-circuit.
+	if old, closer, err := s.db.Get(lk); err == nil {
+		r, rerr := unmarshalRecord(old)
+		closer.Close()
+		if rerr == nil && !r.delete && r.key != e.Key {
+			if err := b.Delete(idxKey(r.key), pebble.NoSync); err != nil {
+				return fmt.Errorf("store: cleanup stale idx %q rev=%d: %w", r.key, e.Revision, err)
+			}
+		}
+	}
+
 	r := &record{
 		key:            e.Key,
 		value:          e.Value,

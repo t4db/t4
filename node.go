@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1018,7 +1021,24 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 	if err != nil {
 		return err
 	}
+
+	// Build per-term cutoffs to handle leader-change conflicts.
+	//
+	// When a new leader takes over at revision X, it starts writing a new term
+	// from revision X+1. The old leader may have written S3 segments that cover
+	// some of those same revisions (X+1, X+2, …). Applying both the old-term
+	// and new-term entries at the same revision would corrupt the index.
+	//
+	// cutoff[term] is the minimum firstRev among all segments with term > term.
+	// Old-term entries at revision >= cutoff are superseded by the new term and
+	// must be skipped. For the highest term present, cutoff = math.MaxInt64 (no
+	// upper bound — apply all entries).
+	cutoff := walTermCutoffs(keys)
+
 	for _, key := range keys {
+		term, _ := parseWALKey(key)
+		termCutoff := cutoff[term]
+
 		rc, err := obj.Get(ctx, key)
 		if err != nil {
 			return fmt.Errorf("replayRemote get %q: %w", key, err)
@@ -1035,9 +1055,13 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 		}
 		var applicable []wal.Entry
 		for _, e := range entries {
-			if e.Revision > afterRev {
-				applicable = append(applicable, *e)
+			if e.Revision <= afterRev {
+				continue // already covered by checkpoint / local WAL
 			}
+			if e.Revision >= termCutoff {
+				continue // superseded by a higher-term entry at this revision
+			}
+			applicable = append(applicable, *e)
 		}
 		if len(applicable) > 0 {
 			if err := db.Recover(applicable); err != nil {
@@ -1046,4 +1070,42 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 		}
 	}
 	return nil
+}
+
+// walTermCutoffs returns a map from term → the minimum firstRev of any
+// segment whose term is strictly greater. Entries from a given term at
+// revisions >= cutoff are superseded by the newer term and should be skipped.
+// The highest term maps to math.MaxInt64 (no cutoff).
+func walTermCutoffs(keys []string) map[uint64]int64 {
+	// Collect the minimum firstRev for each term.
+	minFirstRev := map[uint64]int64{}
+	for _, key := range keys {
+		term, firstRev := parseWALKey(key)
+		if existing, ok := minFirstRev[term]; !ok || firstRev < existing {
+			minFirstRev[term] = firstRev
+		}
+	}
+	cutoff := make(map[uint64]int64, len(minFirstRev))
+	for term := range minFirstRev {
+		c := int64(math.MaxInt64)
+		for t, fr := range minFirstRev {
+			if t > term && fr < c {
+				c = fr
+			}
+		}
+		cutoff[term] = c
+	}
+	return cutoff
+}
+
+// parseWALKey extracts term and firstRev from a WAL object key of the form
+// "wal/{term:010d}/{firstRev:020d}".
+func parseWALKey(key string) (term uint64, firstRev int64) {
+	parts := strings.SplitN(key, "/", 3)
+	if len(parts) != 3 {
+		return 0, 0
+	}
+	term64, _ := strconv.ParseUint(strings.TrimLeft(parts[1], "0"), 10, 64)
+	rev, _ := strconv.ParseInt(strings.TrimLeft(parts[2], "0"), 10, 64)
+	return term64, rev
 }
