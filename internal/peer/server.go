@@ -1,33 +1,45 @@
 package peer
 
 import (
+	"context"
 	"sync"
 
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/makhov/strata/internal/wal"
 )
 
-// Server is the leader-side WAL streaming server.
+// Server is the leader-side WAL streaming + write-forwarding server.
 //
 // It maintains:
 //   - A bounded ring buffer of recent entries for follower catch-up.
 //   - A map of per-follower channels for live fan-out.
+//   - A ForwardHandler that processes write RPCs forwarded by followers.
 //
 // Thread safety: Broadcast and Follow both hold mu.
 type Server struct {
-	mu        sync.Mutex
-	buf       *entryBuffer
-	followers map[string]chan *wal.Entry
+	mu             sync.Mutex
+	buf            *entryBuffer
+	followers      map[string]chan *wal.Entry
+	forwardHandler ForwardHandler
 }
 
 // NewServer creates a Server with a ring buffer of capacity cap.
-// cap=10_000 is a reasonable default for most workloads.
 func NewServer(cap int) *Server {
 	return &Server{
 		buf:       newEntryBuffer(cap),
 		followers: make(map[string]chan *wal.Entry),
 	}
+}
+
+// SetForwardHandler registers the handler that processes forwarded writes.
+// Must be called before the gRPC server starts accepting connections.
+func (s *Server) SetForwardHandler(h ForwardHandler) {
+	s.mu.Lock()
+	s.forwardHandler = h
+	s.mu.Unlock()
 }
 
 // Broadcast appends e to the buffer and fans it out to all connected followers.
@@ -74,14 +86,12 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 
 	logrus.Infof("peer: follower %q connected (fromRev=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, len(snapshot))
 
-	// Send buffered catch-up entries.
 	for _, e := range snapshot {
 		if err := stream.Send(EntryToMsg(e)); err != nil {
 			return err
 		}
 	}
 
-	// Stream live entries; skip any that were already in the snapshot.
 	for {
 		select {
 		case e := <-ch:
@@ -99,6 +109,18 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	}
 }
 
+// Forward implements WalStreamServer. It proxies a write from a follower to
+// the ForwardHandler (the leader Node).
+func (s *Server) Forward(ctx context.Context, req *ForwardRequest) (*ForwardResponse, error) {
+	s.mu.Lock()
+	h := s.forwardHandler
+	s.mu.Unlock()
+	if h == nil {
+		return nil, status.Error(codes.Unavailable, "leader not ready")
+	}
+	return h.HandleForward(ctx, req)
+}
+
 // ── entry ring buffer ─────────────────────────────────────────────────────────
 
 type entryBuffer struct {
@@ -108,8 +130,6 @@ type entryBuffer struct {
 
 func newEntryBuffer(cap int) *entryBuffer { return &entryBuffer{cap: cap} }
 
-// push appends e, evicting the oldest entry when full.
-// Must be called with Server.mu held.
 func (b *entryBuffer) push(e *wal.Entry) {
 	b.entries = append(b.entries, e)
 	if len(b.entries) > b.cap {
@@ -117,16 +137,13 @@ func (b *entryBuffer) push(e *wal.Entry) {
 	}
 }
 
-// since returns a snapshot of entries with Revision >= fromRev.
-// Returns (nil, false) if fromRev predates the buffer window.
-// Must be called with Server.mu held.
 func (b *entryBuffer) since(fromRev int64) ([]*wal.Entry, bool) {
 	if len(b.entries) == 0 {
-		return nil, true // no entries yet; follower is up to date
+		return nil, true
 	}
 	minRev := b.entries[0].Revision
 	if fromRev < minRev {
-		return nil, false // too old; follower must resync from S3
+		return nil, false
 	}
 	for i, e := range b.entries {
 		if e.Revision >= fromRev {
@@ -135,5 +152,5 @@ func (b *entryBuffer) since(fromRev int64) ([]*wal.Entry, bool) {
 			return out, true
 		}
 	}
-	return nil, true // all buffered entries are older than fromRev (already caught up)
+	return nil, true
 }

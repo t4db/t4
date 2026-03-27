@@ -4,6 +4,8 @@ import (
 	"os"
 	"time"
 
+	"google.golang.org/grpc/credentials"
+
 	"github.com/makhov/strata/internal/object"
 )
 
@@ -53,19 +55,32 @@ type Config struct {
 	AdvertisePeerAddr string
 
 	// LeaderWatchInterval is how often the leader reads the lock from S3 to
-	// detect if it has been superseded by a new election. This is the only
-	// periodic S3 operation the leader performs after winning; it does not
-	// write or renew. Default: 5 minutes.
+	// detect if it has been superseded. Read-only; no renewals.
+	// Default: 5 minutes.
 	LeaderWatchInterval time.Duration
 
-	// FollowerMaxRetries is the number of consecutive stream-reconnect failures
-	// a follower tolerates before concluding the leader is dead and attempting
-	// a TakeOver election. Default: 5.
+	// FollowerMaxRetries is the number of consecutive stream failures a follower
+	// tolerates before attempting a TakeOver election.
+	// Default: 5.
 	FollowerMaxRetries int
 
 	// PeerBufferSize is the number of WAL entries the leader buffers for
 	// follower catch-up. Default: 10 000.
 	PeerBufferSize int
+
+	// PeerServerTLS is the transport credentials used by the leader's peer
+	// gRPC server. Nil means plaintext (only safe inside a trusted network).
+	PeerServerTLS credentials.TransportCredentials
+
+	// PeerClientTLS is the transport credentials used by a follower's peer
+	// gRPC client. Must be set when PeerServerTLS is set on the leader.
+	PeerClientTLS credentials.TransportCredentials
+
+	// ── Observability ────────────────────────────────────────────────────────
+
+	// MetricsAddr is the TCP address for the Prometheus /metrics, /healthz,
+	// and /readyz HTTP endpoints (e.g. "0.0.0.0:9090"). Empty means disabled.
+	MetricsAddr string
 }
 
 func (c *Config) setDefaults() {

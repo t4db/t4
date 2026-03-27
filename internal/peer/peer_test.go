@@ -41,7 +41,7 @@ func TestStreamDelivery(t *testing.T) {
 	srv := peer.NewServer(1000)
 	addr := startServer(t, srv)
 
-	cli := peer.NewClient(addr, "follower-1", 0)
+	cli := peer.NewClient(addr, "follower-1", 3, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -84,7 +84,7 @@ func TestCatchUp(t *testing.T) {
 		srv.Broadcast(makeEntry(i))
 	}
 
-	cli := peer.NewClient(addr, "follower-late", 0)
+	cli := peer.NewClient(addr, "follower-1", 3, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -131,7 +131,7 @@ func TestResyncRequired(t *testing.T) {
 	}
 
 	addr := startServer(t, srv)
-	cli := peer.NewClient(addr, "follower-stale", 0)
+	cli := peer.NewClient(addr, "follower-1", 3, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -152,11 +152,59 @@ func TestResyncRequired(t *testing.T) {
 	}
 }
 
+// TestForwardWrite verifies that a follower can forward a write to the leader
+// and receive the correct response, including error propagation.
+func TestForwardWrite(t *testing.T) {
+	// Stub ForwardHandler that records calls and returns canned responses.
+	handler := &stubForwardHandler{}
+	srv := peer.NewServer(1000)
+	srv.SetForwardHandler(handler)
+	addr := startServer(t, srv)
+
+	cli := peer.NewClient(addr, "follower-1", 3, nil)
+	defer cli.Close()
+
+	ctx := t.Context()
+
+	// Successful Put.
+	handler.resp = &peer.ForwardResponse{Revision: 42, Succeeded: true}
+	resp, err := cli.ForwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardPut, Key: "/k", Value: []byte("v")})
+	if err != nil {
+		t.Fatalf("ForwardWrite: %v", err)
+	}
+	if resp.Revision != 42 {
+		t.Errorf("revision: want 42 got %d", resp.Revision)
+	}
+	if handler.lastReq.Key != "/k" {
+		t.Errorf("key not forwarded: got %q", handler.lastReq.Key)
+	}
+
+	// Application error (key exists).
+	handler.resp = &peer.ForwardResponse{ErrCode: "key_exists"}
+	resp, err = cli.ForwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardCreate, Key: "/k", Value: []byte("v")})
+	if err != nil {
+		t.Fatalf("ForwardWrite (key_exists): %v", err)
+	}
+	if resp.ErrCode != "key_exists" {
+		t.Errorf("expected key_exists err code, got %q", resp.ErrCode)
+	}
+}
+
+type stubForwardHandler struct {
+	lastReq *peer.ForwardRequest
+	resp    *peer.ForwardResponse
+}
+
+func (h *stubForwardHandler) HandleForward(_ context.Context, req *peer.ForwardRequest) (*peer.ForwardResponse, error) {
+	h.lastReq = req
+	return h.resp, nil
+}
+
 // TestLeaderUnreachable verifies that Follow returns ErrLeaderUnreachable
 // after maxRetries consecutive connection failures.
 func TestLeaderUnreachable(t *testing.T) {
 	// Point at a port where nothing is listening.
-	cli := peer.NewClient("127.0.0.1:19999", "follower-unreachable", 3)
+	cli := peer.NewClient("127.0.0.1:19999", "follower-1", 3, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -179,9 +227,8 @@ func TestMultipleFollowers(t *testing.T) {
 	received := make([]chan wal.Entry, nFollowers)
 	for i := range received {
 		received[i] = make(chan wal.Entry, 16)
-		id := fmt.Sprintf("follower-%d", i)
 		ch := received[i]
-		cli := peer.NewClient(addr, id, 0)
+		cli := peer.NewClient(addr, fmt.Sprintf("follower-%d", i), 3, nil)
 		go cli.Follow(ctx, 1, func(e wal.Entry) error {
 			ch <- e
 			return nil
@@ -218,7 +265,7 @@ func TestNoDuplicatesOnCatchUp(t *testing.T) {
 	}
 
 	addr := startServer(t, srv)
-	cli := peer.NewClient(addr, "follower-dedup", 0)
+	cli := peer.NewClient(addr, "follower-1", 3, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

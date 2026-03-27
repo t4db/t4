@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"os"
@@ -17,10 +19,11 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/makhov/strata"
 	"github.com/makhov/strata/internal/object"
-	
+	kinebackend "github.com/makhov/strata/kine"
 )
 
 func main() {
@@ -46,6 +49,12 @@ func rootCmd() *cobra.Command {
 		advertisePeerAddr      string
 		leaderWatchIntervalSec int
 		followerMaxRetries     int
+		// mTLS
+		peerTLSCA   string
+		peerTLSCert string
+		peerTLSKey  string
+		// observability
+		metricsAddr string
 	)
 
 	cmd := &cobra.Command{
@@ -68,6 +77,16 @@ func rootCmd() *cobra.Command {
 				AdvertisePeerAddr:   advertisePeerAddr,
 				LeaderWatchInterval: time.Duration(leaderWatchIntervalSec) * time.Second,
 				FollowerMaxRetries:  followerMaxRetries,
+				MetricsAddr:         metricsAddr,
+			}
+
+			if peerTLSCA != "" || peerTLSCert != "" {
+				serverCreds, clientCreds, err := buildPeerTLS(peerTLSCA, peerTLSCert, peerTLSKey)
+				if err != nil {
+					return fmt.Errorf("peer TLS: %w", err)
+				}
+				cfg.PeerServerTLS = serverCreds
+				cfg.PeerClientTLS = clientCreds
 			}
 
 			if s3Bucket != "" {
@@ -130,8 +149,46 @@ func rootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&advertisePeerAddr, "advertise-peer", "", "address followers use to reach this node's peer stream (default: --peer-listen)")
 	cmd.Flags().IntVar(&leaderWatchIntervalSec, "leader-watch-interval-sec", 300, "how often (seconds) the leader reads the lock to detect supersession")
 	cmd.Flags().IntVar(&followerMaxRetries, "follower-max-retries", 5, "consecutive stream failures before a follower attempts a leader takeover")
+	// mTLS
+	cmd.Flags().StringVar(&peerTLSCA, "peer-tls-ca", "", "CA certificate file for peer mTLS (PEM)")
+	cmd.Flags().StringVar(&peerTLSCert, "peer-tls-cert", "", "node certificate file for peer mTLS (PEM)")
+	cmd.Flags().StringVar(&peerTLSKey, "peer-tls-key", "", "node private key file for peer mTLS (PEM)")
+	// observability
+	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "HTTP address for /metrics, /healthz, /readyz (e.g. 0.0.0.0:9090)")
 
 	return cmd
+}
+
+// buildPeerTLS constructs mTLS credentials for both the leader's gRPC server
+// and a follower's gRPC client from PEM files.
+// ca is the CA cert used to verify the peer; cert/key are this node's identity.
+func buildPeerTLS(ca, cert, key string) (serverCreds, clientCreds credentials.TransportCredentials, err error) {
+	tlsCert, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load cert/key: %w", err)
+	}
+
+	caPEM, err := os.ReadFile(ca)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read CA: %w", err)
+	}
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		return nil, nil, fmt.Errorf("parse CA cert")
+	}
+
+	serverTLS := &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caPool,
+		MinVersion:   tls.VersionTLS13,
+	}
+	clientTLS := &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		RootCAs:      caPool,
+		MinVersion:   tls.VersionTLS13,
+	}
+	return credentials.NewTLS(serverTLS), credentials.NewTLS(clientTLS), nil
 }
 
 func newS3Store(ctx context.Context, bucket, prefix, endpoint string) (*object.S3Store, error) {

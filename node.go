@@ -5,17 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 
 	"github.com/makhov/strata/internal/checkpoint"
 	"github.com/makhov/strata/internal/election"
+	"github.com/makhov/strata/internal/metrics"
 	"github.com/makhov/strata/internal/object"
 	"github.com/makhov/strata/internal/peer"
 	istore "github.com/makhov/strata/internal/store"
@@ -51,8 +54,8 @@ const (
 //
 // Follower mode:
 //
-//	Reads only — writes return ErrNotLeader.
-//	Receives WAL stream from leader, writes entries to local WAL and store.
+//	Reads are served locally. Writes are forwarded to the leader via the
+//	peer gRPC channel and the response is returned transparently to the caller.
 //	After persistent stream failure, attempts a TakeOver election.
 type Node struct {
 	cfg  Config
@@ -62,15 +65,18 @@ type Node struct {
 	db  *istore.Store
 	wal *wal.WAL // non-nil on leader/single; non-nil on follower (local WAL, no uploader)
 
-	// mu serialises all leader writes for CAS safety, and role transitions.
+	// mu serialises all leader writes for CAS safety and role transitions.
 	mu sync.Mutex
 
 	// leader-only
 	peerSrv *peer.Server
 	peerLis net.Listener
 
-	// follower-only; owned exclusively by followLoop after startup.
+	// follower-only (WAL stream); owned exclusively by followLoop after startup.
 	peerCli *peer.Client
+
+	// follower-only (write forwarding); updated atomically when leader changes.
+	leaderCli atomic.Pointer[peer.Client]
 
 	entriesSinceCheckpoint int64
 	cancelBg               context.CancelFunc
@@ -122,14 +128,10 @@ func Open(cfg Config) (*Node, error) {
 	}
 
 	// ── Open WAL ─────────────────────────────────────────────────────────────
-	// Leaders upload WAL segments to S3; followers use local WAL for crash
-	// recovery only (no uploader).
 	var uploader wal.Uploader
 	if cfg.ObjectStore != nil && cfg.PeerListenAddr == "" {
-		// single-node: always upload
 		uploader = makeUploader(cfg.ObjectStore)
 	}
-	// Multi-node: leader sets uploader after election; follower keeps nil.
 
 	w, err := wal.Open(walDir, term, startRev+1,
 		wal.WithUploader(uploader),
@@ -190,7 +192,54 @@ func Open(cfg Config) (*Node, error) {
 		go n.followLoop(bgCtx)
 	}
 
+	// ── Observability ─────────────────────────────────────────────────────────
+	n.updateMetrics()
+	if cfg.MetricsAddr != "" {
+		go n.serveMetrics(bgCtx, cfg.MetricsAddr)
+	}
+
 	return n, nil
+}
+
+// serveMetrics starts an HTTP server exposing /metrics, /healthz, /readyz.
+func (n *Node) serveMetrics(ctx context.Context, addr string) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if n.db.CurrentRevision() >= 0 {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+		}
+	})
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutCtx)
+	}()
+	logrus.Infof("strata: metrics listening on %s", addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logrus.Warnf("strata: metrics server: %v", err)
+	}
+}
+
+// updateMetrics refreshes the role and revision gauges.
+func (n *Node) updateMetrics() {
+	switch n.loadRole() {
+	case roleLeader:
+		metrics.SetRole("leader")
+	case roleFollower:
+		metrics.SetRole("follower")
+	default:
+		metrics.SetRole("single")
+	}
+	metrics.CurrentRevision.Set(float64(n.db.CurrentRevision()))
+	metrics.CompactRevision.Set(float64(n.db.CompactRevision()))
 }
 
 // electAndStart runs leader election and configures the node as leader or follower.
@@ -206,22 +255,22 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 	}
 
 	if won {
-		if err := n.becomeLeader(bgCtx, lock, rec); err != nil {
-			return err
-		}
-	} else {
-		n.storeRole(roleFollower)
-		n.peerCli = peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries)
-		logrus.Infof("strata: following leader at %s (term=%d)", rec.LeaderAddr, rec.Term)
+		return n.becomeLeader(bgCtx, lock, rec)
 	}
+
+	n.storeRole(roleFollower)
+	cli := peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS)
+	n.peerCli = cli
+	n.leaderCli.Store(cli)
+	metrics.ElectionsTotal.WithLabelValues("lost").Inc()
+	logrus.Infof("strata: following leader at %s (term=%d)", rec.LeaderAddr, rec.Term)
 	return nil
 }
 
 // becomeLeader transitions this node to leader role.
-// It re-opens the WAL with an S3 uploader, starts the peer gRPC server,
-// and launches the watchLoop. Must be called with n.mu not held.
+// Re-opens the WAL with an S3 uploader, starts the peer gRPC server,
+// and launches the watchLoop. Must NOT be called with n.mu held.
 func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord) error {
-	// Re-open WAL with the S3 uploader now that we know we're the leader.
 	n.wal.Close()
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	w2, err := wal.Open(walDir, rec.Term, n.db.CurrentRevision()+1,
@@ -234,38 +283,49 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	}
 	w2.Start(bgCtx)
 
-	// Start peer gRPC server for followers.
 	peerSrv := peer.NewServer(n.cfg.PeerBufferSize)
 	lis, err := net.Listen("tcp", n.cfg.PeerListenAddr)
 	if err != nil {
 		w2.Close()
 		return fmt.Errorf("strata: peer listen %s: %w", n.cfg.PeerListenAddr, err)
 	}
-	srv := grpc.NewServer(grpc.ForceServerCodec(peer.Codec{}))
-	peer.RegisterWalStreamServer(srv, peerSrv)
-	go func() {
-		if err := srv.Serve(lis); err != nil {
-			logrus.Warnf("strata: peer server: %v", err)
-		}
-	}()
+	serverOpts := []grpc.ServerOption{grpc.ForceServerCodec(peer.Codec{})}
+	if n.cfg.PeerServerTLS != nil {
+		serverOpts = append(serverOpts, grpc.Creds(n.cfg.PeerServerTLS))
+	}
+	grpcSrv := grpc.NewServer(serverOpts...)
+	peer.RegisterWalStreamServer(grpcSrv, peerSrv)
 
+	// Commit state transition atomically before accepting connections.
 	n.mu.Lock()
 	n.wal = w2
 	n.term = rec.Term
 	n.peerSrv = peerSrv
 	n.peerLis = lis
+	n.leaderCli.Store(nil) // leader does not forward writes
 	n.storeRole(roleLeader)
 	n.mu.Unlock()
 
+	// Install the forward handler after role is set to leader so that
+	// HandleForward sees the correct role and executes writes directly.
+	peerSrv.SetForwardHandler(n)
+
+	go func() {
+		if err := grpcSrv.Serve(lis); err != nil {
+			logrus.Warnf("strata: peer server: %v", err)
+		}
+	}()
+
+	n.updateMetrics()
+	metrics.ElectionsTotal.WithLabelValues("won").Inc()
 	logrus.Infof("strata: elected leader (term=%d, peer=%s)", rec.Term, n.cfg.PeerListenAddr)
 	go n.watchLoop(bgCtx, lock, rec.Term)
 	return nil
 }
 
-// watchLoop periodically reads the lock from S3 to detect if this node has
-// been superseded by a new election. It is read-only — no writes or renewals.
+// watchLoop periodically reads the lock from S3 to detect supersession.
 // Steps down (cancelBg) if the lock's term or owner changes.
-// On clean shutdown, releases the lock so a successor can acquire it immediately.
+// On clean shutdown, releases the lock.
 func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) {
 	ticker := time.NewTicker(n.cfg.LeaderWatchInterval)
 	defer ticker.Stop()
@@ -277,7 +337,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 			cancel()
 			if err != nil {
 				logrus.Warnf("strata: leader watch: read lock: %v", err)
-				continue // transient S3 error; keep going
+				continue
 			}
 			if rec == nil || rec.Term != term || rec.NodeID != n.cfg.NodeID {
 				logrus.Errorf("strata: leader watch: lock superseded (current: %+v) — stepping down", rec)
@@ -294,9 +354,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 }
 
 // followLoop receives WAL entries from the leader and applies them locally.
-// On ErrLeaderUnreachable it attempts a TakeOver election. If it wins it
-// transitions to leader in-process; if it loses it updates its client to
-// follow the new leader.
+// On ErrLeaderUnreachable it attempts a TakeOver election.
 func (n *Node) followLoop(bgCtx context.Context) {
 	lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
 	cli := n.peerCli
@@ -325,10 +383,13 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			logrus.Warn("strata: leader unreachable — attempting election takeover")
 			newCli, promoted := n.attemptPromotion(bgCtx, lock)
 			if promoted {
-				return // this goroutine's work is done; node is now leader
+				return
 			}
 			if newCli != nil {
+				oldCli := cli
 				cli = newCli
+				n.leaderCli.Store(newCli)
+				oldCli.Close()
 				logrus.Infof("strata: following new leader")
 			}
 			continue
@@ -343,12 +404,10 @@ func (n *Node) followLoop(bgCtx context.Context) {
 	}
 }
 
-// attemptPromotion tries to take over the leader lock after detecting the
-// current leader is unreachable.
-//
-// Returns (nil, true) if this node won and is now leader.
+// attemptPromotion tries to take over the leader lock after the stream dies.
+// Returns (nil, true) if promoted to leader.
 // Returns (newClient, false) if another node won; newClient follows that node.
-// Returns (nil, false) on S3 errors; caller should retry.
+// Returns (nil, false) on S3 errors.
 func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock) (*peer.Client, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -364,24 +423,138 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock) (*pe
 			logrus.Errorf("strata: promotion failed: %v", err)
 			return nil, false
 		}
-		// Start checkpoint loop now that we're leader.
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
 			go n.checkpointLoop(bgCtx)
 		}
 		return nil, true
 	}
 
-	// Another node won — follow it.
 	if rec != nil && rec.LeaderAddr != "" {
 		logrus.Infof("strata: lost election to %s (term=%d) — following", rec.NodeID, rec.Term)
-		return peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries), false
+		return peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS), false
 	}
 	return nil, false
+}
+
+// ── Write forwarding ──────────────────────────────────────────────────────────
+
+// HandleForward implements peer.ForwardHandler. Called by the peer gRPC server
+// when a follower forwards a write. Dispatches to the appropriate Node method.
+// Since HandleForward runs on the leader, all write methods execute directly.
+func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*peer.ForwardResponse, error) {
+	switch req.Op {
+	case peer.ForwardPut:
+		rev, err := n.Put(ctx, req.Key, req.Value, req.Lease)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Revision: rev, Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardCreate:
+		rev, err := n.Create(ctx, req.Key, req.Value, req.Lease)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Revision: rev, Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardUpdate:
+		newRev, oldKV, updated, err := n.Update(ctx, req.Key, req.Value, req.Revision, req.Lease)
+		code, msg := encodeErr(err)
+		resp := &peer.ForwardResponse{Revision: newRev, Succeeded: updated, ErrCode: code, ErrMsg: msg}
+		resp.OldKV = kvToMsg(oldKV)
+		return resp, nil
+
+	case peer.ForwardDeleteIfRevision:
+		newRev, oldKV, deleted, err := n.DeleteIfRevision(ctx, req.Key, req.Revision)
+		code, msg := encodeErr(err)
+		resp := &peer.ForwardResponse{Revision: newRev, Succeeded: deleted, ErrCode: code, ErrMsg: msg}
+		resp.OldKV = kvToMsg(oldKV)
+		return resp, nil
+
+	case peer.ForwardCompact:
+		err := n.Compact(ctx, req.Revision)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+	}
+	return nil, fmt.Errorf("strata: unknown forward op %d", req.Op)
+}
+
+// forwardWrite sends a write request to the leader and decodes the response.
+func (n *Node) forwardWrite(ctx context.Context, req *peer.ForwardRequest) (*peer.ForwardResponse, error) {
+	cli := n.leaderCli.Load()
+	if cli == nil {
+		return nil, ErrNotLeader
+	}
+	op := fwdOpLabel(req.Op)
+	start := time.Now()
+	resp, err := cli.ForwardWrite(ctx, req)
+	metrics.ForwardedWritesTotal.WithLabelValues(op).Inc()
+	metrics.ForwardDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	return resp, err
+}
+
+func fwdOpLabel(op peer.ForwardOp) string {
+	switch op {
+	case peer.ForwardPut:
+		return "put"
+	case peer.ForwardCreate:
+		return "create"
+	case peer.ForwardUpdate:
+		return "update"
+	case peer.ForwardDeleteIfRevision:
+		return "delete"
+	case peer.ForwardCompact:
+		return "compact"
+	default:
+		return "unknown"
+	}
+}
+
+func encodeErr(err error) (code, msg string) {
+	if err == nil {
+		return "", ""
+	}
+	if errors.Is(err, ErrKeyExists) {
+		return "key_exists", ""
+	}
+	return "error", err.Error()
+}
+
+func decodeErr(code, msg string) error {
+	switch code {
+	case "":
+		return nil
+	case "key_exists":
+		return ErrKeyExists
+	default:
+		return errors.New(msg)
+	}
+}
+
+func kvToMsg(kv *KeyValue) *peer.KVMsg {
+	if kv == nil {
+		return nil
+	}
+	return &peer.KVMsg{
+		Key: kv.Key, Value: kv.Value, Revision: kv.Revision,
+		CreateRevision: kv.CreateRevision, PrevRevision: kv.PrevRevision,
+		Lease: kv.Lease,
+	}
+}
+
+func msgToKV(m *peer.KVMsg) *KeyValue {
+	if m == nil {
+		return nil
+	}
+	return &KeyValue{
+		Key: m.Key, Value: m.Value, Revision: m.Revision,
+		CreateRevision: m.CreateRevision, PrevRevision: m.PrevRevision,
+		Lease: m.Lease,
+	}
 }
 
 // Close shuts down the node cleanly.
 func (n *Node) Close() error {
 	n.cancelBg()
+	if cli := n.leaderCli.Load(); cli != nil {
+		cli.Close()
+	}
 	if n.peerLis != nil {
 		n.peerLis.Close()
 	}
@@ -391,19 +564,16 @@ func (n *Node) Close() error {
 	return n.db.Close()
 }
 
-// ── Write path (leader / single-node only) ────────────────────────────────────
-
-func (n *Node) requireLeader() error {
-	if n.loadRole() == roleFollower {
-		return ErrNotLeader
-	}
-	return nil
-}
+// ── Write path (leader / single-node execute; follower forwards) ──────────────
 
 // Put creates or updates key with value. Returns the new revision.
 func (n *Node) Put(ctx context.Context, key string, value []byte, lease int64) (int64, error) {
-	if err := n.requireLeader(); err != nil {
-		return 0, err
+	if n.loadRole() == roleFollower {
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardPut, Key: key, Value: value, Lease: lease})
+		if err != nil {
+			return 0, err
+		}
+		return resp.Revision, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -433,8 +603,12 @@ func (n *Node) putLocked(key string, value []byte, lease int64) (int64, error) {
 
 // Create creates key only if it does not already exist.
 func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64) (int64, error) {
-	if err := n.requireLeader(); err != nil {
-		return 0, err
+	if n.loadRole() == roleFollower {
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardCreate, Key: key, Value: value, Lease: lease})
+		if err != nil {
+			return 0, err
+		}
+		return resp.Revision, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -455,8 +629,12 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 
 // Update updates key only if its current revision matches (CAS).
 func (n *Node) Update(ctx context.Context, key string, value []byte, revision, lease int64) (int64, *KeyValue, bool, error) {
-	if err := n.requireLeader(); err != nil {
-		return 0, nil, false, err
+	if n.loadRole() == roleFollower {
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardUpdate, Key: key, Value: value, Revision: revision, Lease: lease})
+		if err != nil {
+			return 0, nil, false, err
+		}
+		return resp.Revision, msgToKV(resp.OldKV), resp.Succeeded, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -481,8 +659,12 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 
 // Delete removes key unconditionally.
 func (n *Node) Delete(ctx context.Context, key string) (int64, error) {
-	if err := n.requireLeader(); err != nil {
-		return 0, err
+	if n.loadRole() == roleFollower {
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardDeleteIfRevision, Key: key, Revision: 0})
+		if err != nil {
+			return 0, err
+		}
+		return resp.Revision, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -491,8 +673,12 @@ func (n *Node) Delete(ctx context.Context, key string) (int64, error) {
 
 // DeleteIfRevision deletes key only if its current revision matches (CAS).
 func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64) (int64, *KeyValue, bool, error) {
-	if err := n.requireLeader(); err != nil {
-		return 0, nil, false, err
+	if n.loadRole() == roleFollower {
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardDeleteIfRevision, Key: key, Revision: revision})
+		if err != nil {
+			return 0, nil, false, err
+		}
+		return resp.Revision, msgToKV(resp.OldKV), resp.Succeeded, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -526,14 +712,36 @@ func (n *Node) deleteLocked(key string) (int64, error) {
 	})
 }
 
+func opLabel(op wal.Op) string {
+	switch op {
+	case wal.OpCreate:
+		return "create"
+	case wal.OpUpdate:
+		return "update"
+	case wal.OpDelete:
+		return "delete"
+	case wal.OpCompact:
+		return "compact"
+	default:
+		return "unknown"
+	}
+}
+
 // appendAndApply writes e to WAL, applies to store, and broadcasts to followers.
 func (n *Node) appendAndApply(e wal.Entry) (int64, error) {
+	op := opLabel(e.Op)
+	start := time.Now()
 	if err := n.wal.Append(&e); err != nil {
+		metrics.WriteErrors.WithLabelValues(op).Inc()
 		return 0, fmt.Errorf("strata: wal append: %w", err)
 	}
 	if err := n.db.Apply([]wal.Entry{e}); err != nil {
+		metrics.WriteErrors.WithLabelValues(op).Inc()
 		return 0, fmt.Errorf("strata: apply: %w", err)
 	}
+	metrics.WritesTotal.WithLabelValues(op).Inc()
+	metrics.WriteDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	metrics.CurrentRevision.Set(float64(e.Revision))
 	atomic.AddInt64(&n.entriesSinceCheckpoint, 1)
 	if n.peerSrv != nil {
 		n.peerSrv.Broadcast(&e)
@@ -541,7 +749,33 @@ func (n *Node) appendAndApply(e wal.Entry) (int64, error) {
 	return e.Revision, nil
 }
 
-// ── Read path (all roles) ─────────────────────────────────────────────────────
+// Compact removes log entries at or below revision.
+func (n *Node) Compact(ctx context.Context, revision int64) error {
+	if n.loadRole() == roleFollower {
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardCompact, Revision: revision})
+		if err != nil {
+			return err
+		}
+		return decodeErr(resp.ErrCode, resp.ErrMsg)
+	}
+	curRev := n.db.CurrentRevision()
+	e := wal.Entry{
+		Revision: curRev + 1, Term: n.term, Op: wal.OpCompact,
+		PrevRevision: revision,
+	}
+	if err := n.wal.Append(&e); err != nil {
+		return fmt.Errorf("strata: compact wal append: %w", err)
+	}
+	if err := n.db.Apply([]wal.Entry{e}); err != nil {
+		return err
+	}
+	if n.peerSrv != nil {
+		n.peerSrv.Broadcast(&e)
+	}
+	return nil
+}
+
+// ── Read path (all roles serve locally) ──────────────────────────────────────
 
 func (n *Node) Get(key string) (*KeyValue, error) {
 	sv, err := n.db.Get(key)
@@ -600,28 +834,6 @@ func (n *Node) Watch(ctx context.Context, prefix string, startRev int64) (<-chan
 	return out, nil
 }
 
-// Compact removes log entries at or below revision.
-func (n *Node) Compact(ctx context.Context, revision int64) error {
-	if err := n.requireLeader(); err != nil {
-		return err
-	}
-	curRev := n.db.CurrentRevision()
-	e := wal.Entry{
-		Revision: curRev + 1, Term: n.term, Op: wal.OpCompact,
-		PrevRevision: revision,
-	}
-	if err := n.wal.Append(&e); err != nil {
-		return fmt.Errorf("strata: compact wal append: %w", err)
-	}
-	if err := n.db.Apply([]wal.Entry{e}); err != nil {
-		return err
-	}
-	if n.peerSrv != nil {
-		n.peerSrv.Broadcast(&e)
-	}
-	return nil
-}
-
 // ── Background checkpoint loop ────────────────────────────────────────────────
 
 func (n *Node) checkpointLoop(ctx context.Context) {
@@ -654,7 +866,19 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		return
 	}
 	atomic.StoreInt64(&n.entriesSinceCheckpoint, 0)
+	metrics.CheckpointsTotal.Inc()
 	logrus.Infof("strata: checkpoint written (rev=%d)", rev)
+
+	// GC WAL segments from S3 that are fully covered by this checkpoint.
+	gcCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	deleted, gcErr := wal.GCSegments(gcCtx, n.cfg.ObjectStore, rev)
+	if gcErr != nil {
+		logrus.Warnf("strata: wal gc: %v", gcErr)
+	} else if deleted > 0 {
+		metrics.WALGCTotal.Add(float64(deleted))
+		logrus.Infof("strata: wal gc: deleted %d segments (covered by checkpoint rev=%d)", deleted, rev)
+	}
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -674,12 +898,17 @@ func makeUploader(obj object.Store) wal.Uploader {
 	return func(ctx context.Context, localPath, objectKey string) error {
 		f, err := os.Open(localPath)
 		if err != nil {
+			metrics.WALUploadErrors.Inc()
 			return fmt.Errorf("uploader: open %q: %w", localPath, err)
 		}
 		defer f.Close()
+		start := time.Now()
 		if err := obj.Put(ctx, objectKey, f); err != nil {
+			metrics.WALUploadErrors.Inc()
 			return err
 		}
+		metrics.WALUploadsTotal.Inc()
+		metrics.WALUploadDuration.Observe(time.Since(start).Seconds())
 		return os.Remove(localPath)
 	}
 }
