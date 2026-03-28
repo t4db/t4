@@ -104,7 +104,6 @@ func TestScaleDownUpConsistency(t *testing.T) {
 	}
 
 	leader := waitForLeaderNode(t, nodes, 15*time.Second)
-	t.Cleanup(func() { leader.Close() })
 	t.Logf("phase-1 leader: %s", nodeID(nodes, leader))
 
 	// Write 20 keys.
