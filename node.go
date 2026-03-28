@@ -61,6 +61,27 @@ const (
 //	Reads are served locally. Writes are forwarded to the leader via the
 //	peer gRPC channel and the response is returned transparently to the caller.
 //	After persistent stream failure, attempts a TakeOver election.
+//
+// writeReq is a single write request sent to the commit loop.
+type writeReq struct {
+	entry wal.Entry
+	done  chan error
+}
+
+func newWriteReq(e wal.Entry) *writeReq {
+	return &writeReq{entry: e, done: make(chan error, 1)}
+}
+
+// pendingKV tracks an in-flight write that has been assigned a revision and
+// queued to the commit loop but not yet applied to Pebble. Reads under n.mu
+// check this map first so concurrent writes to the same key see each other's
+// in-progress state.
+type pendingKV struct {
+	rev     int64
+	deleted bool             // true for pending deletes
+	kv      *istore.KeyValue // valid when !deleted
+}
+
 type Node struct {
 	cfg  Config
 	term uint64
@@ -71,6 +92,19 @@ type Node struct {
 
 	// mu serialises all leader writes for CAS safety and role transitions.
 	mu sync.Mutex
+
+	// nextRev is the last revision assigned to a write. Incremented under mu
+	// before the entry is sent to the commit loop. Replaces n.db.CurrentRevision()+1
+	// on the write path so that in-flight entries have distinct revisions.
+	nextRev int64
+
+	// pending holds in-flight writes that have been assigned a revision but
+	// not yet applied to Pebble. Protected by mu.
+	pending map[string]pendingKV
+
+	// writeC is the channel to the commit loop (group-commit WAL + Pebble apply).
+	// Only used when the node is leader or single.
+	writeC chan *writeReq
 
 	// leader-only
 	peerSrv  *peer.Server
@@ -255,6 +289,9 @@ func Open(cfg Config) (*Node, error) {
 		db:       db,
 		wal:      w,
 		cancelBg: bgCancel,
+		nextRev:  db.CurrentRevision(),
+		pending:  make(map[string]pendingKV),
+		writeC:   make(chan *writeReq, 1024),
 	}
 
 	w.Start(bgCtx)
@@ -272,6 +309,10 @@ func Open(cfg Config) (*Node, error) {
 	}
 
 	// ── Background jobs ──────────────────────────────────────────────────────
+	if n.loadRole() != roleFollower {
+		n.bgWg.Add(1)
+		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
+	}
 	if n.loadRole() != roleFollower && cfg.ObjectStore != nil && cfg.CheckpointInterval > 0 {
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()
@@ -420,6 +461,8 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.peerGRPC = grpcSrv
 	n.leaderCli.Store(nil) // leader does not forward writes
 	n.storeRole(roleLeader)
+	n.nextRev = n.db.CurrentRevision() // sync revision counter after any replay
+	n.pending = make(map[string]pendingKV)
 	n.mu.Unlock()
 
 	// Install the forward handler after role is set to leader so that
@@ -544,6 +587,8 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock) (*pe
 			logrus.Errorf("strata: promotion failed: %v", err)
 			return nil, false
 		}
+		n.bgWg.Add(1)
+		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
 			n.bgWg.Add(1)
 			go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()
@@ -714,18 +759,27 @@ func (n *Node) Put(ctx context.Context, key string, value []byte, lease int64) (
 		}
 		return resp.Revision, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
+	start := time.Now()
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.putLocked(key, value, lease)
-}
-
-func (n *Node) putLocked(key string, value []byte, lease int64) (int64, error) {
-	existing, err := n.db.Get(key)
+	e, err := n.preparePut(key, value, lease)
 	if err != nil {
+		n.mu.Unlock()
 		return 0, err
 	}
-	curRev := n.db.CurrentRevision()
-	newRev := curRev + 1
+	req := newWriteReq(e)
+	n.writeC <- req
+	n.mu.Unlock()
+	return n.await(ctx, req, opLabel(e.Op), start, key, e.Revision)
+}
+
+// preparePut builds the WAL entry for a Put. Must be called under n.mu.
+func (n *Node) preparePut(key string, value []byte, lease int64) (wal.Entry, error) {
+	existing, err := n.readKey(key)
+	if err != nil {
+		return wal.Entry{}, err
+	}
+	n.nextRev++
+	newRev := n.nextRev
 	var op wal.Op
 	var createRev, prevRev int64
 	if existing == nil {
@@ -733,11 +787,19 @@ func (n *Node) putLocked(key string, value []byte, lease int64) (int64, error) {
 	} else {
 		op, createRev, prevRev = wal.OpUpdate, existing.CreateRevision, existing.Revision
 	}
-	return n.appendAndApply(wal.Entry{
+	n.pending[key] = pendingKV{
+		rev: newRev,
+		kv: &istore.KeyValue{
+			Key: key, Value: value, Revision: newRev,
+			CreateRevision: createRev, PrevRevision: prevRev,
+			Lease: lease,
+		},
+	}
+	return wal.Entry{
 		Revision: newRev, Term: n.term, Op: op,
 		Key: key, Value: value, Lease: lease,
 		CreateRevision: createRev, PrevRevision: prevRev,
-	})
+	}, nil
 }
 
 // Create creates key only if it does not already exist.
@@ -749,21 +811,34 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 		}
 		return resp.Revision, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
+	start := time.Now()
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	existing, err := n.db.Get(key)
+	existing, err := n.readKey(key)
 	if err != nil {
+		n.mu.Unlock()
 		return 0, err
 	}
 	if existing != nil {
+		n.mu.Unlock()
 		return 0, ErrKeyExists
 	}
-	curRev := n.db.CurrentRevision()
-	newRev := curRev + 1
-	return n.appendAndApply(wal.Entry{
+	n.nextRev++
+	newRev := n.nextRev
+	n.pending[key] = pendingKV{
+		rev: newRev,
+		kv: &istore.KeyValue{
+			Key: key, Value: value, Revision: newRev,
+			CreateRevision: newRev, Lease: lease,
+		},
+	}
+	e := wal.Entry{
 		Revision: newRev, Term: n.term, Op: wal.OpCreate,
 		Key: key, Value: value, Lease: lease, CreateRevision: newRev,
-	})
+	}
+	req := newWriteReq(e)
+	n.writeC <- req
+	n.mu.Unlock()
+	return n.await(ctx, req, "create", start, key, newRev)
 }
 
 // Update updates key only if its current revision matches (CAS).
@@ -775,25 +850,42 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 		}
 		return resp.Revision, msgToKV(resp.OldKV), resp.Succeeded, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
+	start := time.Now()
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	existing, err := n.db.Get(key)
+	existing, err := n.readKey(key)
 	if err != nil {
+		n.mu.Unlock()
 		return 0, nil, false, err
 	}
-	curRev := n.db.CurrentRevision()
 	if existing == nil || existing.Revision != revision {
+		curRev := n.db.CurrentRevision()
+		n.mu.Unlock()
 		return curRev, toKV(existing), false, nil
 	}
-	newRev, err := n.appendAndApply(wal.Entry{
-		Revision: curRev + 1, Term: n.term, Op: wal.OpUpdate,
+	n.nextRev++
+	newRev := n.nextRev
+	n.pending[key] = pendingKV{
+		rev: newRev,
+		kv: &istore.KeyValue{
+			Key: key, Value: value, Revision: newRev,
+			CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision,
+			Lease: lease,
+		},
+	}
+	e := wal.Entry{
+		Revision: newRev, Term: n.term, Op: wal.OpUpdate,
 		Key: key, Value: value, Lease: lease,
 		CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision,
-	})
+	}
+	oldKV := toKV(existing)
+	req := newWriteReq(e)
+	n.writeC <- req
+	n.mu.Unlock()
+	newRev, err = n.await(ctx, req, "update", start, key, newRev)
 	if err != nil {
 		return 0, nil, false, err
 	}
-	return newRev, toKV(existing), true, nil
+	return newRev, oldKV, true, nil
 }
 
 // Delete removes key unconditionally.
@@ -805,9 +897,17 @@ func (n *Node) Delete(ctx context.Context, key string) (int64, error) {
 		}
 		return resp.Revision, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
+	start := time.Now()
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.deleteLocked(key)
+	e, err := n.prepareDelete(key)
+	if err != nil || e.Key == "" {
+		n.mu.Unlock()
+		return 0, err // key not found — no-op
+	}
+	req := newWriteReq(e)
+	n.writeC <- req
+	n.mu.Unlock()
+	return n.await(ctx, req, "delete", start, key, e.Revision)
 }
 
 // DeleteIfRevision deletes key only if its current revision matches (CAS).
@@ -819,36 +919,64 @@ func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64)
 		}
 		return resp.Revision, msgToKV(resp.OldKV), resp.Succeeded, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
+	start := time.Now()
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	existing, err := n.db.Get(key)
+	existing, err := n.readKey(key)
 	if err != nil {
+		n.mu.Unlock()
 		return 0, nil, false, err
 	}
 	curRev := n.db.CurrentRevision()
 	if existing == nil {
+		n.mu.Unlock()
 		return curRev, nil, false, nil
 	}
 	if revision != 0 && existing.Revision != revision {
+		n.mu.Unlock()
 		return curRev, toKV(existing), false, nil
 	}
-	newRev, err := n.deleteLocked(key)
+	oldKV := toKV(existing)
+	e, err := n.prepareDelete(key)
+	if err != nil || e.Key == "" {
+		n.mu.Unlock()
+		return 0, nil, false, err
+	}
+	req := newWriteReq(e)
+	n.writeC <- req
+	n.mu.Unlock()
+	newRev, err := n.await(ctx, req, "delete", start, key, e.Revision)
 	if err != nil {
 		return 0, nil, false, err
 	}
-	return newRev, toKV(existing), true, nil
+	return newRev, oldKV, true, nil
 }
 
-func (n *Node) deleteLocked(key string) (int64, error) {
-	existing, err := n.db.Get(key)
+// prepareDelete builds a WAL delete entry for key. Must be called under n.mu.
+// Returns a zero-valued entry (Key=="") if the key does not exist.
+func (n *Node) prepareDelete(key string) (wal.Entry, error) {
+	existing, err := n.readKey(key)
 	if err != nil || existing == nil {
-		return 0, err
+		return wal.Entry{}, err
 	}
-	curRev := n.db.CurrentRevision()
-	return n.appendAndApply(wal.Entry{
-		Revision: curRev + 1, Term: n.term, Op: wal.OpDelete,
+	n.nextRev++
+	newRev := n.nextRev
+	n.pending[key] = pendingKV{rev: newRev, deleted: true}
+	return wal.Entry{
+		Revision: newRev, Term: n.term, Op: wal.OpDelete,
 		Key: key, CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision,
-	})
+	}, nil
+}
+
+// readKey returns the current value of key, checking in-flight pending writes
+// first, then falling back to Pebble. Must be called under n.mu.
+func (n *Node) readKey(key string) (*istore.KeyValue, error) {
+	if p, ok := n.pending[key]; ok {
+		if p.deleted {
+			return nil, nil
+		}
+		return p.kv, nil
+	}
+	return n.db.Get(key)
 }
 
 func opLabel(op wal.Op) string {
@@ -866,26 +994,107 @@ func opLabel(op wal.Op) string {
 	}
 }
 
-// appendAndApply writes e to WAL, applies to store, and broadcasts to followers.
-func (n *Node) appendAndApply(e wal.Entry) (int64, error) {
-	op := opLabel(e.Op)
-	start := time.Now()
-	if err := n.wal.Append(&e); err != nil {
-		metrics.WriteErrors.WithLabelValues(op).Inc()
-		return 0, fmt.Errorf("strata: wal append: %w", err)
+// await waits for a commit-loop result. req must have been sent to writeC
+// before n.mu was released. key and rev identify the pending map entry to
+// remove once the commit completes (pass key=="" for Compact which has none).
+func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.Time, key string, rev int64) (int64, error) {
+	cleanPending := func() {
+		if key != "" {
+			n.mu.Lock()
+			if p, ok := n.pending[key]; ok && p.rev == rev {
+				delete(n.pending, key)
+			}
+			n.mu.Unlock()
+		}
 	}
-	if err := n.db.Apply([]wal.Entry{e}); err != nil {
+	var err error
+	select {
+	case err = <-req.done:
+	case <-ctx.Done():
+		// Entry is already queued; drain done in background so the commit loop
+		// is never blocked, and clean up the pending entry asynchronously.
+		go func() { <-req.done; cleanPending() }()
+		return 0, ctx.Err()
+	}
+	cleanPending()
+	if err != nil {
 		metrics.WriteErrors.WithLabelValues(op).Inc()
-		return 0, fmt.Errorf("strata: apply: %w", err)
+		return 0, fmt.Errorf("strata: commit: %w", err)
 	}
 	metrics.WritesTotal.WithLabelValues(op).Inc()
 	metrics.WriteDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
-	metrics.CurrentRevision.Set(float64(e.Revision))
+	metrics.CurrentRevision.Set(float64(rev))
 	atomic.AddInt64(&n.entriesSinceCheckpoint, 1)
-	if n.peerSrv != nil {
-		n.peerSrv.Broadcast(&e)
+	return rev, nil
+}
+
+// commitLoop is the group-commit pipeline for leader/single-node writes.
+// It drains writeC, writes all entries to WAL with a single fsync, applies
+// them to Pebble as a batch, and signals each caller's done channel.
+func (n *Node) commitLoop(ctx context.Context) {
+	defer func() {
+		// Drain any remaining requests and return an error to callers.
+		for {
+			select {
+			case req := <-n.writeC:
+				req.done <- ErrClosed
+			default:
+				return
+			}
+		}
+	}()
+
+	for {
+		// Block until at least one request arrives.
+		var batch []*writeReq
+		select {
+		case req := <-n.writeC:
+			batch = append(batch, req)
+		case <-ctx.Done():
+			return
+		}
+		// Drain any additional requests that arrived while we were processing.
+	drain:
+		for {
+			select {
+			case req := <-n.writeC:
+				batch = append(batch, req)
+			default:
+				break drain
+			}
+		}
+
+		// Write all entries to WAL with one fsync.
+		entries := make([]*wal.Entry, len(batch))
+		for i, req := range batch {
+			entries[i] = &req.entry
+		}
+		err := n.wal.AppendBatch(entries)
+
+		// Apply all entries to Pebble as one batch (in order).
+		if err == nil {
+			dbEntries := make([]wal.Entry, len(batch))
+			for i, req := range batch {
+				dbEntries[i] = req.entry
+			}
+			err = n.db.Apply(dbEntries)
+		}
+
+		// Broadcast to followers in revision order before unblocking callers.
+		// This must happen here (not in each caller's goroutine) because the
+		// peer server's maxSent dedup filter drops entries with rev <= maxSent;
+		// if callers broadcast concurrently they can send out of order.
+		if err == nil && n.peerSrv != nil {
+			for _, req := range batch {
+				n.peerSrv.Broadcast(&req.entry)
+			}
+		}
+
+		// Signal all callers.
+		for _, req := range batch {
+			req.done <- err
+		}
 	}
-	return e.Revision, nil
 }
 
 // Compact removes log entries at or below revision.
@@ -897,23 +1106,18 @@ func (n *Node) Compact(ctx context.Context, revision int64) error {
 		}
 		return decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
+	start := time.Now()
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	curRev := n.db.CurrentRevision()
+	n.nextRev++
 	e := wal.Entry{
-		Revision: curRev + 1, Term: n.term, Op: wal.OpCompact,
+		Revision: n.nextRev, Term: n.term, Op: wal.OpCompact,
 		PrevRevision: revision,
 	}
-	if err := n.wal.Append(&e); err != nil {
-		return fmt.Errorf("strata: compact wal append: %w", err)
-	}
-	if err := n.db.Apply([]wal.Entry{e}); err != nil {
-		return err
-	}
-	if n.peerSrv != nil {
-		n.peerSrv.Broadcast(&e)
-	}
-	return nil
+	req := newWriteReq(e)
+	n.writeC <- req
+	n.mu.Unlock()
+	_, err := n.await(ctx, req, "compact", start, "", e.Revision)
+	return err
 }
 
 // ── Read path (all roles serve locally) ──────────────────────────────────────

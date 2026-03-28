@@ -124,6 +124,29 @@ func (w *WAL) Append(e *Entry) error {
 	return nil
 }
 
+// AppendBatch writes all entries to the active segment and fsyncs once.
+// This amortises the fsync cost across all entries in the batch.
+// Safe to call concurrently; writes are serialised under the mutex.
+func (w *WAL) AppendBatch(entries []*Entry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return fmt.Errorf("wal: closed")
+	}
+	for _, e := range entries {
+		if err := w.active.AppendNoSync(e); err != nil {
+			return err
+		}
+	}
+	if err := w.active.Sync(); err != nil {
+		return err
+	}
+	if w.active.Size() >= w.segMaxSize {
+		w.rotateLocked()
+	}
+	return nil
+}
+
 // rotateLocked seals the active segment and opens a fresh one.
 // Must be called with w.mu held.
 func (w *WAL) rotateLocked() {

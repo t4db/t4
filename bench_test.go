@@ -3,6 +3,7 @@ package strata_test
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/makhov/strata"
@@ -113,6 +114,24 @@ func BenchmarkList(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// BenchmarkPutParallel measures Put throughput with concurrent writers.
+// Group-commit batches concurrent writes into a single WAL fsync, so this
+// benchmark is where the Option-A improvement shows up.
+func BenchmarkPutParallel(b *testing.B) {
+	n := openBenchNode(b)
+	ctx := context.Background()
+	var counter atomic.Int64
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			i := counter.Add(1)
+			if _, err := n.Put(ctx, fmt.Sprintf("/bench/par/%d", i), []byte("value"), 0); err != nil {
+				b.Error(err)
+			}
+		}
+	})
 }
 
 func BenchmarkWatch(b *testing.B) {

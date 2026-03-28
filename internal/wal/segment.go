@@ -80,6 +80,27 @@ func (sw *SegmentWriter) Append(e *Entry) error {
 	return nil
 }
 
+// AppendNoSync writes e to the segment without fsyncing.
+// The caller must call Sync after writing all entries to ensure durability.
+func (sw *SegmentWriter) AppendNoSync(e *Entry) error {
+	var buf bytes.Buffer
+	if err := AppendEntry(&buf, e); err != nil {
+		return err
+	}
+	b := buf.Bytes()
+	if _, err := sw.f.Write(b); err != nil {
+		return fmt.Errorf("wal: write entry rev=%d: %w", e.Revision, err)
+	}
+	sw.size += int64(len(b))
+	sw.entryCount++
+	return nil
+}
+
+// Sync fsyncs the segment file.
+func (sw *SegmentWriter) Sync() error {
+	return sw.f.Sync()
+}
+
 // Close closes the underlying file without sealing.
 // Call this only when the segment will not be uploaded (e.g. on error).
 func (sw *SegmentWriter) Close() error { return sw.f.Close() }
