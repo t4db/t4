@@ -144,7 +144,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			maxRev = e.Revision
 		}
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
+	if err := b.Commit(pebble.NoSync); err != nil {
 		b.Close()
 		return fmt.Errorf("store: commit batch: %w", err)
 	}
