@@ -42,6 +42,7 @@ var (
 	ErrKeyExists = errors.New("strata: key already exists")
 	ErrNotLeader = errors.New("strata: this node is not the leader; writes are rejected")
 	ErrClosed    = errors.New("strata: node is closed")
+	ErrCompacted = errors.New("strata: required revision has been compacted")
 )
 
 // nodeRole identifies whether the node is leader, follower, or single-node.
@@ -1257,6 +1258,9 @@ func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
 }
 
 func (n *Node) Watch(ctx context.Context, prefix string, startRev int64) (<-chan Event, error) {
+	if startRev > 0 && startRev < n.db.CompactRevision() {
+		return nil, ErrCompacted
+	}
 	sch, err := n.db.Watch(ctx, prefix, startRev)
 	if err != nil {
 		return nil, err

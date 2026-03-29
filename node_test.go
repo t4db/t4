@@ -349,6 +349,33 @@ func TestNodeCompact(t *testing.T) {
 	}
 }
 
+func TestWatchCompactedRevisionReturnsError(t *testing.T) {
+	n := openNode(t)
+	c := ctx(t)
+
+	n.Put(c, "k", []byte("v1"), 0) // rev 1
+	n.Put(c, "k", []byte("v2"), 0) // rev 2
+	n.Put(c, "k", []byte("v3"), 0) // rev 3
+
+	if err := n.Compact(c, 2); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	// Watch from a revision that has been compacted must return ErrCompacted.
+	_, err := n.Watch(c, "k", 1)
+	if !errors.Is(err, strata.ErrCompacted) {
+		t.Errorf("Watch from compacted rev: want ErrCompacted, got %v", err)
+	}
+
+	// Watch from exactly the compact watermark is fine (delivers from rev 3+).
+	ch, err := n.Watch(c, "k", 2)
+	if err != nil {
+		t.Errorf("Watch from compact watermark: unexpected error %v", err)
+	} else {
+		_ = ch
+	}
+}
+
 // ── Revision monotonicity ─────────────────────────────────────────────────────
 
 func TestRevisionMonotonicity(t *testing.T) {

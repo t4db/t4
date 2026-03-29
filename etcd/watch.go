@@ -2,9 +2,12 @@ package etcd
 
 import (
 	"context"
+	"errors"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+
+	"github.com/makhov/strata"
 )
 
 // Watch implements WatchServer.Watch (bidirectional streaming).
@@ -60,6 +63,19 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 
 			go func(watchID int64, startRev int64) {
 				events, err := s.node.Watch(wctx, string(cr.Key), startRev)
+				if errors.Is(err, strata.ErrCompacted) {
+					select {
+					case sendCh <- &etcdserverpb.WatchResponse{
+						Header:          s.header(),
+						WatchId:         watchID,
+						Canceled:        true,
+						CancelReason:    "mvcc: required revision has been compacted",
+						CompactRevision: s.node.CompactRevision(),
+					}:
+					case <-wctx.Done():
+					}
+					return
+				}
 				if err != nil {
 					return
 				}
