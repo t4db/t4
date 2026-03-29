@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,6 +14,9 @@ import (
 	"github.com/makhov/strata/internal/wal"
 	"github.com/sirupsen/logrus"
 )
+
+// ErrClosed is returned by WaitForRevision when the store has been closed.
+var ErrClosed = errors.New("store: closed")
 
 // Store is the Pebble-backed state machine.
 //
@@ -26,8 +30,11 @@ type Store struct {
 	compactRev int64
 
 	// mu protects notify and the watchpoint map.
-	mu     sync.RWMutex
-	notify chan struct{} // closed and replaced on each revision advance
+	mu        sync.RWMutex
+	notify    chan struct{} // closed and replaced on each revision advance
+	closed    chan struct{} // closed once when Store.Close is called
+	closeOnce sync.Once
+	watcherWg sync.WaitGroup // tracks active watchLoop goroutines
 }
 
 // lockRetryTimeout is how long Open retries when another process holds the
@@ -46,7 +53,7 @@ func Open(dir string) (*Store, error) {
 	for {
 		db, err := pebble.Open(dir, &pebble.Options{})
 		if err == nil {
-			s := &Store{db: db, notify: make(chan struct{})}
+			s := &Store{db: db, notify: make(chan struct{}), closed: make(chan struct{})}
 			if err := s.loadMeta(); err != nil {
 				db.Close()
 				return nil, err
@@ -73,7 +80,7 @@ func OpenMem() (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open in-memory pebble: %w", err)
 	}
-	return &Store{db: db, notify: make(chan struct{})}, nil
+	return &Store{db: db, notify: make(chan struct{}), closed: make(chan struct{})}, nil
 }
 
 // loadMeta reads the compact revision from Pebble, and derives the current
@@ -103,8 +110,20 @@ func (s *Store) loadMeta() error {
 	return nil
 }
 
+// SignalClose closes the s.closed channel (idempotent). It unblocks any
+// goroutines waiting in WaitForRevision or watchLoop without closing Pebble.
+// node.Close calls this before waiting on readWg so that in-flight
+// WaitForRevision callers (which hold readWg) can return ErrClosed promptly.
+func (s *Store) SignalClose() {
+	s.closeOnce.Do(func() { close(s.closed) })
+}
+
 // Close closes the underlying Pebble database.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.SignalClose()
+	s.watcherWg.Wait()
+	return s.db.Close()
+}
 
 // Pebble exposes the underlying *pebble.DB for checkpoint creation.
 func (s *Store) Pebble() *pebble.DB { return s.db }
@@ -292,12 +311,15 @@ func (s *Store) waitChan() <-chan struct{} {
 	return ch
 }
 
-// WaitForRevision blocks until currentRev >= rev or ctx is cancelled.
+// WaitForRevision blocks until currentRev >= rev, ctx is cancelled, or the
+// store is closed.
 func (s *Store) WaitForRevision(ctx context.Context, rev int64) error {
 	for atomic.LoadInt64(&s.currentRev) < rev {
 		ch := s.waitChan()
 		select {
 		case <-ch:
+		case <-s.closed:
+			return ErrClosed
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -421,11 +443,13 @@ type Event struct {
 // The channel is closed when ctx is cancelled.
 func (s *Store) Watch(ctx context.Context, prefix string, startRev int64) (<-chan Event, error) {
 	ch := make(chan Event, 64)
+	s.watcherWg.Add(1)
 	go s.watchLoop(ctx, prefix, startRev, ch)
 	return ch, nil
 }
 
 func (s *Store) watchLoop(ctx context.Context, prefix string, startRev int64, ch chan<- Event) {
+	defer s.watcherWg.Done()
 	defer close(ch)
 
 	nextRev := startRev + 1
@@ -444,6 +468,8 @@ func (s *Store) watchLoop(ctx context.Context, prefix string, startRev int64, ch
 		for _, ev := range events {
 			select {
 			case ch <- ev:
+			case <-s.closed:
+				return
 			case <-ctx.Done():
 				return
 			}

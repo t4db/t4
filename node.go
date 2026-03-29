@@ -742,6 +742,12 @@ func (n *Node) Close() error {
 		} else if n.peerLis != nil {
 			n.peerLis.Close()
 		}
+		// Signal the store's closed channel now, before waiting on readWg.
+		// This unblocks any goroutines blocked in store.WaitForRevision (which
+		// hold a readWg count) so they can return ErrClosed immediately instead
+		// of waiting until the context expires — which would cause readWg.Wait()
+		// to block for tens of seconds and deadlock Close().
+		n.db.SignalClose()
 		// Wait for followLoop / checkpointLoop to exit before closing WAL and
 		// DB. cancelBg has already been called above, so the loops will drain
 		// promptly; we just need to avoid closing DB under a concurrent Apply.
@@ -1254,11 +1260,17 @@ func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
 	if n.closed.Load() {
 		return ErrClosed
 	}
-	return n.db.WaitForRevision(ctx, rev)
+	if err := n.db.WaitForRevision(ctx, rev); err != nil {
+		if errors.Is(err, istore.ErrClosed) {
+			return ErrClosed
+		}
+		return err
+	}
+	return nil
 }
 
 func (n *Node) Watch(ctx context.Context, prefix string, startRev int64) (<-chan Event, error) {
-	if startRev > 0 && startRev < n.db.CompactRevision() {
+	if startRev > 0 && startRev < n.db.CompactRevision()-1 {
 		return nil, ErrCompacted
 	}
 	sch, err := n.db.Watch(ctx, prefix, startRev)

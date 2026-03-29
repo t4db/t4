@@ -357,20 +357,30 @@ func TestWatchCompactedRevisionReturnsError(t *testing.T) {
 	n.Put(c, "k", []byte("v2"), 0) // rev 2
 	n.Put(c, "k", []byte("v3"), 0) // rev 3
 
-	if err := n.Compact(c, 2); err != nil {
+	// compact(3): deletes stale entries in [0,3), keeps rev 3 intact.
+	if err := n.Compact(c, 3); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
 
-	// Watch from a revision that has been compacted must return ErrCompacted.
+	// startRev=1 delivers from rev 2, which is inside the compacted range → ErrCompacted.
 	_, err := n.Watch(c, "k", 1)
 	if !errors.Is(err, strata.ErrCompacted) {
-		t.Errorf("Watch from compacted rev: want ErrCompacted, got %v", err)
+		t.Errorf("Watch from deeply compacted rev: want ErrCompacted, got %v", err)
 	}
 
-	// Watch from exactly the compact watermark is fine (delivers from rev 3+).
+	// startRev=2 delivers from rev 3, which is intact (the compact boundary) → OK.
+	// This is the "just re-listed, now watching from compactRev" case that must not loop.
 	ch, err := n.Watch(c, "k", 2)
 	if err != nil {
-		t.Errorf("Watch from compact watermark: unexpected error %v", err)
+		t.Errorf("Watch from compact watermark (startRev=compactRev-1): unexpected error %v", err)
+	} else {
+		_ = ch
+	}
+
+	// startRev=3 (above compact boundary) is always fine.
+	ch, err = n.Watch(c, "k", 3)
+	if err != nil {
+		t.Errorf("Watch above compact boundary: unexpected error %v", err)
 	} else {
 		_ = ch
 	}
