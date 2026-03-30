@@ -264,13 +264,24 @@ func ListRemote(ctx context.Context, store object.Store) ([]string, error) {
 // GCCheckpoints deletes old checkpoint archives from object storage, keeping
 // only the most recent `keep` checkpoints. Returns the number deleted.
 //
-// We keep at least 2 by default so that a node bootstrapping concurrently
-// (which reads manifest/latest then fetches the referenced key) cannot hit a
-// 404 if we race with it right after updating the manifest.
+// The checkpoint currently referenced by manifest/latest is always preserved,
+// even if it would otherwise fall outside the `keep` window. This prevents a
+// race where two concurrent leaders each write checkpoints: the older leader
+// writes K, updates the manifest to K, then GC sees K is no longer in the
+// top-`keep` slots (because the newer leader has already written ahead) and
+// deletes K — leaving the manifest pointing at a gone object. A bootstrapping
+// node that just read the manifest would then get a 404.
 func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, error) {
 	if keep < 1 {
 		keep = 1
 	}
+
+	// Read the manifest before listing so we can protect its referenced key.
+	manifest, err := ReadManifest(ctx, store)
+	if err != nil {
+		return 0, fmt.Errorf("checkpoint gc: read manifest: %w", err)
+	}
+
 	keys, err := ListRemote(ctx, store)
 	if err != nil {
 		return 0, fmt.Errorf("checkpoint gc: list: %w", err)
@@ -281,6 +292,12 @@ func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, erro
 	toDelete := keys[:len(keys)-keep]
 	var deleted int
 	for _, k := range toDelete {
+		// Never delete the checkpoint the manifest currently points to.
+		// A bootstrapping node may have just read this key from the manifest
+		// and is about to download it.
+		if manifest != nil && k == manifest.CheckpointKey {
+			continue
+		}
 		if err := store.Delete(ctx, k); err != nil {
 			return deleted, fmt.Errorf("checkpoint gc: delete %q: %w", k, err)
 		}

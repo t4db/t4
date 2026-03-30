@@ -182,13 +182,37 @@ func Open(cfg Config) (*Node, error) {
 		if manifest != nil {
 			logrus.Infof("strata: manifest found (rev=%d)", manifest.Revision)
 			if _, err := os.Stat(pebbleDir); errors.Is(err, os.ErrNotExist) {
-				t, rev, err := checkpoint.Restore(ctx, cfg.ObjectStore, manifest.CheckpointKey, pebbleDir)
-				if err != nil {
-					return nil, fmt.Errorf("strata: restore checkpoint: %w", err)
+				// Retry loop: the checkpoint referenced by the manifest may
+				// have been GC'd in the window between reading the manifest
+				// and downloading it (most commonly when two leaders are
+				// concurrently writing checkpoints during a leadership
+				// transition). Re-reading the manifest gives us whichever
+				// checkpoint the new leader most recently wrote.
+				for attempt := 0; ; attempt++ {
+					t, rev, rerr := checkpoint.Restore(ctx, cfg.ObjectStore, manifest.CheckpointKey, pebbleDir)
+					if rerr == nil {
+						term, startRev = t, rev
+						logrus.Infof("strata: checkpoint restored (term=%d rev=%d)", term, startRev)
+						freshNode = true
+						break
+					}
+					if !errors.Is(rerr, object.ErrNotFound) || attempt >= 4 {
+						return nil, fmt.Errorf("strata: restore checkpoint: %w", rerr)
+					}
+					// Checkpoint was GC'd; sleep briefly so the leader can
+					// write a new checkpoint and update the manifest before
+					// we retry. (With a 400 ms checkpoint interval, 500 ms
+					// gives a full interval of headroom.)
+					logrus.Warnf("strata: checkpoint %q not found, re-reading manifest (attempt %d/5)", manifest.CheckpointKey, attempt+1)
+					time.Sleep(500 * time.Millisecond)
+					manifest, err = checkpoint.ReadManifest(ctx, cfg.ObjectStore)
+					if err != nil {
+						return nil, fmt.Errorf("strata: read manifest: %w", err)
+					}
+					if manifest == nil {
+						break // manifest disappeared; start fresh without checkpoint
+					}
 				}
-				term, startRev = t, rev
-				logrus.Infof("strata: checkpoint restored (term=%d rev=%d)", term, startRev)
-				freshNode = true
 			}
 		}
 	}
