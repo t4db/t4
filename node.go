@@ -173,6 +173,18 @@ func Open(cfg Config) (*Node, error) {
 				logrus.Infof("strata: versioned checkpoint restored (term=%d rev=%d)", term, startRev)
 			}
 		}
+	case cfg.BranchPoint != nil:
+		if _, err := os.Stat(pebbleDir); errors.Is(err, os.ErrNotExist) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			bp := cfg.BranchPoint
+			t, rev, err := checkpoint.RestoreBranch(ctx, bp.SourceStore, nil, bp.CheckpointKey, pebbleDir)
+			if err != nil {
+				return nil, fmt.Errorf("strata: restore branch point: %w", err)
+			}
+			term, startRev = t, rev
+			logrus.Infof("strata: branch checkpoint restored (term=%d rev=%d)", term, startRev)
+		}
 	case cfg.ObjectStore != nil:
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -266,6 +278,17 @@ func Open(cfg Config) (*Node, error) {
 			w.Close()
 			db.Close()
 			return nil, fmt.Errorf("strata: pinned WAL replay: %w", err)
+		}
+	case cfg.BranchPoint != nil:
+		// Branch nodes use their own ObjectStore for WAL replay after bootstrap.
+		if cfg.ObjectStore != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			if err := replayRemote(ctx, db, cfg.ObjectStore, startRev); err != nil {
+				w.Close()
+				db.Close()
+				return nil, fmt.Errorf("strata: branch WAL replay: %w", err)
+			}
 		}
 	case cfg.ObjectStore != nil:
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -1421,7 +1444,7 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 		logrus.Errorf("strata: startup checkpoint seal WAL: %v", err)
 		return
 	}
-	if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, ""); err != nil {
+	if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
 		logrus.Errorf("strata: startup checkpoint rev=%d: %v", rev, err)
 		return
 	}
@@ -1442,7 +1465,7 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		logrus.Errorf("strata: checkpoint seal WAL: %v", err)
 		return
 	}
-	if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, ""); err != nil {
+	if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
 		logrus.Errorf("strata: write checkpoint rev=%d: %v", rev, err)
 		return
 	}
@@ -1469,6 +1492,13 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		logrus.Warnf("strata: checkpoint gc: %v", cpGCErr)
 	} else if cpDeleted > 0 {
 		logrus.Infof("strata: checkpoint gc: deleted %d old checkpoint(s)", cpDeleted)
+	}
+
+	sstDeleted, sstGCErr := checkpoint.GCOrphanSSTs(gcCtx, n.cfg.ObjectStore)
+	if sstGCErr != nil {
+		logrus.Warnf("strata: sst gc: %v", sstGCErr)
+	} else if sstDeleted > 0 {
+		logrus.Infof("strata: sst gc: deleted %d orphan sst(s)", sstDeleted)
 	}
 }
 
