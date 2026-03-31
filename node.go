@@ -1034,8 +1034,6 @@ func (n *Node) Close() error {
 		role := n.loadRole()
 		peerCli := n.peerCli
 		peerSrv := n.peerSrv
-		peerGRPC := n.peerGRPC
-		peerLis := n.peerLis
 		n.mu.Unlock()
 
 		// Graceful goodbye signals — sent before cancelling context so the RPCs
@@ -1063,11 +1061,6 @@ func (n *Node) Close() error {
 		if cli := n.leaderCli.Load(); cli != nil {
 			cli.Close()
 		}
-		if peerGRPC != nil {
-			peerGRPC.Stop() // terminates all active streams immediately
-		} else if peerLis != nil {
-			peerLis.Close()
-		}
 		// Signal the store's closed channel now, before waiting on readWg.
 		// This unblocks any goroutines blocked in store.WaitForRevision (which
 		// hold a readWg count) so they can return ErrClosed immediately instead
@@ -1078,6 +1071,20 @@ func (n *Node) Close() error {
 		// DB. cancelBg has already been called above, so the loops will drain
 		// promptly; we just need to avoid closing DB under a concurrent Apply.
 		n.bgWg.Wait()
+		// Stop the peer gRPC server and listener AFTER background goroutines
+		// have exited. becomeLeader (called from followLoop) may have written
+		// a new peerGRPC/peerLis after our early snapshot above, so we must
+		// re-read under the mutex here to capture the final value and ensure
+		// the server is not left running against an already-closed DB.
+		n.mu.Lock()
+		peerGRPC := n.peerGRPC
+		peerLis := n.peerLis
+		n.mu.Unlock()
+		if peerGRPC != nil {
+			peerGRPC.Stop() // terminates all active streams immediately
+		} else if peerLis != nil {
+			peerLis.Close()
+		}
 		// Wait for any in-flight read operations (Get, List, WaitForRevision)
 		// that passed the n.closed check but haven't called into pebble yet.
 		n.readWg.Wait()

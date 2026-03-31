@@ -3,9 +3,6 @@ name: Nightly stress test
 on:
   schedule:
     - cron: "0 2 * * *" # 02:00 UTC every night
-  push:
-    paths:
-      - "jepsen/**"
   pull_request:
     paths:
       - "jepsen/**"
