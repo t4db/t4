@@ -483,29 +483,20 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.wal.Close()
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 
-	// Upload any local WAL segments that were not yet in S3. This covers the
-	// same-node re-election case where the previous WAL had no uploader (or
-	// crashed before the upload completed). The immediate startup checkpoint
-	// written by checkpointLoop also covers these entries, but uploading them
-	// first narrows the window where a crash could lose data.
+	// Upload any local WAL segments that were not yet in S3 before taking on
+	// writes. This covers the same-node re-election case where the previous WAL
+	// had no uploader (follower WAL) or crashed before the upload completed.
+	// After this point, new leader writes are uploaded async (SegmentMaxAge).
 	upCtx, upCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	uploadLocalWALSegments(upCtx, walDir, n.cfg.ObjectStore)
 	upCancel()
 
 	// Replay any remote WAL entries not yet in our Pebble. A follower that wins
-	// election may be behind the former leader: the former leader may have
-	// committed entries and uploaded them to S3 before it closed, but this node
-	// never received them via the stream. Without this replay the new leader
-	// would open its WAL at a firstRev that is lower than some committed entries
-	// still in S3. The subsequent checkpoint + GC would then delete those S3
-	// segments while the checkpoint only covers the new (lower) revision —
-	// permanently losing the committed entries.
-	//
-	// Before replaying WAL, check whether the node is below the latest S3
-	// checkpoint. If so, the WAL segments covering the gap have been GC'd and
-	// a plain replayRemote would silently skip those revisions. Restore the
-	// checkpoint first so that replayRemote only needs segments that are still
-	// present in S3.
+	// election may be behind the former leader if the former leader committed
+	// entries during single-node mode (no quorum required) before crashing.
+	// Check against the latest S3 checkpoint first: if this node is behind the
+	// checkpoint, restore it before replaying WAL so replayRemote only needs
+	// segments still present in S3.
 	if n.cfg.ObjectStore != nil {
 		cpCtx, cpCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		if _, cpErr := n.restoreDBIfBehindCheckpoint(cpCtx); cpErr != nil {
@@ -521,9 +512,12 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		reCancel()
 	}
 
+	// With quorum commit, every committed entry exists on at least two nodes'
+	// WALs before the caller sees success. S3 is disaster-recovery only (both
+	// nodes fail simultaneously), so uploads can be async — driven by
+	// SegmentMaxAge — without affecting write durability.
 	w2, err := wal.Open(walDir, rec.Term, n.db.CurrentRevision()+1,
 		wal.WithUploader(makeUploader(n.cfg.ObjectStore)),
-		wal.WithSyncUpload(),
 		wal.WithSegmentMaxSize(n.cfg.SegmentMaxSize),
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 	)
