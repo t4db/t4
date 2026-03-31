@@ -759,6 +759,11 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				}
 			} else {
 				fromRev = n.db.CurrentRevision() + 1
+				// Wake any goroutines blocked in WaitForRevision that entered
+				// their wait loop while replayRemote was running. Recover does
+				// not broadcast, so without this they would sleep until the
+				// next live Apply — causing unnecessary read latency.
+				n.db.NotifyRevision()
 				logrus.Infof("strata: follower resync complete (now at rev=%d)", n.db.CurrentRevision())
 			}
 			continue

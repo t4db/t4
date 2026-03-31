@@ -302,6 +302,12 @@ func (s *Store) broadcast() {
 	close(old)
 }
 
+// NotifyRevision wakes any goroutines blocked in WaitForRevision without
+// writing a new entry.  Called after bulk recovery (Recover) so that readers
+// sleeping on the notify channel see the updated currentRev without waiting
+// for the next live Apply.
+func (s *Store) NotifyRevision() { s.broadcast() }
+
 // waitChan returns the current notify channel. Callers wait on it to be
 // closed, then re-read the revision.
 func (s *Store) waitChan() <-chan struct{} {
