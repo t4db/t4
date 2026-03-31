@@ -143,12 +143,11 @@ Both are suitable for use with `errors.Is`.
 
 ---
 
-## Point-in-time restore
+## Point-in-time restore (S3 versioning)
 
-A `RestorePoint` tells a node to bootstrap from a specific moment captured
-in S3, rather than from the latest checkpoint in its own prefix. It is applied
-once, on first boot (when the local data directory does not yet exist), and
-ignored on subsequent restarts.
+> **Note**: this mechanism requires S3 versioning. For most use cases, prefer [Branches](#branches) which work without versioning.
+
+A `RestorePoint` tells a node to bootstrap from a specific moment captured in S3 via object version IDs, rather than from the latest checkpoint. It is applied once, on first boot, and ignored on subsequent restarts.
 
 ```go
 type PinnedObject struct {
@@ -175,7 +174,7 @@ Set `Config.RestorePoint` to activate:
 ```go
 node, err := strata.Open(strata.Config{
     DataDir:      "/var/lib/strata-branch",
-    ObjectStore:  branchStore,   // new node's own S3 prefix for future writes
+    ObjectStore:  branchStore,
     RestorePoint: &strata.RestorePoint{
         Store:             sourceStore,
         CheckpointArchive: strata.PinnedObject{Key: "...", VersionID: "..."},
@@ -188,8 +187,6 @@ node, err := strata.Open(strata.Config{
 
 ### object.VersionedStore
 
-`RestorePoint.Store` must implement `object.VersionedStore`:
-
 ```go
 type VersionedStore interface {
     Store
@@ -197,6 +194,67 @@ type VersionedStore interface {
 }
 ```
 
-`object.S3Store` satisfies this interface automatically. S3 versioning must be
-enabled on the source bucket. `GetVersioned` maps directly to `s3:GetObject`
-with a `VersionId` — no data is copied within S3.
+`object.S3Store` satisfies this interface. S3 versioning must be enabled on the source bucket.
+
+---
+
+## Branches
+
+Branches let you fork a database at any checkpoint with zero S3 data copies. Shared SST files stay in the source prefix and are referenced by the branch's checkpoint index.
+
+### Fork
+
+```go
+func Fork(ctx context.Context, sourceStore object.Store, branchID string) (checkpointKey string, err error)
+```
+
+Reads the latest checkpoint manifest from `sourceStore`, registers the branch (writes `branches/<branchID>` to the source store), and returns the checkpoint key to pass to `BranchPoint`. Pass `--checkpoint` / a specific key if you want to fork from an earlier revision.
+
+### Unfork
+
+```go
+func Unfork(ctx context.Context, sourceStore object.Store, branchID string) error
+```
+
+Removes the branch registry entry. The next GC cycle on the source can reclaim any SSTs no longer referenced by any live checkpoint or branch.
+
+### BranchPoint
+
+```go
+type BranchPoint struct {
+    // SourceStore is the object store of the database being forked.
+    SourceStore object.Store
+
+    // CheckpointKey is the manifest.json key returned by Fork.
+    CheckpointKey string
+}
+```
+
+Set `Config.BranchPoint` and `Config.AncestorStore` when starting a branch node for the first time:
+
+```go
+sourceStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "prod/"})
+branchStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "branch-a/"})
+
+cpKey, err := strata.Fork(ctx, sourceStore, "branch-a")
+
+node, err := strata.Open(strata.Config{
+    DataDir:       "/var/lib/strata-branch-a",
+    ObjectStore:   branchStore,
+    AncestorStore: sourceStore,
+    BranchPoint: &strata.BranchPoint{
+        SourceStore:   sourceStore,
+        CheckpointKey: cpKey,
+    },
+})
+```
+
+On first boot the node downloads the SSTs and Pebble metadata from `sourceStore`. On subsequent boots `BranchPoint` is ignored (the local data directory already exists).
+
+When the branch is no longer needed:
+
+```go
+if err := strata.Unfork(ctx, sourceStore, "branch-a"); err != nil {
+    log.Fatal(err)
+}
+```

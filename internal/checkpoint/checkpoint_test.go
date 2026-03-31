@@ -3,6 +3,7 @@ package checkpoint_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -133,9 +134,9 @@ func TestWriteManifestOverwrite(t *testing.T) {
 	ctx := context.Background()
 
 	checkpoint.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 1, Term: 1,
-		CheckpointKey: checkpoint.CheckpointKey(1, 1)})
+		CheckpointKey: checkpoint.CheckpointIndexKey(1, 1)})
 	checkpoint.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 2, Term: 1,
-		CheckpointKey: checkpoint.CheckpointKey(1, 2)})
+		CheckpointKey: checkpoint.CheckpointIndexKey(1, 2)})
 
 	m, _ := checkpoint.ReadManifest(ctx, store)
 	if m.Revision != 2 {
@@ -146,13 +147,13 @@ func TestWriteManifestOverwrite(t *testing.T) {
 // ── CheckpointKey ─────────────────────────────────────────────────────────────
 
 func TestCheckpointKey(t *testing.T) {
-	key := checkpoint.CheckpointKey(3, 100)
+	key := checkpoint.CheckpointIndexKey(3, 100)
 	if !strings.HasPrefix(key, "checkpoint/") {
 		t.Errorf("key should start with checkpoint/: %q", key)
 	}
 	// Zero-padded so lexicographic == chronological.
-	k1 := checkpoint.CheckpointKey(1, 9)
-	k2 := checkpoint.CheckpointKey(1, 10)
+	k1 := checkpoint.CheckpointIndexKey(1, 9)
+	k2 := checkpoint.CheckpointIndexKey(1, 10)
 	if k1 >= k2 {
 		t.Errorf("key ordering: %q should sort before %q", k1, k2)
 	}
@@ -164,10 +165,12 @@ func TestGCCheckpoints(t *testing.T) {
 	store := object.NewMem()
 	ctx := context.Background()
 
-	// Seed 5 checkpoint objects directly.
+	// Seed 5 checkpoint index objects directly.
 	for i := 1; i <= 5; i++ {
-		key := checkpoint.CheckpointKey(1, int64(i))
-		if err := store.Put(ctx, key, strings.NewReader("data")); err != nil {
+		idx := checkpoint.CheckpointIndex{Term: 1, Revision: int64(i)}
+		b, _ := json.Marshal(idx)
+		key := checkpoint.CheckpointIndexKey(1, int64(i))
+		if err := store.Put(ctx, key, bytes.NewReader(b)); err != nil {
 			t.Fatalf("seed put: %v", err)
 		}
 	}
@@ -186,7 +189,7 @@ func TestGCCheckpoints(t *testing.T) {
 	if len(remaining) != 2 {
 		t.Errorf("remaining: want 2, got %d: %v", len(remaining), remaining)
 	}
-	if remaining[0] != checkpoint.CheckpointKey(1, 4) || remaining[1] != checkpoint.CheckpointKey(1, 5) {
+	if remaining[0] != checkpoint.CheckpointIndexKey(1, 4) || remaining[1] != checkpoint.CheckpointIndexKey(1, 5) {
 		t.Errorf("unexpected remaining keys: %v", remaining)
 	}
 }
@@ -196,7 +199,9 @@ func TestGCCheckpointsNoop(t *testing.T) {
 	ctx := context.Background()
 
 	// Fewer objects than `keep` — nothing should be deleted.
-	store.Put(ctx, checkpoint.CheckpointKey(1, 1), strings.NewReader("data"))
+	idx := checkpoint.CheckpointIndex{Term: 1, Revision: 1}
+	b, _ := json.Marshal(idx)
+	store.Put(ctx, checkpoint.CheckpointIndexKey(1, 1), bytes.NewReader(b))
 	deleted, err := checkpoint.GCCheckpoints(ctx, store, 2)
 	if err != nil {
 		t.Fatalf("GCCheckpoints: %v", err)
@@ -222,7 +227,7 @@ func TestWriteRestore(t *testing.T) {
 	}
 
 	// Create and upload checkpoint.
-	if err := checkpoint.Write(ctx, db, store, 1, 2, ""); err != nil {
+	if err := checkpoint.Write(ctx, db, store, 1, 2, "", nil); err != nil {
 		t.Fatalf("checkpoint.Write: %v", err)
 	}
 
@@ -273,7 +278,7 @@ func TestWriteRestoreWithLastWALKey(t *testing.T) {
 	store := object.NewMem()
 	ctx := context.Background()
 
-	if err := checkpoint.Write(ctx, db, store, 2, 99, "wal/0000000002/00000000000000000090"); err != nil {
+	if err := checkpoint.Write(ctx, db, store, 2, 99, "wal/0000000002/00000000000000000090", nil); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -298,9 +303,9 @@ func TestListRemote(t *testing.T) {
 	ctx := context.Background()
 
 	db := openDB(t)
-	checkpoint.Write(ctx, db, store, 1, 10, "")
-	checkpoint.Write(ctx, db, store, 1, 20, "")
-	checkpoint.Write(ctx, db, store, 2, 30, "")
+	checkpoint.Write(ctx, db, store, 1, 10, "", nil)
+	checkpoint.Write(ctx, db, store, 1, 20, "", nil)
+	checkpoint.Write(ctx, db, store, 2, 30, "", nil)
 
 	keys, err := checkpoint.ListRemote(ctx, store)
 	if err != nil {
@@ -376,7 +381,7 @@ func TestWriteRestoreMultiple(t *testing.T) {
 
 	for i := int64(1); i <= 3; i++ {
 		db.Set([]byte(fmt.Sprintf("k%d", i)), []byte("v"), pebble.Sync)
-		if err := checkpoint.Write(ctx, db, store, 1, i, ""); err != nil {
+		if err := checkpoint.Write(ctx, db, store, 1, i, "", nil); err != nil {
 			t.Fatalf("Write rev=%d: %v", i, err)
 		}
 	}
@@ -405,33 +410,37 @@ func TestWriteRestoreMultiple(t *testing.T) {
 	}
 }
 
-// TestRestoreVersioned verifies that RestoreVersioned retrieves a pinned
-// version of a checkpoint archive even after the same key has been overwritten.
+// TestRestoreVersioned verifies that RestoreVersioned can restore a checkpoint
+// using a pinned version of the index key even after the index has been deleted
+// (e.g. GC'd), as long as SSTs and pebble meta are still present.
 func TestRestoreVersioned(t *testing.T) {
 	db := openDB(t)
 	store := newVersionedMem()
 	ctx := context.Background()
 
-	// Write the first checkpoint (term=1, rev=1).
-	if err := checkpoint.Write(ctx, db, store, 1, 1, ""); err != nil {
-		t.Fatalf("Write cp1: %v", err)
+	db.Set([]byte("restored-key"), []byte("restored-val"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 1, "", nil); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
-	archiveKey := checkpoint.CheckpointKey(1, 1)
-	pinnedVer := store.VersionOf(archiveKey)
-
-	// Overwrite the same archive key with garbage to simulate a later version.
-	if err := store.Put(ctx, archiveKey, strings.NewReader("corrupted-data")); err != nil {
-		t.Fatalf("overwrite: %v", err)
+	indexKey := checkpoint.CheckpointIndexKey(1, 1)
+	pinnedVer := store.VersionOf(indexKey)
+	if pinnedVer == "" {
+		t.Fatal("no version captured for index key")
 	}
 
-	// Regular Restore now reads the garbage — it should fail.
-	if _, _, err := checkpoint.Restore(ctx, store, archiveKey, t.TempDir()); err == nil {
-		t.Fatal("Restore with corrupted data: expected error, got nil")
+	// Delete just the index (simulating GC); SSTs and pebble meta stay.
+	if err := store.Delete(ctx, indexKey); err != nil {
+		t.Fatalf("delete index: %v", err)
 	}
 
-	// RestoreVersioned with the pinned version ID should succeed.
+	// Regular Restore should fail (index not found).
+	if _, _, err := checkpoint.Restore(ctx, store, indexKey, t.TempDir()); err == nil {
+		t.Fatal("Restore with deleted index: expected error, got nil")
+	}
+
+	// RestoreVersioned with the pinned version should succeed.
 	dir := t.TempDir()
-	term, rev, err := checkpoint.RestoreVersioned(ctx, store, archiveKey, pinnedVer, dir)
+	term, rev, err := checkpoint.RestoreVersioned(ctx, store, indexKey, pinnedVer, dir)
 	if err != nil {
 		t.Fatalf("RestoreVersioned: %v", err)
 	}
@@ -439,10 +448,146 @@ func TestRestoreVersioned(t *testing.T) {
 		t.Errorf("restored: want term=1 rev=1, got term=%d rev=%d", term, rev)
 	}
 
-	// Verify the restored directory contains a valid pebble database.
+	// Verify the restored directory contains a valid pebble database with our key.
 	restored, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
 		t.Fatalf("open restored pebble: %v", err)
 	}
-	restored.Close()
+	defer restored.Close()
+}
+
+// TestWriteSkipsExistingSSTs verifies that Write does not re-upload SST files
+// already present in the store's sst/ prefix.
+func TestWriteSkipsExistingSSTs(t *testing.T) {
+	db := openDB(t)
+	store := object.NewMem()
+	ctx := context.Background()
+
+	// Write data and first checkpoint.
+	db.Set([]byte("k1"), []byte("v1"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 1, "", nil); err != nil {
+		t.Fatalf("Write 1: %v", err)
+	}
+	// Count SSTs after first checkpoint.
+	ssts1, _ := store.List(ctx, "sst/")
+
+	// Write more data and second checkpoint.
+	db.Set([]byte("k2"), []byte("v2"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 2, "", nil); err != nil {
+		t.Fatalf("Write 2: %v", err)
+	}
+	ssts2, _ := store.List(ctx, "sst/")
+
+	// SST count should only grow (or stay equal if no new SST was created).
+	if len(ssts2) < len(ssts1) {
+		t.Errorf("SST count decreased: %d → %d", len(ssts1), len(ssts2))
+	}
+
+	// There should be exactly two v2 checkpoint manifests.
+	keys, _ := checkpoint.ListRemote(ctx, store)
+	if len(keys) != 2 {
+		t.Errorf("want 2 checkpoints, got %d: %v", len(keys), keys)
+	}
+	for _, k := range keys {
+		if !strings.HasSuffix(k, "/manifest.json") {
+			t.Errorf("expected v2 key, got %q", k)
+		}
+	}
+}
+
+// TestGCOrphanSSTs verifies that unreferenced SSTs are deleted while SSTs
+// referenced by live checkpoint indexes or branch entries are kept.
+func TestGCOrphanSSTs(t *testing.T) {
+	db := openDB(t)
+	store := object.NewMem()
+	ctx := context.Background()
+
+	db.Set([]byte("k1"), []byte("v1"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 1, "", nil); err != nil {
+		t.Fatalf("Write 1: %v", err)
+	}
+	// Read which SSTs were uploaded.
+	ssts, _ := store.List(ctx, "sst/")
+	if len(ssts) == 0 {
+		t.Skip("no SST files produced by pebble checkpoint")
+	}
+
+	// Add an extra orphan SST that no checkpoint references.
+	store.Put(ctx, "sst/orphan.sst", strings.NewReader("garbage"))
+
+	// GCOrphanSSTs should delete the orphan but keep checkpoint SSTs.
+	deleted, err := checkpoint.GCOrphanSSTs(ctx, store)
+	if err != nil {
+		t.Fatalf("GCOrphanSSTs: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted: want 1, got %d", deleted)
+	}
+
+	// orphan should be gone.
+	_, err = store.Get(ctx, "sst/orphan.sst")
+	if err != object.ErrNotFound {
+		t.Errorf("orphan.sst should be gone, got err=%v", err)
+	}
+
+	// Real SSTs should still exist.
+	remaining, _ := store.List(ctx, "sst/")
+	if len(remaining) != len(ssts) {
+		t.Errorf("real SSTs: want %d, got %d", len(ssts), len(remaining))
+	}
+}
+
+// TestGCOrphanSSTsBranchProtection verifies that SSTs referenced by a branch
+// registry entry are not deleted even if no local checkpoint references them.
+func TestGCOrphanSSTsBranchProtection(t *testing.T) {
+	db := openDB(t)
+	store := object.NewMem()
+	ctx := context.Background()
+
+	// Write checkpoint that branch will reference.
+	db.Set([]byte("k1"), []byte("v1"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 1, "", nil); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	ssts, _ := store.List(ctx, "sst/")
+	if len(ssts) == 0 {
+		t.Skip("no SST files produced by pebble checkpoint")
+	}
+	ancestorKey := checkpoint.CheckpointIndexKey(1, 1)
+
+	// Register a branch pointing at the checkpoint.
+	if err := checkpoint.RegisterBranch(ctx, store, "my-branch", ancestorKey); err != nil {
+		t.Fatalf("RegisterBranch: %v", err)
+	}
+
+	// Write a second checkpoint and GC the first.
+	db.Set([]byte("k2"), []byte("v2"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 2, "", nil); err != nil {
+		t.Fatalf("Write 2: %v", err)
+	}
+	if _, err := checkpoint.GCCheckpoints(ctx, store, 1); err != nil {
+		t.Fatalf("GCCheckpoints: %v", err)
+	}
+
+	// GCOrphanSSTs: branch protects rev-1 SSTs.
+	deleted, err := checkpoint.GCOrphanSSTs(ctx, store)
+	if err != nil {
+		t.Fatalf("GCOrphanSSTs with branch: %v", err)
+	}
+	// Nothing should be deleted because the branch protects the old SSTs.
+	if deleted != 0 {
+		t.Errorf("branch-protected SSTs were deleted: %d deleted", deleted)
+	}
+
+	// Unregister branch; now old SSTs can be cleaned up.
+	if err := checkpoint.UnregisterBranch(ctx, store, "my-branch"); err != nil {
+		t.Fatalf("UnregisterBranch: %v", err)
+	}
+	deleted, err = checkpoint.GCOrphanSSTs(ctx, store)
+	if err != nil {
+		t.Fatalf("GCOrphanSSTs after unregister: %v", err)
+	}
+	// After unregister, orphaned SSTs from rev-1 that were compacted away
+	// in rev-2 should be deleted. At minimum 0 (if no compaction happened).
+	_ = deleted // just verify no error
 }

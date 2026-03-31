@@ -232,9 +232,10 @@ type stressHarness struct {
 	t     testing.TB
 	store object.Store
 
-	mu      sync.Mutex
-	nodes   []*strata.Node
-	counter int
+	mu        sync.Mutex
+	nodes     []*strata.Node
+	counter   int
+	closingWg sync.WaitGroup // tracks async Close goroutines from removeRandom
 }
 
 // addNode opens a fresh node and adds it to the pool.
@@ -263,7 +264,10 @@ func (h *stressHarness) removeRandom() string {
 
 	id := n.Config().NodeID
 	// Close asynchronously so the chaos loop is not blocked by a slow shutdown.
+	// Track with closingWg so closeAll() can wait before the test exits.
+	h.closingWg.Add(1)
 	go func() {
+		defer h.closingWg.Done()
 		if err := n.Close(); err != nil {
 			h.t.Logf("stressHarness: close %s: %v (non-fatal)", id, err)
 		}
@@ -321,4 +325,9 @@ func (h *stressHarness) closeAll() {
 			h.t.Logf("stressHarness: closeAll %s: %v (non-fatal)", n.Config().NodeID, err)
 		}
 	}
+	// Wait for any nodes that were removed by removeRandom() and are still
+	// closing asynchronously. This must complete before the test function
+	// returns so that t.TempDir() cleanup does not delete WAL files from
+	// under an in-progress upload.
+	h.closingWg.Wait()
 }

@@ -21,6 +21,7 @@ import (
 
 	"github.com/makhov/strata"
 	strataetcd "github.com/makhov/strata/etcd"
+	"github.com/makhov/strata/internal/checkpoint"
 	"github.com/makhov/strata/pkg/object"
 )
 
@@ -31,6 +32,17 @@ func main() {
 }
 
 func rootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "strata",
+		Short: "S3-durable kine-compatible datastore",
+	}
+	root.AddCommand(runCmd())
+	root.AddCommand(branchCmd())
+	return root
+}
+
+// runCmd is the default "run a node" command (previously the root command).
+func runCmd() *cobra.Command {
 	var (
 		dataDir               string
 		listenAddr            string
@@ -54,11 +66,16 @@ func rootCmd() *cobra.Command {
 		peerTLSKey  string
 		// observability
 		metricsAddr string
+		// branch node
+		branchSourceBucket   string
+		branchSourcePrefix   string
+		branchSourceEndpoint string
+		branchCheckpoint     string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "strata",
-		Short: "S3-durable kine-compatible datastore",
+		Use:   "run",
+		Short: "Run a strata node",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			lvl, err := logrus.ParseLevel(logLevel)
 			if err != nil {
@@ -98,6 +115,23 @@ func rootCmd() *cobra.Command {
 				logrus.Infof("using S3 bucket %q prefix %q", s3Bucket, s3Prefix)
 			} else {
 				logrus.Warn("no S3 bucket configured — durability is local-only")
+			}
+
+			if branchSourceBucket != "" {
+				if branchCheckpoint == "" {
+					return fmt.Errorf("--branch-checkpoint is required when --branch-source-bucket is set")
+				}
+				sourceStore, err := newS3Store(cmd.Context(), branchSourceBucket, branchSourcePrefix, branchSourceEndpoint)
+				if err != nil {
+					return fmt.Errorf("init branch source S3: %w", err)
+				}
+				cfg.BranchPoint = &strata.BranchPoint{
+					SourceStore:   sourceStore,
+					CheckpointKey: branchCheckpoint,
+				}
+				cfg.AncestorStore = sourceStore
+				logrus.Infof("branch node: source bucket %q prefix %q checkpoint %q",
+					branchSourceBucket, branchSourcePrefix, branchCheckpoint)
 			}
 
 			node, err := strata.Open(cfg)
@@ -153,7 +187,97 @@ func rootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&peerTLSKey, "peer-tls-key", "", "node private key file for peer mTLS (PEM)")
 	// observability
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "HTTP address for /metrics, /healthz, /readyz (e.g. 0.0.0.0:9090)")
+	// branch node
+	cmd.Flags().StringVar(&branchSourceBucket, "branch-source-bucket", "", "S3 bucket of the source node to branch from")
+	cmd.Flags().StringVar(&branchSourcePrefix, "branch-source-prefix", "", "S3 key prefix of the source node")
+	cmd.Flags().StringVar(&branchSourceEndpoint, "branch-source-endpoint", "", "custom S3 endpoint for the source store")
+	cmd.Flags().StringVar(&branchCheckpoint, "branch-checkpoint", "", "checkpoint index key returned by 'strata branch fork' (required with --branch-source-bucket)")
 
+	return cmd
+}
+
+// branchCmd returns the "strata branch" subcommand tree.
+func branchCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "branch",
+		Short: "Manage database branches",
+	}
+	cmd.AddCommand(branchForkCmd())
+	cmd.AddCommand(branchUnforkCmd())
+	return cmd
+}
+
+func branchForkCmd() *cobra.Command {
+	var (
+		sourceBucket   string
+		sourcePrefix   string
+		sourceEndpoint string
+		branchID       string
+		checkpointKey  string
+	)
+	cmd := &cobra.Command{
+		Use:   "fork",
+		Short: "Register a new branch and print the checkpoint key to use with 'strata run --branch-checkpoint'",
+		Long: `Register a new branch in the source store and print the checkpoint index key.
+
+By default the branch is forked from the latest committed checkpoint revision.
+Use --checkpoint to fork from a specific older revision instead.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sourceStore, err := newS3Store(cmd.Context(), sourceBucket, sourcePrefix, sourceEndpoint)
+			if err != nil {
+				return fmt.Errorf("init source S3: %w", err)
+			}
+			var cpKey string
+			if checkpointKey != "" {
+				// Fork from a specific checkpoint rather than the latest.
+				if err := checkpoint.RegisterBranch(cmd.Context(), sourceStore, branchID, checkpointKey); err != nil {
+					return fmt.Errorf("register branch: %w", err)
+				}
+				cpKey = checkpointKey
+			} else {
+				cpKey, err = strata.Fork(cmd.Context(), sourceStore, branchID)
+				if err != nil {
+					return err
+				}
+			}
+			fmt.Println(cpKey)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&sourceBucket, "source-bucket", "", "S3 bucket of the source node (required)")
+	cmd.Flags().StringVar(&sourcePrefix, "source-prefix", "", "S3 key prefix of the source node")
+	cmd.Flags().StringVar(&sourceEndpoint, "source-endpoint", "", "custom S3 endpoint for the source store")
+	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required)")
+	cmd.Flags().StringVar(&checkpointKey, "checkpoint", "", "fork from this specific checkpoint key instead of the latest revision")
+	cmd.MarkFlagRequired("source-bucket")
+	cmd.MarkFlagRequired("branch-id")
+	return cmd
+}
+
+func branchUnforkCmd() *cobra.Command {
+	var (
+		sourceBucket   string
+		sourcePrefix   string
+		sourceEndpoint string
+		branchID       string
+	)
+	cmd := &cobra.Command{
+		Use:   "unfork",
+		Short: "Unregister a branch, allowing GC to reclaim its protected SSTs",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sourceStore, err := newS3Store(cmd.Context(), sourceBucket, sourcePrefix, sourceEndpoint)
+			if err != nil {
+				return fmt.Errorf("init source S3: %w", err)
+			}
+			return strata.Unfork(cmd.Context(), sourceStore, branchID)
+		},
+	}
+	cmd.Flags().StringVar(&sourceBucket, "source-bucket", "", "S3 bucket of the source node (required)")
+	cmd.Flags().StringVar(&sourcePrefix, "source-prefix", "", "S3 key prefix of the source node")
+	cmd.Flags().StringVar(&sourceEndpoint, "source-endpoint", "", "custom S3 endpoint for the source store")
+	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required)")
+	cmd.MarkFlagRequired("source-bucket")
+	cmd.MarkFlagRequired("branch-id")
 	return cmd
 }
 

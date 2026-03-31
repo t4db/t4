@@ -26,6 +26,18 @@ type Config struct {
 	// from ObjectStore. See RestorePoint for details.
 	RestorePoint *RestorePoint
 
+	// BranchPoint, if set, causes the node to bootstrap from a specific source
+	// checkpoint on first boot. Unlike RestorePoint, it does not require S3
+	// versioning. The source store's SST files are shared until the branch node
+	// creates its own checkpoints and compacts away the inherited data.
+	// Ignored on subsequent restarts (when local data directory already exists).
+	BranchPoint *BranchPoint
+
+	// AncestorStore is the object store of the source node, set for branch nodes.
+	// When non-nil, checkpoint.Write skips uploading SST files already present in
+	// AncestorStore and records them as AncestorSSTFiles instead.
+	AncestorStore object.Store
+
 	// SegmentMaxSize is the byte threshold that triggers WAL segment rotation.
 	// Default: 50 MB.
 	SegmentMaxSize int64

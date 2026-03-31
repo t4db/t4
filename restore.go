@@ -23,6 +23,7 @@ type PinnedObject struct {
 //
 // S3 versioning must be enabled on the source bucket.
 type RestorePoint struct {
+
 	// Store is the versioned object store to read pinned objects from.
 	// It may use a different prefix than Config.ObjectStore (e.g. to read
 	// from the source branch while writing to a new branch prefix).
@@ -34,4 +35,20 @@ type RestorePoint struct {
 	// WALSegments are the WAL segments to replay after the checkpoint,
 	// in ascending sequence order.
 	WALSegments []PinnedObject
+}
+
+// BranchPoint describes a source checkpoint from which a new branch node
+// should bootstrap. Unlike RestorePoint, it does not require S3 versioning —
+// SST files are protected by registering the branch in the source store via
+// checkpoint.RegisterBranch before starting the node.
+//
+// On first boot (local data directory does not exist), the node downloads the
+// source checkpoint's SST files and Pebble metadata, then writes its own
+// checkpoint to Config.ObjectStore. Subsequent restarts use local disk only.
+type BranchPoint struct {
+	// SourceStore is the object store of the source node.
+	SourceStore object.Store
+	// CheckpointKey is the v2 checkpoint index key in SourceStore
+	// (e.g. "checkpoint/0001/0000000000000000100/manifest.json").
+	CheckpointKey string
 }

@@ -11,6 +11,7 @@ An embeddable, S3-durable key-value store for Go.
 - **S3-durable** — WAL segments and periodic snapshots are uploaded to S3. A node that loses its disk recovers automatically.
 - **Multi-node** — Leader elected via an S3 lock. Followers stream the WAL in real time and forward writes transparently.
 - **etcd v3 compatible** — The standalone binary speaks the etcd v3 gRPC protocol. Any etcd client works against it unchanged.
+- **Branches** — Fork a database at any checkpoint with zero S3 copies. Each branch writes to its own prefix; shared SST files are deduplicated automatically.
 
 ---
 
@@ -63,11 +64,11 @@ The `strata` binary exposes the etcd v3 gRPC protocol. Use `etcdctl`, the offici
 go install github.com/makhov/strata/cmd/strata@latest
 
 # Single node, local only
-strata --data-dir /var/lib/strata --listen 0.0.0.0:3379
+strata run --data-dir /var/lib/strata --listen 0.0.0.0:3379
 
 # Single node with S3
-strata --data-dir /var/lib/strata --listen 0.0.0.0:3379 \
-       --s3-bucket my-bucket --s3-prefix strata/
+strata run --data-dir /var/lib/strata --listen 0.0.0.0:3379 \
+           --s3-bucket my-bucket --s3-prefix strata/
 
 # Verify
 etcdctl --endpoints=localhost:3379 put /hello world
@@ -82,7 +83,7 @@ Multi-node and production setup: see [docs/operations.md](docs/operations.md).
 
 | Document | Contents |
 |---|---|
-| [docs/api.md](docs/api.md) | Full Go API reference — methods, types, errors |
+| [docs/api.md](docs/api.md) | Full Go API reference — methods, types, errors, branching |
 | [docs/configuration.md](docs/configuration.md) | All config fields and CLI flags |
-| [docs/operations.md](docs/operations.md) | Multi-node, S3, mTLS, observability, point-in-time restore |
+| [docs/operations.md](docs/operations.md) | Multi-node, S3, mTLS, observability, branching, point-in-time restore |
 | [docs/architecture.md](docs/architecture.md) | Internals — WAL, checkpoints, election, replication |
