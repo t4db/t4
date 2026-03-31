@@ -500,7 +500,20 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// still in S3. The subsequent checkpoint + GC would then delete those S3
 	// segments while the checkpoint only covers the new (lower) revision —
 	// permanently losing the committed entries.
+	//
+	// Before replaying WAL, check whether the node is below the latest S3
+	// checkpoint. If so, the WAL segments covering the gap have been GC'd and
+	// a plain replayRemote would silently skip those revisions. Restore the
+	// checkpoint first so that replayRemote only needs segments that are still
+	// present in S3.
 	if n.cfg.ObjectStore != nil {
+		cpCtx, cpCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		if _, cpErr := n.restoreDBIfBehindCheckpoint(cpCtx); cpErr != nil {
+			cpCancel()
+			return fmt.Errorf("strata: leader checkpoint catch-up: %w", cpErr)
+		}
+		cpCancel()
+
 		reCtx, reCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		if err := replayRemote(reCtx, n.db, n.cfg.ObjectStore, n.db.CurrentRevision()); err != nil {
 			logrus.Warnf("strata: becomeLeader replay remote WAL: %v (proceeding)", err)
@@ -751,10 +764,17 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				n.cancelBg()
 				return
 			}
-			// Re-sync from S3 in-process: replay any entries the new leader
-			// has in Pebble (from its own S3 replay) that were never streamed
-			// to us by the old leader.
-			logrus.Warn("strata: follower resync required — replaying remote WAL from S3")
+			// Re-sync from S3 in-process. First, check whether the follower is
+			// below the latest S3 checkpoint — if so, the WAL segments covering
+			// the gap may have been GC'd and a plain replayRemote would silently
+			// skip those revisions, leaving permanent holes. Restore from the
+			// checkpoint in-place before replaying any remaining WAL entries.
+			logrus.Warn("strata: follower resync required — checking for checkpoint gap")
+			if cpErr := n.resyncFromCheckpoint(bgCtx); cpErr != nil {
+				logrus.Errorf("strata: follower in-place resync failed: %v — cancelling", cpErr)
+				n.cancelBg()
+				return
+			}
 			reCtx, reCancel := context.WithTimeout(bgCtx, 5*time.Minute)
 			rerr := replayRemote(reCtx, n.db, n.cfg.ObjectStore, n.db.CurrentRevision())
 			reCancel()
@@ -1747,6 +1767,9 @@ func (n *Node) checkpointLoop(ctx context.Context) {
 // forceCheckpoint writes a checkpoint unconditionally (bypassing the
 // entriesSinceCheckpoint guard). Used on startup to capture local state.
 func (n *Node) forceCheckpoint(ctx context.Context) {
+	if n.closed.Load() {
+		return
+	}
 	rev := n.db.CurrentRevision()
 	if rev == 0 {
 		return
@@ -1765,6 +1788,14 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {
+	// If Close() has been called we're shutting down. Writing a checkpoint now
+	// would update manifest/latest from a stale (or inconsistent) Pebble state
+	// — e.g. the old leader committing in-flight writes after being superseded
+	// but before cancelBg() fires. Any such checkpoint would corrupt the
+	// manifest and cause subsequent resyncs to restore missing data.
+	if n.closed.Load() {
+		return
+	}
 	if atomic.LoadInt64(&n.entriesSinceCheckpoint) == 0 {
 		return
 	}
@@ -1921,6 +1952,129 @@ func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, after
 			}
 		}
 	}
+	return nil
+}
+
+// restoreDBIfBehindCheckpoint checks whether the node's Pebble database is
+// behind the latest S3 checkpoint. If so, it performs an in-place restore:
+//
+//  1. (No lock) Download checkpoint SSTs to a temp directory, retrying if the
+//     checkpoint was GC'd between the manifest read and the download.
+//  2. (fenceMu.Lock) Close the old Pebble, atomic-rename the temp dir to the
+//     canonical db/ path, open the new Pebble. fenceMu blocks all concurrent
+//     read/write handlers for the brief swap window.
+//
+// On success n.db and n.term are updated and the function returns true.
+// Returns (false, nil) when no restore was needed (already at or above
+// the latest checkpoint revision).
+func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
+	manifest, err := checkpoint.ReadManifest(ctx, n.cfg.ObjectStore)
+	if err != nil {
+		return false, fmt.Errorf("read manifest: %w", err)
+	}
+	if manifest == nil || manifest.Revision <= n.db.CurrentRevision() {
+		return false, nil // already at or above checkpoint
+	}
+	logrus.Infof("strata: node at rev=%d is behind checkpoint rev=%d — restoring in place",
+		n.db.CurrentRevision(), manifest.Revision)
+
+	pebbleDir := filepath.Join(n.cfg.DataDir, "db")
+	tmpDir := pebbleDir + ".resync"
+
+	// ── Phase 1: restore checkpoint SSTs to a temp dir (no lock held) ───────
+	var newTerm uint64
+	for attempt := 0; ; attempt++ {
+		os.RemoveAll(tmpDir)
+		t, _, rerr := checkpoint.Restore(ctx, n.cfg.ObjectStore, manifest.CheckpointKey, tmpDir)
+		if rerr == nil {
+			newTerm = t
+			break
+		}
+		if !errors.Is(rerr, object.ErrNotFound) || attempt >= 4 {
+			os.RemoveAll(tmpDir)
+			return false, fmt.Errorf("restore checkpoint: %w", rerr)
+		}
+		// Checkpoint was GC'd between manifest read and restore — re-read
+		// the manifest so we target whatever the leader most recently wrote.
+		logrus.Warnf("strata: checkpoint %q not found during restore, re-reading manifest (attempt %d/5)",
+			manifest.CheckpointKey, attempt+1)
+		time.Sleep(500 * time.Millisecond)
+		manifest, err = checkpoint.ReadManifest(ctx, n.cfg.ObjectStore)
+		if err != nil {
+			os.RemoveAll(tmpDir)
+			return false, fmt.Errorf("re-read manifest: %w", err)
+		}
+		if manifest == nil {
+			os.RemoveAll(tmpDir)
+			return false, fmt.Errorf("manifest disappeared during restore")
+		}
+	}
+
+	// ── Phase 2: swap Pebble directories under fenceMu.Lock ─────────────────
+	// fenceMu.Lock pauses all in-flight reads and writes while we replace n.db.
+	n.fenceMu.Lock()
+	n.db.Close()
+	if rerr := os.RemoveAll(pebbleDir); rerr != nil {
+		n.fenceMu.Unlock()
+		os.RemoveAll(tmpDir)
+		return false, fmt.Errorf("remove old pebble dir: %w", rerr)
+	}
+	if rerr := os.Rename(tmpDir, pebbleDir); rerr != nil {
+		n.fenceMu.Unlock()
+		os.RemoveAll(tmpDir)
+		return false, fmt.Errorf("rename resync dir: %w", rerr)
+	}
+	newDB, rerr := istore.Open(pebbleDir)
+	if rerr != nil {
+		n.fenceMu.Unlock()
+		return false, fmt.Errorf("open new pebble after restore: %w", rerr)
+	}
+	n.db = newDB
+	n.term = newTerm
+	n.fenceMu.Unlock()
+	return true, nil
+}
+
+// resyncFromCheckpoint is called from followLoop when IsResyncRequired fires.
+// It uses restoreDBIfBehindCheckpoint to close the WAL gap, then (if a restore
+// was actually performed) replaces the local WAL so subsequent Appends from the
+// live stream start at the correct revision.
+func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
+	ctx, cancel := context.WithTimeout(bgCtx, 5*time.Minute)
+	defer cancel()
+
+	restored, err := n.restoreDBIfBehindCheckpoint(ctx)
+	if err != nil {
+		return err
+	}
+	if !restored {
+		return nil
+	}
+
+	// ── Phase 3: replace WAL and update node metadata ────────────────────────
+	// followLoop is the sole WAL writer for a follower, so no concurrent
+	// Append calls can race with this replacement.
+	walDir := filepath.Join(n.cfg.DataDir, "wal")
+	newRev := n.db.CurrentRevision()
+	n.wal.Close()
+	if rerr := os.RemoveAll(walDir); rerr != nil {
+		logrus.Warnf("strata: remove old wal dir during resync: %v", rerr)
+	}
+	newWal, rerr := wal.Open(walDir, n.term, newRev+1,
+		wal.WithSegmentMaxSize(n.cfg.SegmentMaxSize),
+		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
+	)
+	if rerr != nil {
+		return fmt.Errorf("open new wal after resync: %w", rerr)
+	}
+	newWal.Start(bgCtx)
+
+	n.mu.Lock()
+	n.wal = newWal
+	n.nextRev = newRev
+	n.mu.Unlock()
+
+	logrus.Infof("strata: follower in-place resync complete (rev=%d term=%d)", newRev, n.term)
 	return nil
 }
 
