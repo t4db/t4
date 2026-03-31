@@ -38,6 +38,19 @@ type Store interface {
 
 `pkg/object` provides `NewS3Store` (AWS SDK v2) and `NewMem` (in-memory, for tests).
 
+Optionally implement `ConditionalStore` for atomic election writes:
+
+```go
+type ConditionalStore interface {
+    Store
+    GetETag(ctx context.Context, key string) (*GetWithETag, error)
+    PutIfAbsent(ctx context.Context, key string, r io.Reader) error          // If-None-Match: *
+    PutIfMatch(ctx context.Context, key string, r io.Reader, etag string) error // If-Match: <etag>
+}
+```
+
+Both `S3Store` and `Mem` implement `ConditionalStore`. If your custom store does not, election falls back to an unconditional write + read-back (slightly less race-safe under concurrent startup).
+
 ---
 
 ## CLI: `strata run`

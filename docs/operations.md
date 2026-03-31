@@ -64,13 +64,13 @@ strata run \
 
 ### Leader election and failover
 
-- On startup each node writes its address to the S3 lock **only if the lock is absent**. The first writer wins and becomes the leader.
+- On startup each node reads the S3 lock. If absent, it issues an **atomic conditional PUT** (`If-None-Match: *`); only one concurrent writer wins. The winner becomes the leader and records `LastSeenNano = now()` in the lock so followers see it as immediately alive.
 - The leader streams WAL entries to all followers over the peer port (default 3380). Followers apply entries and serve local reads.
-- A follower that observes `--follower-max-retries` consecutive stream failures (default 5 × ~2 s = ~10 s) overwrites the S3 lock with its own address and becomes the new leader.
-- The former leader periodically re-reads the S3 lock (`--leader-watch-interval-sec`, default 300 s). When it detects the lock no longer points to itself, it steps down.
+- A follower that observes `--follower-max-retries` consecutive stream failures (~10 s at default 5 × 2 s) checks the lock's `LastSeenNano`. If stale (older than `LeaderLivenessTTL` = 6 s), it attempts a takeover using `If-Match: <etag>` — only the candidate that read the same ETag wins the race. The new leader records its own address and `LastSeenNano`.
+- The former leader periodically re-reads the S3 lock (`--leader-watch-interval-sec`, default 300 s). When it detects the lock no longer points to itself, it steps down. It also re-reads on every follower disconnect and writes a liveness touch while any follower is still connected.
 - Writes sent to a follower are automatically forwarded to the current leader and the result is returned to the caller.
 
-There is no quorum requirement. Leader election is a last-writer-wins S3 lock with no TTL polling — the only S3 writes are at startup, on leader takeover, and at each checkpoint.
+Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). There is no quorum requirement and no TTL polling — the only S3 election writes are at startup, on leader takeover, and during liveness touches while followers are disconnected.
 
 ### Adding a node to a running cluster
 
