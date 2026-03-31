@@ -111,13 +111,6 @@ type Node struct {
 	// are drained and no new ones start until the check completes.
 	fenceMu sync.RWMutex
 
-	// writeTouchC is a coalescing signal channel. When the node is leader with
-	// zero followers connected, commitLoop sends a signal here after every
-	// successful commit. watchLoop drains it and performs a fencedCheck+Touch
-	// so LastSeenNano stays fresh even between 2-second polling ticks.
-	// Capacity 1: rapid writes coalesce to a single S3 op.
-	writeTouchC chan struct{}
-
 	// nextRev is the last revision assigned to a write. Incremented under mu
 	// before the entry is sent to the commit loop. Replaces n.db.CurrentRevision()+1
 	// on the write path so that in-flight entries have distinct revisions.
@@ -366,16 +359,15 @@ func Open(cfg Config) (*Node, error) {
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	n := &Node{
-		cfg:         cfg,
-		term:        term,
-		db:          db,
-		wal:         w,
-		bgCtx:       bgCtx,
-		cancelBg:    bgCancel,
-		nextRev:     db.CurrentRevision(),
-		pending:     make(map[string]pendingKV),
-		writeC:      make(chan *writeReq, 1024),
-		writeTouchC: make(chan struct{}, 1),
+		cfg:      cfg,
+		term:     term,
+		db:       db,
+		wal:      w,
+		bgCtx:    bgCtx,
+		cancelBg: bgCancel,
+		nextRev:  db.CurrentRevision(),
+		pending:  make(map[string]pendingKV),
+		writeC:   make(chan *writeReq, 1024),
 	}
 	if cfg.CheckpointEntries > 0 {
 		n.checkpointTriggerC = make(chan struct{}, 1)
@@ -679,14 +671,6 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 
 	for {
 		select {
-		case <-n.writeTouchC:
-			// A write just committed with no followers connected — touch the lock
-			// so any follower considering TakeOver sees a fresh LastSeenNano and
-			// backs off. Rapid writes coalesce into one S3 op via the capacity-1 channel.
-			if !fencedCheck("write-touch", true) {
-				return
-			}
-
 		case <-ticker.C:
 			if !fencedCheck("periodic", false) {
 				return
@@ -1533,15 +1517,6 @@ func (n *Node) commitLoop(ctx context.Context) {
 		if err == nil && n.peerSrv != nil {
 			for _, req := range batch {
 				n.peerSrv.Broadcast(&req.entry)
-			}
-			// With no followers connected, signal watchLoop to Touch the S3 lock
-			// so isolated followers see a fresh LastSeenNano and back off from
-			// TakeOver while writes are actively landing on this leader.
-			if n.peerSrv.ConnectedFollowers() == 0 {
-				select {
-				case n.writeTouchC <- struct{}{}:
-				default:
-				}
 			}
 		}
 

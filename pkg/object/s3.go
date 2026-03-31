@@ -58,6 +58,73 @@ func (s *S3Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return out.Body, nil
 }
 
+// GetETag returns the object body and its current ETag.
+func (s *S3Store) GetETag(ctx context.Context, key string) (*GetWithETag, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(s.key(key)),
+	})
+	if err != nil {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("object/s3: get-etag %q: %w", key, err)
+	}
+	etag := ""
+	if out.ETag != nil {
+		etag = *out.ETag
+	}
+	return &GetWithETag{Body: out.Body, ETag: etag}, nil
+}
+
+// PutIfAbsent writes to key only if it does not exist (If-None-Match: *).
+// Returns ErrPreconditionFailed if the key already exists.
+func (s *S3Store) PutIfAbsent(ctx context.Context, key string, r io.Reader) error {
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(s.key(key)),
+		Body:        r,
+		IfNoneMatch: aws.String("*"),
+	})
+	if err != nil {
+		if isPreconditionFailed(err) {
+			return ErrPreconditionFailed
+		}
+		return fmt.Errorf("object/s3: put-if-absent %q: %w", key, err)
+	}
+	return nil
+}
+
+// PutIfMatch writes to key only if its current ETag equals matchETag.
+// Returns ErrPreconditionFailed if the ETag has changed.
+func (s *S3Store) PutIfMatch(ctx context.Context, key string, r io.Reader, matchETag string) error {
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:  aws.String(s.bucket),
+		Key:     aws.String(s.key(key)),
+		Body:    r,
+		IfMatch: aws.String(matchETag),
+	})
+	if err != nil {
+		if isPreconditionFailed(err) {
+			return ErrPreconditionFailed
+		}
+		return fmt.Errorf("object/s3: put-if-match %q: %w", key, err)
+	}
+	return nil
+}
+
+func isPreconditionFailed(err error) bool {
+	var apiErr interface{ ErrorCode() string }
+	if errors.As(err, &apiErr) {
+		c := apiErr.ErrorCode()
+		// S3 returns PreconditionFailed (412) for If-Match failures and
+		// ConditionalRequestConflict (409) for If-None-Match conflicts.
+		return c == "PreconditionFailed" || c == "ConditionalRequestConflict"
+	}
+	return false
+}
+
 // GetVersioned retrieves a specific stored version of key. Requires S3
 // versioning to be enabled on the bucket.
 func (s *S3Store) GetVersioned(ctx context.Context, key, versionID string) (io.ReadCloser, error) {

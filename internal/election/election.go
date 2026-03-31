@@ -1,9 +1,14 @@
 // Package election implements S3-based leader election.
 //
-// The protocol is optimistic:
-//  1. Read the current lock object.
-//  2. If absent or owned by us, write our record.
-//  3. Wait briefly, then read back to verify nobody else won the race.
+// The protocol uses atomic conditional PUT operations to safely resolve races:
+//
+//  1. Read the current lock object (with its ETag).
+//  2a. If absent: PutIfAbsent — only one concurrent writer can succeed.
+//  2b. If owned by another: become a follower.
+//  2c. If owned by us (restart) or being taken over (TakeOver): PutIfMatch
+//      using the observed ETag — only succeeds if no one wrote between our
+//      Read and our Put.
+//  3. On ErrPreconditionFailed: re-read and retry once to find the winner.
 //
 // There is no TTL on the lock. Liveness is detected via the WAL stream
 // (followers attempt a TakeOver after the stream becomes unreachable).
@@ -15,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -32,21 +38,34 @@ type LockRecord struct {
 	LastSeenNano int64  `json:"last_seen_nano"` // Unix ns; set by leader on liveness touch
 }
 
+// lockWithETag pairs a decoded lock record with the ETag of the S3 object
+// that was read, so that callers can use PutIfMatch for atomic updates.
+type lockWithETag struct {
+	rec  *LockRecord
+	etag string // "" means the object was absent
+}
+
 // Lock manages leader election via a single S3 object.
 type Lock struct {
 	store         object.Store
 	nodeID        string
 	advertiseAddr string
+	// conditional is non-nil when the store supports atomic conditional writes.
+	conditional object.ConditionalStore
 }
 
 // NewLock creates a Lock.
 // advertiseAddr is the address followers use to reach this node's peer stream.
 func NewLock(store object.Store, nodeID, advertiseAddr string) *Lock {
-	return &Lock{
+	l := &Lock{
 		store:         store,
 		nodeID:        nodeID,
 		advertiseAddr: advertiseAddr,
 	}
+	if cs, ok := store.(object.ConditionalStore); ok {
+		l.conditional = cs
+	}
+	return l
 }
 
 // TryAcquire attempts to acquire the leader lock at startup.
@@ -58,40 +77,41 @@ func NewLock(store object.Store, nodeID, advertiseAddr string) *Lock {
 // floorTerm ensures the new term is always strictly greater than any
 // previously observed term, preventing term regression after restart.
 func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64) (*LockRecord, bool, error) {
-	existing, err := l.Read(ctx)
+	cur, err := l.readWithETag(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 
 	// Another node holds the lock — become a follower.
-	if existing != nil && existing.NodeID != l.nodeID {
-		return existing, false, nil
+	if cur.rec != nil && cur.rec.NodeID != l.nodeID {
+		return cur.rec, false, nil
 	}
 
 	newTerm := floorTerm + 1
-	if existing != nil && existing.Term >= newTerm {
-		newTerm = existing.Term + 1
+	if cur.rec != nil && cur.rec.Term >= newTerm {
+		newTerm = cur.rec.Term + 1
 	}
 
-	return l.writeAndVerify(ctx, newTerm)
+	return l.writeAtomic(ctx, newTerm, cur)
 }
 
 // TakeOver forcefully attempts to acquire the lock, overwriting any existing
 // owner. Called by a follower after it has determined the leader is
-// unreachable. Uses the same optimistic read-back to resolve races between
-// concurrent candidates.
+// unreachable.  Uses an atomic conditional PUT to resolve races between
+// concurrent candidates: only the node that observed a specific ETag can
+// overwrite it.
 func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64) (*LockRecord, bool, error) {
-	existing, err := l.Read(ctx)
+	cur, err := l.readWithETag(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 
 	newTerm := floorTerm + 1
-	if existing != nil && existing.Term >= newTerm {
-		newTerm = existing.Term + 1
+	if cur.rec != nil && cur.rec.Term >= newTerm {
+		newTerm = cur.rec.Term + 1
 	}
 
-	return l.writeAndVerify(ctx, newTerm)
+	return l.writeAtomic(ctx, newTerm, cur)
 }
 
 // Release deletes the lock. Safe to call if the lock is not held.
@@ -101,9 +121,34 @@ func (l *Lock) Release(ctx context.Context) error {
 
 // Read returns the current lock record, or nil if none exists.
 func (l *Lock) Read(ctx context.Context) (*LockRecord, error) {
+	cur, err := l.readWithETag(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cur.rec, nil
+}
+
+// readWithETag reads the lock and returns it together with its ETag.
+func (l *Lock) readWithETag(ctx context.Context) (*lockWithETag, error) {
+	if l.conditional != nil {
+		res, err := l.conditional.GetETag(ctx, LockKey)
+		if err == object.ErrNotFound {
+			return &lockWithETag{}, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("election: read lock: %w", err)
+		}
+		defer res.Body.Close()
+		var rec LockRecord
+		if err := json.NewDecoder(res.Body).Decode(&rec); err != nil {
+			return nil, fmt.Errorf("election: decode lock: %w", err)
+		}
+		return &lockWithETag{rec: &rec, etag: res.ETag}, nil
+	}
+	// Fallback: store doesn't support conditional ops.
 	rc, err := l.store.Get(ctx, LockKey)
 	if err == object.ErrNotFound {
-		return nil, nil
+		return &lockWithETag{}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("election: read lock: %w", err)
@@ -113,30 +158,63 @@ func (l *Lock) Read(ctx context.Context) (*LockRecord, error) {
 	if err := json.NewDecoder(rc).Decode(&rec); err != nil {
 		return nil, fmt.Errorf("election: decode lock: %w", err)
 	}
-	return &rec, nil
+	return &lockWithETag{rec: &rec}, nil
 }
 
-// writeAndVerify writes a new lock record for this node with the given term,
-// waits briefly, then reads back to confirm this node won.
-func (l *Lock) writeAndVerify(ctx context.Context, newTerm uint64) (*LockRecord, bool, error) {
+// writeAtomic writes a new lock record for this node using a conditional PUT
+// when possible.  If the store doesn't support conditional writes, it falls
+// back to the old optimistic read-back approach.
+//
+// Sets LastSeenNano to now so that a freshly elected leader is immediately
+// visible as "alive" to any follower checking liveness — avoiding the window
+// where the first periodic Touch hasn't fired yet.
+func (l *Lock) writeAtomic(ctx context.Context, newTerm uint64, observed *lockWithETag) (*LockRecord, bool, error) {
 	rec := &LockRecord{
-		NodeID:     l.nodeID,
-		Term:       newTerm,
-		LeaderAddr: l.advertiseAddr,
+		NodeID:       l.nodeID,
+		Term:         newTerm,
+		LeaderAddr:   l.advertiseAddr,
+		LastSeenNano: time.Now().UnixNano(),
 	}
-	if err := l.write(ctx, rec); err != nil {
+	b, err := json.Marshal(rec)
+	if err != nil {
 		return nil, false, err
 	}
 
-	// Wait briefly then read back — narrows (but does not eliminate) the
-	// race window with another concurrent candidate.
+	if l.conditional != nil {
+		var putErr error
+		if observed.rec == nil {
+			// Lock is absent: use If-None-Match: * — only one writer can win.
+			putErr = l.conditional.PutIfAbsent(ctx, LockKey, bytes.NewReader(b))
+		} else {
+			// Lock exists: use If-Match: <etag> — only wins if nobody else
+			// wrote between our Read and our Put.
+			putErr = l.conditional.PutIfMatch(ctx, LockKey, bytes.NewReader(b), observed.etag)
+		}
+		if putErr == nil {
+			return rec, true, nil
+		}
+		if errors.Is(putErr, object.ErrPreconditionFailed) {
+			// Someone else won the race — re-read to find out who.
+			winner, err := l.Read(ctx)
+			if err != nil {
+				return nil, false, err
+			}
+			return winner, false, nil
+		}
+		return nil, false, fmt.Errorf("election: conditional write: %w", putErr)
+	}
+
+	// Fallback: unconditional write + read-back (old behaviour).
+	if err := l.store.Put(ctx, LockKey, bytes.NewReader(b)); err != nil {
+		return nil, false, fmt.Errorf("election: write lock: %w", err)
+	}
 	time.Sleep(100 * time.Millisecond)
 	verify, err := l.Read(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 	if verify == nil || verify.NodeID != l.nodeID || verify.Term != newTerm {
-		return verify, false, nil // someone else won
+		return verify, false, nil
 	}
 	return rec, true, nil
 }
