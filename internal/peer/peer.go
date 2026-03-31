@@ -67,6 +67,14 @@ type FollowRequest struct {
 	NodeID       string `json:"node_id"`
 }
 
+// AckMsg is sent by a follower to the leader on the bidi Follow stream to
+// acknowledge that it has durably written all entries up to Revision to its
+// local WAL. The leader waits for ACKs from all connected followers before
+// committing each batch to Pebble (quorum commit).
+type AckMsg struct {
+	Revision int64 `json:"revision"`
+}
+
 // WalEntryMsg is the wire representation of a wal.Entry.
 // Shutdown is a special flag: when true the leader is shutting down gracefully
 // and the follower should start a TakeOver election immediately.
@@ -164,7 +172,8 @@ type WalStreamServer interface {
 	GoodBye(context.Context, *GoodByeRequest) (*GoodByeResponse, error)
 }
 
-// WalStream_FollowServer is the server-side send stream.
+// WalStream_FollowServer is the server-side send/receive stream.
+// The server sends WalEntryMsgs and receives AckMsgs.
 type WalStream_FollowServer interface {
 	Send(*WalEntryMsg) error
 	grpc.ServerStream
@@ -181,9 +190,11 @@ type WalStreamClient interface {
 	GoodBye(ctx context.Context, req *GoodByeRequest, opts ...grpc.CallOption) (*GoodByeResponse, error)
 }
 
-// WalStream_FollowClient is the client-side receive stream.
+// WalStream_FollowClient is the client-side send/receive stream.
+// The client receives WalEntryMsgs and sends AckMsgs.
 type WalStream_FollowClient interface {
 	Recv() (*WalEntryMsg, error)
+	SendAck(rev int64) error
 	grpc.ClientStream
 }
 
@@ -195,6 +206,10 @@ func (x *walStream_FollowClient) Recv() (*WalEntryMsg, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+func (x *walStream_FollowClient) SendAck(rev int64) error {
+	return x.ClientStream.SendMsg(&AckMsg{Revision: rev})
 }
 
 // ── gRPC service registration ─────────────────────────────────────────────────
@@ -221,9 +236,7 @@ func (c *walStreamClientImpl) Follow(ctx context.Context, req *FollowRequest, op
 	if err := x.ClientStream.SendMsg(req); err != nil {
 		return nil, err
 	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
+	// Do NOT call CloseSend: the follower sends AckMsgs back on this stream.
 	return x, nil
 }
 
@@ -294,7 +307,7 @@ var walStreamServiceDesc = grpc.ServiceDesc{
 		{MethodName: "GoodBye", Handler: walStreamGoodByeHandler},
 	},
 	Streams: []grpc.StreamDesc{
-		{StreamName: "Follow", Handler: walStreamFollowHandler, ServerStreams: true},
+		{StreamName: "Follow", Handler: walStreamFollowHandler, ServerStreams: true, ClientStreams: true},
 	},
 	Metadata: "peer/peer.proto",
 }

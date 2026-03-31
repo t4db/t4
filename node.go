@@ -1542,6 +1542,29 @@ func (n *Node) commitLoop(ctx context.Context) {
 		err := n.wal.AppendBatch(batchCtx, entries)
 		batchCancel() // release watcher goroutines
 
+		// Broadcast to followers immediately after WAL append — before Pebble
+		// apply — so they can start processing (WAL write + ACK) in parallel.
+		// Ordering note: Broadcast must happen in revision order to avoid the
+		// peer server's maxSent dedup filter dropping entries.
+		if err == nil && n.peerSrv != nil {
+			for _, req := range batch {
+				n.peerSrv.Broadcast(&req.entry)
+			}
+		}
+
+		// Quorum commit: wait for all connected followers to ACK the batch
+		// before committing to Pebble. This guarantees that a committed entry
+		// exists on at least two nodes' WALs before the caller sees success.
+		//
+		// Availability policy: if the context is cancelled (all callers
+		// abandoned) or all followers disconnect mid-wait, we proceed anyway —
+		// the entry is already durable in the leader's WAL and will be
+		// replayed by followers when they reconnect.
+		if err == nil && n.peerSrv != nil {
+			maxRev := batch[len(batch)-1].entry.Revision
+			_ = n.peerSrv.WaitForFollowers(batchCtx, maxRev)
+		}
+
 		// Apply all entries to Pebble as one batch (in order).
 		if err == nil {
 			dbEntries := make([]wal.Entry, len(batch))
@@ -1549,16 +1572,6 @@ func (n *Node) commitLoop(ctx context.Context) {
 				dbEntries[i] = req.entry
 			}
 			err = n.db.Apply(dbEntries)
-		}
-
-		// Broadcast to followers in revision order before unblocking callers.
-		// This must happen here (not in each caller's goroutine) because the
-		// peer server's maxSent dedup filter drops entries with rev <= maxSent;
-		// if callers broadcast concurrently they can send out of order.
-		if err == nil && n.peerSrv != nil {
-			for _, req := range batch {
-				n.peerSrv.Broadcast(&req.entry)
-			}
 		}
 
 		// Signal all callers.
@@ -1815,15 +1828,24 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	metrics.CheckpointsTotal.Inc()
 	logrus.Infof("strata: checkpoint written (rev=%d)", rev)
 
-	// GC WAL segments from S3 that are fully covered by this checkpoint.
+	// GC WAL segments from S3 that are fully covered by this checkpoint AND
+	// that all connected followers have applied. Using min(leaderRev,
+	// minFollowerAppliedRev) as the GC boundary ensures we never delete a
+	// segment that a follower still needs to replay.
 	gcCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	deleted, gcErr := wal.GCSegments(gcCtx, n.cfg.ObjectStore, rev)
+	gcRev := rev
+	if n.peerSrv != nil {
+		if minFollower := n.peerSrv.MinFollowerAppliedRev(); minFollower < gcRev {
+			gcRev = minFollower
+		}
+	}
+	deleted, gcErr := wal.GCSegments(gcCtx, n.cfg.ObjectStore, gcRev)
 	if gcErr != nil {
 		logrus.Warnf("strata: wal gc: %v", gcErr)
 	} else if deleted > 0 {
 		metrics.WALGCTotal.Add(float64(deleted))
-		logrus.Infof("strata: wal gc: deleted %d segments (covered by checkpoint rev=%d)", deleted, rev)
+		logrus.Infof("strata: wal gc: deleted %d segments (covered by checkpoint rev=%d)", deleted, gcRev)
 	}
 
 	// GC old checkpoint archives from S3, keeping the 2 most recent so that

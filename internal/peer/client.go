@@ -159,6 +159,11 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, applyFn func(wal
 			return fromRev, err
 		}
 		fromRev = e.Revision + 1
+		// ACK after durable local WAL write (applyFn writes to WAL before Pebble).
+		// Best-effort: a send error just causes reconnect, which is safe.
+		if err := stream.SendAck(e.Revision); err != nil {
+			return fromRev, err
+		}
 	}
 }
 
