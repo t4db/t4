@@ -1549,13 +1549,17 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// before committing to Pebble. This guarantees that a committed entry
 		// exists on at least two nodes' WALs before the caller sees success.
 		//
-		// Availability policy: if the context is cancelled (all callers
-		// abandoned) or all followers disconnect mid-wait, we proceed anyway —
-		// the entry is already durable in the leader's WAL and will be
-		// replayed by followers when they reconnect.
+		// Use the commit loop's own context (node lifetime), NOT batchCtx.
+		// batchCtx is cancelled immediately after AppendBatch to release the
+		// per-caller watcher goroutines; passing it here would cause
+		// WaitForFollowers to return instantly, defeating quorum commit.
+		//
+		// Availability policy: if all followers disconnect mid-wait, we
+		// proceed anyway — the entry is already durable in the leader's WAL
+		// and will be replayed by followers when they reconnect.
 		if err == nil && n.peerSrv != nil {
 			maxRev := batch[len(batch)-1].entry.Revision
-			_ = n.peerSrv.WaitForFollowers(batchCtx, maxRev)
+			_ = n.peerSrv.WaitForFollowers(ctx, maxRev)
 		}
 
 		// Apply all entries to Pebble as one batch (in order).
