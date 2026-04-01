@@ -262,12 +262,15 @@ func Open(cfg Config) (*Node, error) {
 		uploader = makeUploader(cfg.ObjectStore)
 	}
 
-	w, err := wal.Open(walDir, term, startRev+1,
+	opts := []wal.Option{
 		wal.WithUploader(uploader),
-		wal.WithSyncUpload(),
 		wal.WithSegmentMaxSize(cfg.SegmentMaxSize),
 		wal.WithSegmentMaxAge(cfg.SegmentMaxAge),
-	)
+	}
+	if cfg.ObjectStore != nil && *cfg.WALSyncUpload {
+		opts = append(opts, wal.WithSyncUpload())
+	}
+	w, err := wal.Open(walDir, term, startRev+1, opts...)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("strata: open wal: %w", err)
@@ -388,12 +391,7 @@ func Open(cfg Config) (*Node, error) {
 				return nil, fmt.Errorf("strata: reopen store after GC-gap fix: %w", rerr)
 			}
 			w.Close()
-			freshW, rerr := wal.Open(walDir, newTerm, freshDB.CurrentRevision()+1,
-				wal.WithUploader(uploader),
-				wal.WithSyncUpload(),
-				wal.WithSegmentMaxSize(cfg.SegmentMaxSize),
-				wal.WithSegmentMaxAge(cfg.SegmentMaxAge),
-			)
+			freshW, rerr := wal.Open(walDir, newTerm, freshDB.CurrentRevision()+1, opts...)
 			if rerr != nil {
 				freshDB.Close()
 				return nil, fmt.Errorf("strata: reopen wal after GC-gap fix: %w", rerr)

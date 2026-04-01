@@ -73,9 +73,25 @@ type Config struct {
 	// Default: 50 MB.
 	SegmentMaxSize int64
 
-	// SegmentMaxAge is the time threshold that triggers WAL segment rotation.
-	// Default: 10 s.
+	// SegmentMaxAge is the time threshold that triggers WAL segment rotation
+	// and, when WALSyncUpload is false, the maximum interval between async S3
+	// uploads. Default: 10 s.
 	SegmentMaxAge time.Duration
+
+	// WALSyncUpload controls whether WAL segments are uploaded to S3
+	// synchronously before a write is acknowledged in single-node mode.
+	//
+	// true (default): each write blocks until its WAL segment is durably in
+	// S3. Safe even if local disk is ephemeral (e.g. emptyDir in Kubernetes).
+	//
+	// false: uploads happen asynchronously every SegmentMaxAge. Write latency
+	// is much lower, but up to SegmentMaxAge of acknowledged writes can be lost
+	// if local storage is destroyed before the upload completes. Use this when
+	// local storage is already durable (e.g. a PVC).
+	//
+	// Has no effect in multi-node mode; quorum ACK provides durability without
+	// blocking on S3, so uploads are always async there.
+	WALSyncUpload *bool
 
 	// CheckpointInterval controls how often the leader writes a checkpoint.
 	// Default: 15 minutes.
@@ -143,6 +159,10 @@ func (c *Config) setDefaults() {
 	}
 	if c.CheckpointInterval == 0 {
 		c.CheckpointInterval = 15 * time.Minute
+	}
+	if c.WALSyncUpload == nil {
+		t := true
+		c.WALSyncUpload = &t // default: sync for single-node safety
 	}
 	if c.NodeID == "" {
 		if h, err := os.Hostname(); err == nil {
