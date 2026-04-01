@@ -344,8 +344,13 @@ func Open(cfg Config) (*Node, error) {
 				}
 				logrus.Infof("strata: WAL replay error (%v), checkpoint advanced (%d→%d) — re-restoring to close GC gap",
 					replayErr, startRevBeforeReplay, freshManifest.Revision)
-			} else if merr != nil || freshManifest == nil || freshManifest.Revision <= startRevBeforeReplay {
-				// Replay succeeded and no checkpoint advancement — no GC gap, done.
+			} else if merr != nil || freshManifest == nil || freshManifest.Revision <= db.CurrentRevision() {
+				// Replay succeeded and the DB is at or ahead of the latest
+				// checkpoint — no GC gap, done.  Using db.CurrentRevision()
+				// (not startRevBeforeReplay) is important: when the last WAL
+				// entry was an OpCompact, replayRemote advances currentRev but
+				// does not write a log key, so startRevBeforeReplay stays at
+				// the pre-compact value even after a successful replay.
 				break
 			} else {
 				// Replay succeeded but checkpoint advanced — silent GC holes possible.

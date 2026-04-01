@@ -13,7 +13,7 @@ import (
 //
 //	'l' + rev(8B BE)  → serialised entry  (append-only change log)
 //	'i' + key bytes   → rev(8B BE)         (current modRevision per live key)
-//	'm' + name bytes  → metadata value     (compact rev, etc.)
+//	'm' + name bytes  → metadata value     (compact rev, current rev, etc.)
 const (
 	prefixLog  = byte('l')
 	prefixIdx  = byte('i')
@@ -22,6 +22,11 @@ const (
 
 var (
 	metaCompactKey = []byte{prefixMeta, 'c', 'o', 'm', 'p', 'a', 'c', 't'}
+	// metaCurrentRevKey persists the highest revision committed to this store.
+	// Written in every Apply/Recover batch so loadMeta recovers the exact
+	// current revision even when the last WAL entry was an OpCompact (which
+	// does not write a log key).
+	metaCurrentRevKey = []byte{prefixMeta, 'r', 'e', 'v'}
 
 	// Iteration bounds.
 	logLower = []byte{prefixLog, 0, 0, 0, 0, 0, 0, 0, 0}
