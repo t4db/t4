@@ -3,19 +3,20 @@
 ## Overview
 
 ```
-                   ┌──────────────────────────────────────────────────┐
-                   │                    Leader node                    │
- client writes ──► │  Node.Put/Create/… → WAL.Append → store.Apply   │
-                   │                          │                        │
-                   │                     Broadcast                     │
-                   └──────────────────────────┬───────────────────────┘
-                                              │  gRPC stream (port 3380)
-                        ┌─────────────────────┴──────────────────────┐
+                   ┌──────────────────────────────────────────────────────┐
+                   │                     Leader node                       │
+ client writes ──► │  Node.Put/… → WAL.Append ──► wait ACK ──► db.Apply  │
+                   │                    │               ▲                  │
+                   │                Broadcast          ACK                 │
+                   └────────────────────┬──────────────┴───────────────────┘
+                                        │  gRPC bidi stream (port 3380)
+                        ┌───────────────┴────────────────────────────┐
                         ▼                                             ▼
                 ┌───────────────┐                           ┌───────────────┐
                 │  Follower B   │                           │  Follower C   │
-                │  WAL.Apply    │                           │  WAL.Apply    │
-                │  store.Apply  │                           │  store.Apply  │
+                │  WAL.Write    │                           │  WAL.Write    │
+                │  ACK leader   │                           │  ACK leader   │
+                │  db.Apply     │                           │  db.Apply     │
                 └───────────────┘                           └───────────────┘
                 reads: local                                reads: local
                 writes: forwarded ──────────────────────►  leader via gRPC
@@ -23,7 +24,7 @@
                    ┌──────────────┐
                    │  S3 bucket   │
                    │  leader-lock │  ◄── election / liveness
-                   │  wal/…       │  ◄── durability / recovery
+                   │  wal/…       │  ◄── disaster recovery
                    │  checkpoint/ │  ◄── fast startup
                    │  manifest/   │  ◄── single GET to locate latest state
                    └──────────────┘
@@ -58,11 +59,15 @@ Every write goes through the WAL before it touches the database:
 
 1. The leader assigns the next monotonic revision.
 2. The entry (`{revision, op, key, value}`) is appended to the active `.wal` segment and fsynced.
-3. The entry is broadcast to all connected followers over gRPC streams.
-4. The entry is applied to Pebble.
-5. The response is returned to the caller.
+3. The entry is broadcast to all connected followers over a bidirectional gRPC stream.
+4. Each follower fsyncs the entry to its own local WAL, applies it to its own Pebble, then sends an **ACK** back to the leader.
+5. The leader waits for ACKs from all connected followers (quorum commit). If followers disconnect mid-wait, the leader proceeds — the entry is already durable in the leader's WAL and will be replayed by followers when they reconnect.
+6. The entry is applied to the leader's Pebble.
+7. The response is returned to the caller.
 
-WAL segment rotation is triggered by size (default 50 MB) or age (default 10 s). When a segment is sealed it is queued for async upload to S3 and then deleted locally once the upload confirms.
+In single-node mode (no peers configured) steps 3–5 are skipped.
+
+WAL segment rotation is triggered by size (default 50 MB) or age (default 10 s). Sealed segments are queued for async upload to S3 and deleted locally once the upload confirms. In cluster mode uploads are fully async (S3 is disaster-recovery only); in single-node mode each segment is uploaded synchronously before the write is acknowledged.
 
 ### Segment naming
 
@@ -80,13 +85,13 @@ A checkpoint is a point-in-time Pebble snapshot uploaded to S3. It allows new or
 
 The checkpoint cycle (triggered by `CheckpointInterval` or `CheckpointEntries`):
 
-1. Seal and upload the current WAL segment.
+1. Seal and queue the current WAL segment for async upload to S3.
 2. Call `pebble.DB.Checkpoint` to capture a consistent snapshot.
 3. Upload each SST file to `sst/<hash16>/<name>` — skipping any that are already present (same content hash = same key, so deduplication is automatic).
 4. Upload Pebble metadata files (`MANIFEST-*`, `OPTIONS-*`, `CURRENT`) to `checkpoint/<term>/<revision>/`.
 5. Write a `checkpoint/<term>/<revision>/manifest.json` index listing all SST keys and metadata filenames.
 6. Write `manifest/latest` pointing to the new index.
-7. Delete S3 WAL segments whose last revision is older than the checkpoint.
+7. GC S3 WAL segments fully covered by `min(checkpointRev, minFollowerAppliedRev)` — ensuring no segment is deleted while a connected follower still needs it.
 8. GC old checkpoint directories (keep the two most recent); delete SST objects no longer referenced by any live checkpoint or branch registry entry.
 
 ### Content-addressed SSTs
@@ -129,20 +134,22 @@ There is no heartbeat, no TTL, and no ZooKeeper-style session. The only S3 write
 
 ### CAP properties
 
-Strata is an **AP** system (Available + Partition-tolerant, not Consistent under partitions):
+Strata is an **AP** system (Available + Partition-tolerant) that provides strong durability guarantees in cluster mode:
 
 - **No network partition**: reads are linearizable (followers use the ReadIndex pattern — they sync to the leader's revision before serving). Writes are always routed to the leader.
-- **Under network partition**: when a follower is fully isolated (can't reach leader or other followers), it will eventually TakeOver once `LastSeenNano` goes stale. The old leader detects supersession either via its next conditional liveness touch (which fails with `ErrPreconditionFailed` the instant a new leader writes the lock) or within one poll interval (≤ 2 s). **The split-brain window is effectively zero**: the conditional touch means A cannot refresh its liveness after B wins — A's next touch attempt is rejected and triggers immediate stepdown. The window is zero when the leader still has other followers (follower backs off via liveness touch).
+- **Under network partition**: when a follower is fully isolated (can't reach leader or other followers), it will eventually TakeOver once `LastSeenNano` goes stale. The old leader detects supersession either via its next conditional liveness touch (which fails with `ErrPreconditionFailed` the instant a new leader writes the lock) or within one poll interval (≤ 2 s). **The split-brain window is effectively zero**: the conditional touch means A cannot refresh its liveness after B wins — A's next touch attempt is rejected and triggers immediate stepdown.
 
-**Known limitation:** a fully isolated old leader (partitioned from both all followers and S3) will continue to accept writes until it can reach S3. Making Strata CP under partitions would require quorum writes (majority acknowledgment before commit) — a Raft/Paxos-level redesign. The current design deliberately prioritises simplicity and availability.
+**Durability in cluster mode:** quorum commit means every acknowledged write exists on at least two nodes' WALs before the caller sees success. If all followers disconnect, the leader falls back to single-node mode — writes remain available and durable in the leader's local WAL; followers replay missed entries when they reconnect. S3 is disaster-recovery only (both nodes fail simultaneously); WAL uploads are async and do not affect write latency.
 
 ---
 
 ## Follower replication
 
-Followers connect to the leader's gRPC peer address and open a streaming RPC. The leader pushes WAL entries as they are committed. Each entry contains the revision, operation type, key, and value — enough to apply to the follower's local Pebble instance.
+Followers connect to the leader's gRPC peer address and open a **bidirectional** streaming RPC. The leader pushes WAL entries; followers send ACKs back.
 
-**Catch-up on connect:** when a follower connects, it sends its current revision. The leader replays from that revision using its in-memory ring buffer (`PeerBufferSize` entries, default 10 000). If the follower is too far behind, it must restart from S3.
+**Quorum ACK:** after fsyncing each entry to its local WAL and applying it to Pebble, a follower sends an ACK with the entry's revision back to the leader. The leader waits for ACKs from all connected followers before applying the batch to its own Pebble. This guarantees that every acknowledged write exists on at least two nodes' WALs.
+
+**Catch-up on connect:** when a follower connects, it sends its current revision. The leader replays from that revision using its in-memory ring buffer (`PeerBufferSize` entries, default 10 000). If the follower is too far behind (ring buffer miss), the leader returns `ErrResyncRequired` and the follower restores the latest S3 checkpoint then replays remaining WAL entries from S3.
 
 **Write forwarding:** a client write arriving at a follower is forwarded to the leader via gRPC. The follower returns the leader's response (including the assigned revision) directly to the client.
 
@@ -177,7 +184,7 @@ Branching lets you fork a database at a checkpoint without copying SST files in 
 1. **Register** — `Fork(ctx, sourceStore, branchID)` reads the latest (or a specified) checkpoint manifest from the source store and writes a `branches/<id>` registry entry to the source store. This entry records the checkpoint key being forked from.
 2. **Start** — Open a new strata node with `BranchPoint{SourceStore, CheckpointKey}`. On first boot, `RestoreBranch` downloads SSTs from the source store and Pebble metadata from the source checkpoint. The branch's own store prefix starts empty.
 3. **Diverge** — New SSTs produced by the branch are uploaded to the branch's own prefix. The checkpoint index for the branch records `SSTFiles` (its own SSTs) and `AncestorSSTFiles` (SSTs inherited from the source). Ancestor SSTs are never re-uploaded.
-4. **GC coordination** — The source's GC phase reads the branch registry and treats all SST keys referenced by any live branch as pinned. SSTs shared between source and branch are never deleted while the branch is registered.
+4. **GC coordination** — The source's GC phase reads the branch registry before deleting anything. `GCCheckpoints` keeps the pinned checkpoint directory (manifest + index) intact even if it falls outside the keep-N window. `GCOrphanSSTs` keeps all SST files referenced by any live branch. Both source checkpoint objects and SSTs are preserved for as long as the branch entry exists.
 5. **Unfork** — `Unfork(ctx, sourceStore, branchID)` removes the registry entry. The next source GC cycle can reclaim SSTs that are no longer referenced by any live checkpoint or branch.
 
 ### Branch registry
@@ -196,8 +203,9 @@ Entries are stored at `branches/<id>` in the source store as JSON:
 
 ## Concurrency model
 
-- **All writes serialised through a single mutex** (`node.mu`). This keeps the revision counter monotonic and makes WAL append + Pebble apply atomic from the node's perspective.
+- **Revision assignment** is serialised under `node.mu`. This keeps the revision counter monotonic.
+- **WAL writes, follower broadcast, and Pebble apply** are serialised through a single `commitLoop` goroutine that drains a write channel. Multiple concurrent callers batch into a single `AppendBatch`+`db.Apply` per drain cycle.
 - **Reads are lock-free** — Pebble handles its own read concurrency.
 - **Watchers** are registered in a fan-out broadcaster that sends events after each write. Each watcher runs in its own goroutine.
 - **WAL background goroutines** (rotation loop, upload loop) share the WAL mutex with write operations but hold it only briefly during segment rotation.
-- **Follower streams** run in dedicated goroutines per connected follower; the leader pushes entries from a channel filled under the write mutex.
+- **Follower streams** each run in a dedicated goroutine; the leader pushes entries from a per-follower buffered channel.

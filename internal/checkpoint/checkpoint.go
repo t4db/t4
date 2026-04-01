@@ -115,6 +115,10 @@ func WriteManifest(ctx context.Context, store object.Store, m *Manifest) error {
 // ancestorStore, if non-nil, is the source node's object store (for branch
 // nodes). SST files already present there are recorded as AncestorSSTFiles
 // and not re-uploaded to store.
+//
+// SST deduplication uses the previous checkpoint index rather than issuing a
+// LIST request, keeping the per-checkpoint S3 cost to O(1) GETs regardless of
+// how many SST files have accumulated in the bucket.
 func Write(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision int64, lastWALKey string, ancestorStore object.Store) error {
 	tmpDir, err := os.MkdirTemp("", "strata-checkpoint-*")
 	if err != nil {
@@ -127,16 +131,13 @@ func Write(ctx context.Context, db *pebble.DB, store object.Store, term uint64, 
 		return fmt.Errorf("checkpoint: pebble checkpoint: %w", err)
 	}
 
-	localSSTs, err := listSSTSet(ctx, store)
+	// Build known-SST sets from the previous checkpoint index (2 GETs) instead
+	// of issuing a LIST sst/ (which grows with bucket size). On a brand-new
+	// store there is no previous index, so both sets start empty and every SST
+	// is uploaded — correct behaviour for a first checkpoint.
+	localSSTs, ancestorSSTs, err := knownSSTSets(ctx, store, ancestorStore)
 	if err != nil {
-		return fmt.Errorf("checkpoint: list local ssts: %w", err)
-	}
-	var ancestorSSTs map[string]struct{}
-	if ancestorStore != nil {
-		ancestorSSTs, err = listSSTSet(ctx, ancestorStore)
-		if err != nil {
-			return fmt.Errorf("checkpoint: list ancestor ssts: %w", err)
-		}
+		return fmt.Errorf("checkpoint: resolve known ssts: %w", err)
 	}
 
 	var sstFiles, ancestorSSTFiles, metaFiles []string
@@ -210,7 +211,51 @@ func Write(ctx context.Context, db *pebble.DB, store object.Store, term uint64, 
 	return WriteManifest(ctx, store, m)
 }
 
+// knownSSTSets returns the sets of SST keys already uploaded to store and to
+// ancestorStore by reading the previous checkpoint index rather than issuing
+// LIST requests.
+//
+// For the local store: read manifest/latest → read its index → use SSTFiles.
+//
+// For the ancestor store on a branch node's first checkpoint (no previous
+// branch index yet, so AncestorSSTFiles is empty): fall back to listing the
+// ancestor store's sst/ prefix once. On every subsequent checkpoint the
+// ancestor set is carried forward from the previous index's AncestorSSTFiles,
+// so no LIST is needed after the first.
+func knownSSTSets(ctx context.Context, store object.Store, ancestorStore object.Store) (local, ancestor map[string]struct{}, err error) {
+	local = make(map[string]struct{})
+	ancestor = make(map[string]struct{})
+
+	manifest, err := ReadManifest(ctx, store)
+	if err != nil || manifest == nil {
+		err = nil // fresh store; sets stay empty
+	} else {
+		prevIdx, idxErr := readCheckpointIndex(ctx, store, manifest.CheckpointKey)
+		if idxErr == nil {
+			for _, k := range prevIdx.SSTFiles {
+				local[k] = struct{}{}
+			}
+			for _, k := range prevIdx.AncestorSSTFiles {
+				ancestor[k] = struct{}{}
+			}
+		}
+	}
+
+	// Branch node, first checkpoint: no AncestorSSTFiles in previous index yet.
+	// LIST the ancestor store once so we correctly attribute inherited SSTs
+	// instead of re-uploading them to the branch prefix.
+	if ancestorStore != nil && len(ancestor) == 0 {
+		ancestor, err = listSSTSet(ctx, ancestorStore)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list ancestor ssts: %w", err)
+		}
+	}
+
+	return local, ancestor, nil
+}
+
 // listSSTSet returns the set of full object keys in the store's "sst/" prefix.
+// Used by GCOrphanSSTs and as a fallback for a branch node's first checkpoint.
 func listSSTSet(ctx context.Context, store object.Store) (map[string]struct{}, error) {
 	keys, err := store.List(ctx, "sst/")
 	if err != nil {
@@ -362,7 +407,9 @@ func ListRemote(ctx context.Context, store object.Store) ([]string, error) {
 // only the most recent `keep` checkpoints. Returns the number deleted.
 //
 // The checkpoint currently referenced by manifest/latest is always preserved
-// even if it would otherwise fall outside the `keep` window.
+// even if it would otherwise fall outside the `keep` window. Checkpoints
+// referenced by active branch entries are also always preserved, since branch
+// nodes need the checkpoint index to call RestoreBranch.
 func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, error) {
 	if keep < 1 {
 		keep = 1
@@ -371,6 +418,17 @@ func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, erro
 	manifest, err := ReadManifest(ctx, store)
 	if err != nil {
 		return 0, fmt.Errorf("checkpoint gc: read manifest: %w", err)
+	}
+
+	branches, err := ReadBranchEntries(ctx, store)
+	if err != nil {
+		return 0, fmt.Errorf("checkpoint gc: read branch entries: %w", err)
+	}
+	pinnedKeys := make(map[string]bool, len(branches))
+	for _, entry := range branches {
+		if entry.AncestorCheckpointKey != "" {
+			pinnedKeys[entry.AncestorCheckpointKey] = true
+		}
 	}
 
 	keys, err := ListRemote(ctx, store)
@@ -385,6 +443,9 @@ func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, erro
 	for _, k := range toDelete {
 		if manifest != nil && k == manifest.CheckpointKey {
 			continue
+		}
+		if pinnedKeys[k] {
+			continue // branch is pinned to this checkpoint; preserve it
 		}
 		if err := deleteCheckpoint(ctx, store, k); err != nil {
 			return deleted, fmt.Errorf("checkpoint gc: delete %q: %w", k, err)

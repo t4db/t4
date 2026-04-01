@@ -40,7 +40,8 @@ func checkConsistency(t *testing.T, ctx context.Context, nodes []*strata.Node, p
 				continue
 			}
 			if kv == nil {
-				t.Errorf("node-%d Get(%q): key missing (want %q)", i, key, wantVal)
+				t.Errorf("node-%d Get(%q): key missing (want %q) node_rev=%d compact_rev=%d",
+					i, key, wantVal, n.CurrentRevision(), n.CompactRevision())
 				continue
 			}
 			if string(kv.Value) != wantVal {

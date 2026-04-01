@@ -70,7 +70,7 @@ strata run \
 - The former leader periodically re-reads the S3 lock (`--leader-watch-interval-sec`, default 300 s) and on every follower disconnect. Each check reads the lock **with its ETag**, then — if still the owner — writes a liveness touch using `If-Match: <etag>`. If the conditional touch is rejected (`ErrPreconditionFailed`), a new leader has taken over between the Read and the Touch: the old leader steps down immediately. This closes the Read→Touch split-brain race without a second round-trip.
 - Writes sent to a follower are automatically forwarded to the current leader and the result is returned to the caller.
 
-Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). There is no quorum requirement and no TTL polling — the only S3 election writes are at startup, on leader takeover, and during liveness touches while followers are disconnected.
+Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). There is no TTL polling — the only S3 election writes are at startup, on leader takeover, and during liveness touches while followers are disconnected. In cluster mode, writes additionally require quorum ACK from all connected followers before returning to the caller.
 
 ### Adding a node to a running cluster
 
@@ -156,15 +156,61 @@ strata run --metrics-addr 0.0.0.0:9090 ...
 
 ---
 
+## Performance
+
+Numbers are from `go test -bench=. -benchtime=5s` on an Apple M4 Pro (12 cores, NVMe SSD). All tests use in-process loopback — no real network or S3.
+
+### Single-node (no peers, no S3)
+
+Write latency is dominated by a single WAL fsync (~8 ms on NVMe). Concurrent writers are automatically batched by the `commitLoop` into a single fsync per drain cycle (group commit).
+
+| Operation | Throughput | Latency |
+|---|---|---|
+| `Put` (serial) | ~123 writes/s | 8.1 ms |
+| `Put` (12 concurrent writers) | ~750 writes/s | 1.3 ms avg |
+| `Put` (192 concurrent writers) | ~11,600 writes/s | 86 µs avg |
+| `Get` / `LinearizableGet` (leader) | ~2,300,000 reads/s | 0.43 µs |
+| `List` (100 keys) | ~27,900 ops/s | 36 µs |
+
+### 3-node cluster (localhost loopback)
+
+Write latency = leader WAL fsync + quorum ACK round-trip (follower WAL fsync + network). On loopback, both nodes share the same SSD so each write costs roughly two sequential fsyncs (~16 ms).
+
+| Operation | Throughput | Latency |
+|---|---|---|
+| `Put` (serial) | ~43 writes/s | 23 ms |
+| `Put` (12 concurrent writers) | ~224 writes/s | 4.5 ms avg |
+| `LinearizableGet` (follower) | ~18,100 reads/s | 55 µs |
+
+With group commit, the per-write overhead of the quorum ACK round-trip disappears almost entirely under load — 12 concurrent writers improve from 43 to 224 writes/s by batching many writes into one ACK round.
+
+### Impact of real-world latency
+
+Write latency scales with inter-node RTT and S3 latency (single-node only):
+
+| Scenario | Additional latency | Notes |
+|---|---|---|
+| Cluster, same-host loopback | +15 ms | loopback gRPC + follower fsync |
+| Cluster, LAN (1 ms RTT) | +9 ms | ≈ follower fsync + 2× 0.5 ms network |
+| Cluster, cross-AZ (5 ms RTT) | +18 ms | ≈ follower fsync + 2× 5 ms network |
+| Cluster, cross-region (50 ms RTT) | +108 ms | high-latency links hurt serial throughput most |
+| Single-node, S3 upload | +100–500 ms | sync upload per WAL segment — use cluster mode for low latency |
+
+In cluster mode, **S3 uploads are async** (disaster-recovery only) and add zero latency to the write path. Single-node mode uploads each WAL segment to S3 synchronously; write latency is dominated by S3 round-trip, not local fsync. For low-latency single-node deployments without S3, latency is entirely local disk (~8 ms NVMe).
+
+Read latency on a follower includes one `ForwardGetRevision` gRPC call to the leader to obtain the current revision, then a local Pebble lookup. On localhost this costs ~55 µs; on LAN expect ~1–2 ms; on cross-AZ ~10 ms.
+
+---
+
 ## Durability and recovery
 
 ### What is durable
 
 A write is durable when it has been:
-- fsynced to the local WAL **and** at least one follower has applied it (cluster mode), **or**
+- fsynced to the leader's WAL **and** ACKed by all connected followers (cluster mode) — the entry exists on at least two nodes' WALs before the caller sees success, **or**
 - fsynced to the local WAL **and** the WAL segment has been uploaded to S3 (single-node mode).
 
-In single-node mode without S3, durability depends entirely on local disk.
+In cluster mode S3 is disaster-recovery only (both nodes fail simultaneously). WAL uploads are fully async and do not affect write latency. In single-node mode without S3, durability depends entirely on local disk.
 
 ### Recovery procedure
 
@@ -181,7 +227,7 @@ Steps 4–5 ensure that no committed write is lost even if the node is killed be
 
 ### S3 unavailability
 
-S3 failures are non-blocking on the write path. WAL segment uploads and checkpoints retry in the background. Writes continue to succeed locally. On restart, local WAL segments are replayed first, so no data written to the local WAL is lost even if it was never uploaded.
+In cluster mode, S3 uploads are fully async — WAL segments and checkpoints are uploaded in the background without blocking writes. In single-node mode, each WAL segment is uploaded to S3 synchronously before the write is acknowledged. In both modes, on restart local WAL segments are replayed first, so no data written to the local WAL is lost even if it was never uploaded to S3.
 
 ---
 

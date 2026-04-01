@@ -6,7 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN echo 4 && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /strata ./cmd/strata
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /strata ./cmd/strata
 
 # ── Stage 2: minimal runtime node ────────────────────────────────────────────
 FROM debian:bookworm-slim

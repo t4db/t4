@@ -3,11 +3,11 @@
 // The protocol uses atomic conditional PUT operations to safely resolve races:
 //
 //  1. Read the current lock object (with its ETag).
-//  2a. If absent: PutIfAbsent — only one concurrent writer can succeed.
-//  2b. If owned by another: become a follower.
-//  2c. If owned by us (restart) or being taken over (TakeOver): PutIfMatch
-//      using the observed ETag — only succeeds if no one wrote between our
-//      Read and our Put.
+//     2a. If absent: PutIfAbsent — only one concurrent writer can succeed.
+//     2b. If owned by another: become a follower.
+//     2c. If owned by us (restart) or being taken over (TakeOver): PutIfMatch
+//     using the observed ETag — only succeeds if no one wrote between our
+//     Read and our Put.
 //  3. On ErrPreconditionFailed: re-read and retry once to find the winner.
 //
 // There is no TTL on the lock. Liveness is detected via the WAL stream
@@ -36,6 +36,7 @@ type LockRecord struct {
 	Term         uint64 `json:"term"`
 	LeaderAddr   string `json:"leader_addr"`    // follower peer-stream address
 	LastSeenNano int64  `json:"last_seen_nano"` // Unix ns; set by leader on liveness touch
+	CommittedRev int64  `json:"committed_rev"`  // leader's highest committed revision; used as election fence
 }
 
 // lockWithETag pairs a decoded lock record with the ETag of the S3 object
@@ -76,7 +77,9 @@ func NewLock(store object.Store, nodeID, advertiseAddr string) *Lock {
 //
 // floorTerm ensures the new term is always strictly greater than any
 // previously observed term, preventing term regression after restart.
-func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64) (*LockRecord, bool, error) {
+// committedRev is written into the lock so candidates can use it as a
+// revision fence (see TakeOver).
+func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64, committedRev int64) (*LockRecord, bool, error) {
 	cur, err := l.readWithETag(ctx)
 	if err != nil {
 		return nil, false, err
@@ -92,7 +95,7 @@ func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64) (*LockRecord, b
 		newTerm = cur.rec.Term + 1
 	}
 
-	return l.writeAtomic(ctx, newTerm, cur)
+	return l.writeAtomic(ctx, newTerm, committedRev, cur)
 }
 
 // TakeOver forcefully attempts to acquire the lock, overwriting any existing
@@ -104,16 +107,27 @@ func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64) (*LockRecord, b
 // If, by the time TakeOver reads the lock, a different node already holds a
 // term higher than floorTerm, that node won a concurrent TakeOver race.
 // Back off and return (winner, false) so the caller can follow the new leader.
-func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64) (*LockRecord, bool, error) {
+//
+// committedRev is the caller's own highest committed revision.  If the current
+// lock's CommittedRev is higher, this node is behind the departing leader and
+// must not take over — it would either discard those entries or be unable to
+// serve reads that clients already received.
+func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64, committedRev int64) (*LockRecord, bool, error) {
 	cur, err := l.readWithETag(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 
-	// Another node already took over (its term is already above what we
-	// expected to see): back off to avoid cascading leadership churn.
-	if cur.rec != nil && cur.rec.NodeID != l.nodeID && cur.rec.Term > floorTerm {
-		return cur.rec, false, nil
+	if cur.rec != nil && cur.rec.NodeID != l.nodeID {
+		// Another node already took over at a higher term: back off.
+		if cur.rec.Term > floorTerm {
+			return cur.rec, false, nil
+		}
+		// Current leader has committed entries we haven't applied yet: back off
+		// to prevent promoting a node that is missing data.
+		if cur.rec.CommittedRev > committedRev {
+			return cur.rec, false, nil
+		}
 	}
 
 	newTerm := floorTerm + 1
@@ -121,7 +135,7 @@ func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64) (*LockRecord, boo
 		newTerm = cur.rec.Term + 1
 	}
 
-	return l.writeAtomic(ctx, newTerm, cur)
+	return l.writeAtomic(ctx, newTerm, committedRev, cur)
 }
 
 // Release deletes the lock. Safe to call if the lock is not held.
@@ -190,12 +204,13 @@ func (l *Lock) readWithETag(ctx context.Context) (*lockWithETag, error) {
 // Sets LastSeenNano to now so that a freshly elected leader is immediately
 // visible as "alive" to any follower checking liveness — avoiding the window
 // where the first periodic Touch hasn't fired yet.
-func (l *Lock) writeAtomic(ctx context.Context, newTerm uint64, observed *lockWithETag) (*LockRecord, bool, error) {
+func (l *Lock) writeAtomic(ctx context.Context, newTerm uint64, committedRev int64, observed *lockWithETag) (*LockRecord, bool, error) {
 	rec := &LockRecord{
 		NodeID:       l.nodeID,
 		Term:         newTerm,
 		LeaderAddr:   l.advertiseAddr,
 		LastSeenNano: time.Now().UnixNano(),
+		CommittedRev: committedRev,
 	}
 	b, err := json.Marshal(rec)
 	if err != nil {
@@ -252,17 +267,18 @@ func (l *Lock) write(ctx context.Context, rec *LockRecord) error {
 	return nil
 }
 
-// Touch updates LastSeenNano on the lock record to signal that this node is
-// still the active leader. It must only be called when the caller has already
-// verified (via Read) that it still holds the lock with the given term — i.e.,
-// under the leader's fenceMu write-lock. No additional read-back is performed
-// because the term check was just done by the caller.
-func (l *Lock) Touch(ctx context.Context, term uint64, leaderAddr string) error {
+// Touch updates LastSeenNano and CommittedRev on the lock record to signal
+// that this node is still the active leader. It must only be called when the
+// caller has already verified (via Read) that it still holds the lock with the
+// given term — i.e., under the leader's fenceMu write-lock. No additional
+// read-back is performed because the term check was just done by the caller.
+func (l *Lock) Touch(ctx context.Context, term uint64, leaderAddr string, committedRev int64) error {
 	rec := &LockRecord{
 		NodeID:       l.nodeID,
 		Term:         term,
 		LeaderAddr:   leaderAddr,
 		LastSeenNano: time.Now().UnixNano(),
+		CommittedRev: committedRev,
 	}
 	return l.write(ctx, rec)
 }
@@ -276,15 +292,16 @@ func (l *Lock) Touch(ctx context.Context, term uint64, leaderAddr string) error 
 //
 // Falls back to unconditional Touch when the store does not support
 // conditional writes (etag == "" or no ConditionalStore).
-func (l *Lock) TouchIfMatch(ctx context.Context, term uint64, leaderAddr, etag string) error {
+func (l *Lock) TouchIfMatch(ctx context.Context, term uint64, leaderAddr, etag string, committedRev int64) error {
 	if l.conditional == nil || etag == "" {
-		return l.Touch(ctx, term, leaderAddr)
+		return l.Touch(ctx, term, leaderAddr, committedRev)
 	}
 	rec := &LockRecord{
 		NodeID:       l.nodeID,
 		Term:         term,
 		LeaderAddr:   leaderAddr,
 		LastSeenNano: time.Now().UnixNano(),
+		CommittedRev: committedRev,
 	}
 	b, err := json.Marshal(rec)
 	if err != nil {

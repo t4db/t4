@@ -272,6 +272,90 @@ func BenchmarkGetLinearizableLeader(b *testing.B) {
 	}
 }
 
+// openBenchCluster starts a 3-node cluster using an in-memory object store and
+// returns the leader node. All nodes are registered for cleanup.
+func openBenchCluster(b *testing.B) *strata.Node {
+	b.Helper()
+	store := object.NewMem()
+	ctx := context.Background()
+
+	var nodes [3]*strata.Node
+	for i := 0; i < 3; i++ {
+		addr := freeBenchAddr(b)
+		n, err := strata.Open(strata.Config{
+			DataDir:           b.TempDir(),
+			ObjectStore:       store,
+			NodeID:            fmt.Sprintf("bench-%d", i),
+			PeerListenAddr:    addr,
+			AdvertisePeerAddr: addr,
+		})
+		if err != nil {
+			b.Fatalf("open node %d: %v", i, err)
+		}
+		nodes[i] = n
+		b.Cleanup(func() { n.Close() })
+	}
+
+	// Wait for a leader and all followers to be connected.
+	deadline := time.Now().Add(15 * time.Second)
+	var leader *strata.Node
+	for time.Now().Before(deadline) {
+		for _, n := range nodes {
+			if n.IsLeader() {
+				leader = n
+				break
+			}
+		}
+		if leader != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if leader == nil {
+		b.Fatal("no leader elected within 15s")
+	}
+	// Seed one write so followers are connected and ACK-capable.
+	if _, err := leader.Put(ctx, "/bench/seed", []byte("v"), 0); err != nil {
+		b.Fatalf("seed write: %v", err)
+	}
+	// Give followers time to connect and ACK the seed entry.
+	time.Sleep(200 * time.Millisecond)
+	return leader
+}
+
+// BenchmarkPutCluster measures serial Put throughput on a 3-node cluster
+// (localhost). Each write must be ACKed by all followers before returning.
+func BenchmarkPutCluster(b *testing.B) {
+	leader := openBenchCluster(b)
+	ctx := context.Background()
+	var counter atomic.Int64
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		k := counter.Add(1)
+		if _, err := leader.Put(ctx, fmt.Sprintf("/bench/cluster/put/%d", k), []byte("value"), 0); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkPutParallelCluster measures parallel Put throughput on a 3-node
+// cluster. Group-commit batches concurrent writes into a single WAL fsync +
+// quorum ACK round, so throughput scales with concurrency.
+func BenchmarkPutParallelCluster(b *testing.B) {
+	leader := openBenchCluster(b)
+	ctx := context.Background()
+	var counter atomic.Int64
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			k := counter.Add(1)
+			if _, err := leader.Put(ctx, fmt.Sprintf("/bench/cluster/par/%d", k), []byte("value"), 0); err != nil {
+				b.Error(err)
+			}
+		}
+	})
+}
+
 // BenchmarkGetLinearizableFollower measures the full ReadIndex cost on a
 // follower: ForwardGetRevision RPC to leader + local Pebble read.
 // This is the realistic overhead for linearizable reads in a multi-node cluster.

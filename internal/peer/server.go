@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"fmt"
+	"math"
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
@@ -18,6 +19,7 @@ import (
 // It maintains:
 //   - A bounded ring buffer of recent entries for follower catch-up.
 //   - A map of per-follower channels for live fan-out.
+//   - followerAckRevs tracking each follower's last ACK'd revision (quorum commit).
 //   - A ForwardHandler that processes write RPCs forwarded by followers.
 //   - A DisconnectC channel that receives a notification whenever any follower
 //     disconnects unexpectedly. Graceful disconnects (preceded by a GoodBye RPC)
@@ -29,7 +31,12 @@ type Server struct {
 	mu             sync.Mutex
 	buf            *entryBuffer
 	followers      map[string]chan *wal.Entry
+	followerAckRevs map[string]int64 // last ACK'd revision per follower
 	forwardHandler ForwardHandler
+
+	// ackNotify is a buffered-1 channel. A non-blocking send is made whenever
+	// any follower ACKs an entry or disconnects, waking WaitForFollowers.
+	ackNotify chan struct{}
 
 	// startRev is the first revision this leader will ever write — i.e.
 	// db.CurrentRevision()+1 at the moment becomeLeader ran.  A follower that
@@ -58,6 +65,8 @@ func NewServer(cap int) *Server {
 	return &Server{
 		buf:              newEntryBuffer(cap),
 		followers:        make(map[string]chan *wal.Entry),
+		followerAckRevs:  make(map[string]int64),
+		ackNotify:        make(chan struct{}, 1),
 		gracefulGoodbyes: make(map[string]struct{}),
 		shutdownC:        make(chan struct{}),
 		DisconnectC:      make(chan struct{}, 1),
@@ -115,7 +124,83 @@ func (s *Server) Broadcast(e *wal.Entry) {
 	s.mu.Unlock()
 }
 
-// Follow implements WalStreamServer. It is called per follower connection.
+// notifyACK wakes any goroutine waiting in WaitForFollowers.
+func (s *Server) notifyACK() {
+	select {
+	case s.ackNotify <- struct{}{}:
+	default:
+	}
+}
+
+// WaitForFollowers blocks until all followers that were connected at call time
+// have ACK'd a revision >= rev, or until they disconnect. New followers that
+// connect after this call are not included in the required set.
+//
+// Returns ctx.Err() if the context is cancelled before quorum is reached.
+// Returns nil immediately if no followers are connected.
+//
+// This is called by the commitLoop after WAL.AppendBatch and before db.Apply
+// to implement quorum commit: the leader only commits to Pebble once a majority
+// has the entry durably in their WAL.
+func (s *Server) WaitForFollowers(ctx context.Context, rev int64) error {
+	// Snapshot which followers must ACK this revision.
+	s.mu.Lock()
+	if len(s.followers) == 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	required := make(map[string]struct{}, len(s.followers))
+	for id := range s.followers {
+		required[id] = struct{}{}
+	}
+	s.mu.Unlock()
+
+	for {
+		s.mu.Lock()
+		pending := 0
+		for id := range required {
+			if _, connected := s.followers[id]; connected {
+				if s.followerAckRevs[id] < rev {
+					pending++
+				}
+			}
+			// If the follower disconnected, it's no longer required.
+		}
+		s.mu.Unlock()
+
+		if pending == 0 {
+			return nil
+		}
+		select {
+		case <-s.ackNotify:
+			// Something changed — re-check.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// MinFollowerAppliedRev returns the minimum ACK'd revision across all currently
+// connected followers. Used by the leader to determine the safe WAL GC boundary:
+// WAL segments are only deleted once all connected followers have applied them.
+//
+// Returns math.MaxInt64 if no followers are connected (leader can GC freely).
+func (s *Server) MinFollowerAppliedRev() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.followers) == 0 {
+		return math.MaxInt64
+	}
+	min := int64(math.MaxInt64)
+	for id := range s.followers {
+		if rev := s.followerAckRevs[id]; rev < min {
+			min = rev
+		}
+	}
+	return min
+}
+
+
 func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error {
 	// Atomically snapshot the buffer and register the live channel.
 	// Holding the lock here means Broadcast also blocks, so entries that arrive
@@ -149,6 +234,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	defer func() {
 		s.mu.Lock()
 		delete(s.followers, req.NodeID)
+		delete(s.followerAckRevs, req.NodeID)
 		graceful := false
 		if _, ok := s.gracefulGoodbyes[req.NodeID]; ok {
 			delete(s.gracefulGoodbyes, req.NodeID)
@@ -164,9 +250,29 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			}
 		}
 		s.mu.Unlock()
+		// Wake WaitForFollowers: this follower is no longer required.
+		s.notifyACK()
 	}()
 
 	logrus.Infof("peer: follower %q connected (fromRev=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, len(snapshot))
+
+	// Spawn a goroutine to read ACK messages from the follower on the bidi
+	// stream. The main goroutine continues sending WalEntryMsgs concurrently.
+	// gRPC allows one goroutine to Send and another to Recv on the same stream.
+	go func() {
+		for {
+			ack := new(AckMsg)
+			if err := stream.RecvMsg(ack); err != nil {
+				return // stream closed or context done
+			}
+			s.mu.Lock()
+			if ack.Revision > s.followerAckRevs[req.NodeID] {
+				s.followerAckRevs[req.NodeID] = ack.Revision
+			}
+			s.mu.Unlock()
+			s.notifyACK()
+		}
+	}()
 
 	for _, e := range snapshot {
 		if err := stream.Send(EntryToMsg(e)); err != nil {

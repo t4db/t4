@@ -83,8 +83,13 @@ func OpenMem() (*Store, error) {
 	return &Store{db: db, notify: make(chan struct{}), closed: make(chan struct{})}, nil
 }
 
-// loadMeta reads the compact revision from Pebble, and derives the current
-// revision from the last log entry.
+// loadMeta reads the compact and current revisions from Pebble.
+//
+// currentRev is stored explicitly in metaCurrentRevKey (written by Apply and
+// Recover). This is necessary because OpCompact entries do not write a log key,
+// so scanning log entries would return a stale revision when the last WAL entry
+// in a checkpoint was a compaction. Older stores without the meta key fall back
+// to scanning log entries for backward compatibility.
 func (s *Store) loadMeta() error {
 	// Read compact revision.
 	v, closer, err := s.db.Get(metaCompactKey)
@@ -95,7 +100,19 @@ func (s *Store) loadMeta() error {
 		return fmt.Errorf("store: read compact rev: %w", err)
 	}
 
-	// Scan log in reverse to find the highest revision.
+	// Read current revision from explicit meta key (written since the
+	// metaCurrentRevKey was introduced).
+	v, closer, err = s.db.Get(metaCurrentRevKey)
+	if err == nil {
+		s.currentRev = decodeRev(v)
+		closer.Close()
+		return nil
+	} else if err != pebble.ErrNotFound {
+		return fmt.Errorf("store: read current rev: %w", err)
+	}
+
+	// Fallback for stores written before metaCurrentRevKey: derive current
+	// revision by scanning to the last log entry.
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: logLower,
 		UpperBound: logUpper,
@@ -163,6 +180,12 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			maxRev = e.Revision
 		}
 	}
+	if maxRev > 0 {
+		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
+			b.Close()
+			return fmt.Errorf("store: set current rev: %w", err)
+		}
+	}
 	if err := b.Commit(pebble.Sync); err != nil {
 		b.Close()
 		return fmt.Errorf("store: commit batch: %w", err)
@@ -209,6 +232,12 @@ func (s *Store) Recover(entries []wal.Entry) error {
 		}
 		if e.Revision > maxRev {
 			maxRev = e.Revision
+		}
+	}
+	if maxRev > 0 {
+		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
+			b.Close()
+			return fmt.Errorf("store: set current rev: %w", err)
 		}
 	}
 	if err := b.Commit(pebble.Sync); err != nil {

@@ -194,6 +194,69 @@ func TestGCCheckpoints(t *testing.T) {
 	}
 }
 
+// TestGCCheckpointsBranchProtection verifies that GCCheckpoints does not
+// delete a checkpoint that is referenced by an active branch, even when it
+// falls outside the keep-N window.
+func TestGCCheckpointsBranchProtection(t *testing.T) {
+	store := object.NewMem()
+	ctx := context.Background()
+
+	// Seed 5 checkpoint index objects.
+	for i := 1; i <= 5; i++ {
+		idx := checkpoint.CheckpointIndex{Term: 1, Revision: int64(i)}
+		b, _ := json.Marshal(idx)
+		key := checkpoint.CheckpointIndexKey(1, int64(i))
+		if err := store.Put(ctx, key, bytes.NewReader(b)); err != nil {
+			t.Fatalf("seed put: %v", err)
+		}
+	}
+
+	// Pin checkpoint rev=1 with a branch.
+	pinnedKey := checkpoint.CheckpointIndexKey(1, 1)
+	if err := checkpoint.RegisterBranch(ctx, store, "experiment", pinnedKey); err != nil {
+		t.Fatalf("RegisterBranch: %v", err)
+	}
+
+	// GC with keep=2: would normally delete revs 1-3, but rev=1 is pinned.
+	deleted, err := checkpoint.GCCheckpoints(ctx, store, 2)
+	if err != nil {
+		t.Fatalf("GCCheckpoints: %v", err)
+	}
+	if deleted != 2 { // revs 2 and 3 deleted; rev 1 protected
+		t.Errorf("deleted: want 2, got %d", deleted)
+	}
+	remaining, _ := checkpoint.ListRemote(ctx, store)
+	// Should have: pinned rev=1, plus kept rev=4 and rev=5.
+	if len(remaining) != 3 {
+		t.Errorf("remaining: want 3, got %d: %v", len(remaining), remaining)
+	}
+	hasRev1 := false
+	for _, k := range remaining {
+		if k == pinnedKey {
+			hasRev1 = true
+		}
+	}
+	if !hasRev1 {
+		t.Errorf("pinned checkpoint (rev=1) was incorrectly deleted: remaining=%v", remaining)
+	}
+
+	// Unregister the branch; now GC should be able to remove the old checkpoint.
+	if err := checkpoint.UnregisterBranch(ctx, store, "experiment"); err != nil {
+		t.Fatalf("UnregisterBranch: %v", err)
+	}
+	deleted, err = checkpoint.GCCheckpoints(ctx, store, 2)
+	if err != nil {
+		t.Fatalf("GCCheckpoints after unregister: %v", err)
+	}
+	if deleted != 1 { // now rev=1 can be deleted
+		t.Errorf("after unregister deleted: want 1, got %d", deleted)
+	}
+	remaining, _ = checkpoint.ListRemote(ctx, store)
+	if len(remaining) != 2 {
+		t.Errorf("after unregister remaining: want 2, got %d: %v", len(remaining), remaining)
+	}
+}
+
 func TestGCCheckpointsNoop(t *testing.T) {
 	store := object.NewMem()
 	ctx := context.Background()
@@ -492,6 +555,62 @@ func TestWriteSkipsExistingSSTs(t *testing.T) {
 		if !strings.HasSuffix(k, "/manifest.json") {
 			t.Errorf("expected v2 key, got %q", k)
 		}
+	}
+}
+
+// listCountingStore wraps a Store and counts calls to List(prefix).
+type listCountingStore struct {
+	object.Store
+	mu     sync.Mutex
+	counts map[string]int // prefix → number of List calls
+}
+
+func (s *listCountingStore) List(ctx context.Context, prefix string) ([]string, error) {
+	s.mu.Lock()
+	s.counts[prefix]++
+	s.mu.Unlock()
+	return s.Store.List(ctx, prefix)
+}
+
+func (s *listCountingStore) listCount(prefix string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.counts[prefix]
+}
+
+// TestWriteNoListAfterFirst verifies that Write does not issue a LIST sst/
+// call on the second and subsequent checkpoints — it uses the previous
+// checkpoint index instead. The only time a LIST is acceptable is on the very
+// first checkpoint of a branch node (before any branch index exists).
+func TestWriteNoListAfterFirst(t *testing.T) {
+	db := openDB(t)
+	inner := object.NewMem()
+	store := &listCountingStore{Store: inner, counts: make(map[string]int)}
+	ctx := context.Background()
+
+	db.Set([]byte("k1"), []byte("v1"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 1, "", nil); err != nil {
+		t.Fatalf("Write 1: %v", err)
+	}
+	// Reset counts — we only care about subsequent checkpoints.
+	store.mu.Lock()
+	store.counts = make(map[string]int)
+	store.mu.Unlock()
+
+	db.Set([]byte("k2"), []byte("v2"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 2, "", nil); err != nil {
+		t.Fatalf("Write 2: %v", err)
+	}
+	if n := store.listCount("sst/"); n != 0 {
+		t.Errorf("second checkpoint issued %d LIST sst/ calls, want 0", n)
+	}
+
+	db.Set([]byte("k3"), []byte("v3"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 3, "", nil); err != nil {
+		t.Fatalf("Write 3: %v", err)
+	}
+	if n := store.listCount("sst/"); n != 0 {
+		t.Errorf("third checkpoint issued %d LIST sst/ calls, want 0", n)
 	}
 }
 
