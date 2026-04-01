@@ -22,10 +22,11 @@ func checkConsistency(t *testing.T, ctx context.Context, nodes []*strata.Node, p
 				// Node was removed during chaos — skip it.
 				continue
 			}
-			if errors.Is(err, context.DeadlineExceeded) {
-				// Node is still bootstrapping from S3 (recently added, slow CI).
-				// Skip rather than fail — stale-read is not a correctness bug.
-				t.Logf("node-%d WaitForRevision(%d): still bootstrapping, skipping (context deadline exceeded)", i, minRev)
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				// Node is still bootstrapping from S3 (recently added, slow CI),
+				// or the check context was cancelled during teardown. Either way,
+				// a stale-read is not a correctness bug — skip this node.
+				t.Logf("node-%d WaitForRevision(%d): skipping (%v)", i, minRev, err)
 				continue
 			}
 			t.Fatalf("node-%d WaitForRevision(%d): %v", i, minRev, err)

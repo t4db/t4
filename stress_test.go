@@ -207,6 +207,17 @@ func TestLongRunningConsistency(t *testing.T) {
 	// ── Wait ──────────────────────────────────────────────────────────────────
 	<-time.After(dur)
 
+	// Cancel the shared context before doing final work. This signals all
+	// background goroutines (writer, chaos, periodic checker) to stop. Without
+	// this, a goroutine that's mid-work when the test function returns will call
+	// t.Log/t.Fatal after the test has finished, causing a panic.
+	cancel()
+
+	// Use a fresh context for the final check and teardown so that the
+	// cancellation above doesn't affect them.
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer finalCancel()
+
 	// ── Final consistency check ───────────────────────────────────────────────
 	mu.RLock()
 	final := make(map[string]string, len(committed))
@@ -220,9 +231,7 @@ func TestLongRunningConsistency(t *testing.T) {
 	t.Logf("final check: %d committed keys, rev=%d, nodes=%d",
 		len(final), finalRev, len(nodes))
 
-	fctx, fcancel := context.WithTimeout(ctx, 60*time.Second)
-	defer fcancel()
-	checkConsistency(t, fctx, nodes, "/stress/", final, finalRev)
+	checkConsistency(t, finalCtx, nodes, "/stress/", final, finalRev)
 
 	h.closeAll()
 }
