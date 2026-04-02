@@ -11,7 +11,7 @@
 | `RestorePoint` | `*RestorePoint` | `nil` | Bootstrap from a specific S3 version (requires S3 versioning). See [Point-in-time restore](api.md#point-in-time-restore-s3-versioning). |
 | `SegmentMaxSize` | `int64` | 50 MB | WAL segment rotation threshold in bytes. |
 | `SegmentMaxAge` | `time.Duration` | 10 s | WAL segment rotation age threshold. When `WALSyncUpload` is `false` this also controls how often async uploads run. |
-| `WALSyncUpload` | `*bool` | `true` | Controls WAL segment upload behaviour. `true` (default): each sealed segment is uploaded to S3 synchronously before the write returns — safe when local storage is ephemeral. `false`: uploads happen asynchronously every `SegmentMaxAge`; write latency is lower but up to `SegmentMaxAge` of acknowledged writes can be lost on simultaneous node + S3 failure. Set to `false` when local storage is durable (e.g. a PVC) and low latency matters. |
+| `WALSyncUpload` | `*bool` | `true` | Controls WAL segment upload behaviour. `true` (default): each sealed segment is uploaded to S3 synchronously before the write returns — safe when local storage is ephemeral. `false`: uploads happen asynchronously every `SegmentMaxAge`; write latency is lower but up to `SegmentMaxAge` of acknowledged writes can be lost on simultaneous node + S3 failure. Set to `false` when local storage is durable (e.g. a PVC) and low latency matters. **Note: in cluster mode this flag only affects the initial follower WAL. The leader always opens its WAL with async uploads (`becomeLeader` hardcodes this), since quorum commit already provides write durability.** |
 | `CheckpointInterval` | `time.Duration` | 15 min | How often the leader writes a checkpoint to S3. Set to 0 to disable. |
 | `CheckpointEntries` | `int64` | 0 | Also trigger a checkpoint after this many WAL entries (0 = disabled). |
 | `NodeID` | `string` | hostname | Stable unique identifier for this node. Must not change across restarts. |
@@ -71,7 +71,7 @@ strata run [flags]
 | `--s3-endpoint` | — | Custom S3 endpoint URL (MinIO, Ceph, etc.) |
 | `--segment-max-size-mb` | `50` | WAL segment rotation size threshold (MiB) |
 | `--segment-max-age-sec` | `10` | WAL segment rotation age (seconds) |
-| `--wal-sync-upload` | _(default true)_ | Upload WAL segments synchronously before acknowledging writes (`true`/`false`). Set to `false` when local storage is durable (e.g. a PVC) for lower write latency. |
+| `--wal-sync-upload` | _(default true)_ | Upload WAL segments synchronously before acknowledging writes (`true`/`false`). Applies to single-node mode. In cluster mode the leader always uses async uploads (hardcoded in `becomeLeader`); set to `false` when local storage is durable for lower single-node write latency. |
 | `--checkpoint-interval-min` | `15` | Checkpoint write interval (minutes) |
 | `--checkpoint-entries` | `0` | Also checkpoint after N WAL entries (0 = disabled) |
 | `--log-level` | `info` | Log level: `trace` `debug` `info` `warn` `error` |

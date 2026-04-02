@@ -1,0 +1,110 @@
+# single-s3 — one Strata node (WAL sync-upload to MinIO) vs one etcd node.
+#
+# Strata uploads every WAL segment to MinIO before ACKing writes
+# (--wal-sync-upload=true), providing comparable remote durability to etcd's
+# fsync-per-write model. Use this scenario for fair throughput/latency
+# comparisons when durability is a requirement.
+#
+# Ports exposed on the host:
+#   strata  → localhost:3379
+#   etcd    → localhost:2379
+#
+# Images must be pre-built before running:
+#   docker build -f bench/Dockerfile.strata -t strata-bench .
+#   docker build -f bench/Dockerfile        -t stratabench  .
+
+services:
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: bench
+      MINIO_ROOT_PASSWORD: bench123
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [bench]
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 bench bench123 &&
+        mc mb --ignore-existing local/bench
+      "
+    networks: [bench]
+
+  strata:
+    image: strata-bench
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    command:
+      - run
+      - --listen=0.0.0.0:2379
+      - --data-dir=/data
+      - --metrics-addr=0.0.0.0:9090
+      - --s3-bucket=bench
+      - --s3-prefix=single
+      - --s3-endpoint=http://minio:9000
+      - --wal-sync-upload=true
+      - --log-level=warn
+    environment:
+      AWS_ACCESS_KEY_ID: bench
+      AWS_SECRET_ACCESS_KEY: bench123
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "3379:2379"
+    volumes:
+      - strata-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [bench]
+
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.6.4
+    command:
+      - etcd
+      - --name=etcd0
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd0=http://etcd:2380
+    ports:
+      - "2379:2379"
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [bench]
+
+  bench:
+    image: stratabench
+    profiles: [bench]
+    networks: [bench]
+
+networks:
+  bench:
+
+volumes:
+  strata-data:
+  etcd-data:
+  minio-data:

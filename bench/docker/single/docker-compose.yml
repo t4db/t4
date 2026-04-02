@@ -1,0 +1,72 @@
+# single — one Strata node (no S3) vs one etcd node.
+#
+# Strata runs in local-WAL-only mode: fastest possible configuration but
+# without remote durability. Compare with single-s3/ for a fair apples-to-
+# apples comparison against etcd's fsync-per-write model.
+#
+# Ports exposed on the host (for local stratabench invocations):
+#   strata  → localhost:3379
+#   etcd    → localhost:2379
+#
+# Images must be pre-built before running:
+#   docker build -f bench/Dockerfile.strata -t strata-bench .
+#   docker build -f bench/Dockerfile        -t stratabench  .
+
+services:
+
+  strata:
+    image: strata-bench
+    command:
+      - run
+      - --listen=0.0.0.0:2379
+      - --data-dir=/data
+      - --metrics-addr=0.0.0.0:9090
+      - --log-level=warn
+    ports:
+      - "3379:2379"
+    volumes:
+      - strata-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [bench]
+
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.6.4
+    command:
+      - etcd
+      - --name=etcd0
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd0=http://etcd:2380
+    ports:
+      - "2379:2379"
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [bench]
+
+  # bench profile: run with
+  #   docker compose --profile bench run --rm bench stratabench [flags]
+  bench:
+    image: stratabench
+    profiles: [bench]
+    networks: [bench]
+
+networks:
+  bench:
+
+volumes:
+  strata-data:
+  etcd-data:

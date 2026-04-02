@@ -1,0 +1,239 @@
+# cluster — 3-node Strata cluster (with MinIO) vs 3-node etcd Raft cluster.
+#
+# Strata model: leader streams WAL entries to followers; all followers ACK
+# before the write completes; WAL is archived to MinIO. Leader election is
+# via an S3 object lock — no static topology configuration needed.
+#
+# etcd model: standard Raft consensus, quorum of 2/3 nodes required per write.
+#
+# The benchmark connects to all three nodes of each cluster and lets the
+# etcd v3 client route writes to the current leader automatically.
+#
+# Ports exposed on the host:
+#   strata1 → localhost:3379   etcd1 → localhost:2379
+#   strata2 → localhost:3380   etcd2 → localhost:2380
+#   strata3 → localhost:3381   etcd3 → localhost:2381
+#
+# Images must be pre-built before running:
+#   docker build -f bench/Dockerfile.strata -t strata-bench .
+#   docker build -f bench/Dockerfile        -t stratabench  .
+
+x-strata-env: &strata-env
+  AWS_ACCESS_KEY_ID: bench
+  AWS_SECRET_ACCESS_KEY: bench123
+  AWS_DEFAULT_REGION: us-east-1
+
+x-strata-base: &strata-base
+  image: strata-bench
+  environment: *strata-env
+  depends_on:
+    minio-init:
+      condition: service_completed_successfully
+  networks: [bench]
+
+x-etcd-base: &etcd-base
+  image: gcr.io/etcd-development/etcd:v3.6.4
+  networks: [bench]
+
+# Shared etcd cluster environment (node-specific vars added per service).
+x-etcd-cluster-env: &etcd-cluster-env
+  ETCD_DATA_DIR: /etcd-data
+  ETCD_INITIAL_CLUSTER_TOKEN: bench-etcd
+  ETCD_INITIAL_CLUSTER_STATE: new
+  ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+
+services:
+
+  # ── MinIO (S3 store for Strata WAL + leader election) ─────────────────────
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: bench
+      MINIO_ROOT_PASSWORD: bench123
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [bench]
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 bench bench123 &&
+        mc mb --ignore-existing local/bench
+      "
+    networks: [bench]
+
+  # ── Strata cluster ─────────────────────────────────────────────────────────
+
+  strata1:
+    <<: *strata-base
+    hostname: strata1
+    command:
+      - run
+      - --node-id=s1
+      - --listen=0.0.0.0:2379
+      - --peer-listen=0.0.0.0:3380
+      - --advertise-peer=strata1:3380
+      - --data-dir=/data
+      - --metrics-addr=0.0.0.0:9090
+      - --wal-sync-upload=false
+      - --s3-bucket=bench
+      - --s3-prefix=cluster
+      - --s3-endpoint=http://minio:9000
+      - --log-level=warn
+    ports:
+      - "3379:2379"
+    volumes:
+      - strata1-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  strata2:
+    <<: *strata-base
+    hostname: strata2
+    command:
+      - run
+      - --node-id=s2
+      - --listen=0.0.0.0:2379
+      - --peer-listen=0.0.0.0:3380
+      - --advertise-peer=strata2:3380
+      - --wal-sync-upload=false
+      - --data-dir=/data
+      - --metrics-addr=0.0.0.0:9090
+      - --s3-bucket=bench
+      - --s3-prefix=cluster
+      - --s3-endpoint=http://minio:9000
+      - --log-level=warn
+    ports:
+      - "3380:2379"
+    volumes:
+      - strata2-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  strata3:
+    <<: *strata-base
+    hostname: strata3
+    command:
+      - run
+      - --node-id=s3
+      - --listen=0.0.0.0:2379
+      - --peer-listen=0.0.0.0:3380
+      - --advertise-peer=strata3:3380
+      - --wal-sync-upload=false
+      - --data-dir=/data
+      - --metrics-addr=0.0.0.0:9090
+      - --s3-bucket=bench
+      - --s3-prefix=cluster
+      - --s3-endpoint=http://minio:9000
+      - --log-level=warn
+    ports:
+      - "3381:2379"
+    volumes:
+      - strata3-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  # ── etcd cluster ───────────────────────────────────────────────────────────
+
+  etcd1:
+    <<: *etcd-base
+    hostname: etcd1
+    environment:
+      <<: *etcd-cluster-env
+      ETCD_NAME: etcd1
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd1:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd1:2380
+    ports:
+      - "2379:2379"
+    volumes:
+      - etcd1-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  etcd2:
+    <<: *etcd-base
+    hostname: etcd2
+    environment:
+      <<: *etcd-cluster-env
+      ETCD_NAME: etcd2
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd2:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd2:2380
+    ports:
+      - "2380:2379"
+    volumes:
+      - etcd2-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  etcd3:
+    <<: *etcd-base
+    hostname: etcd3
+    environment:
+      <<: *etcd-cluster-env
+      ETCD_NAME: etcd3
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd3:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd3:2380
+    ports:
+      - "2381:2379"
+    volumes:
+      - etcd3-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  bench:
+    image: stratabench
+    profiles: [bench]
+    networks: [bench]
+
+networks:
+  bench:
+
+volumes:
+  strata1-data:
+  strata2-data:
+  strata3-data:
+  etcd1-data:
+  etcd2-data:
+  etcd3-data:
+  minio-data:

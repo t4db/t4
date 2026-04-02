@@ -87,3 +87,4 @@ Multi-node and production setup: see [docs/operations.md](docs/operations.md).
 | [docs/configuration.md](docs/configuration.md) | All config fields and CLI flags |
 | [docs/operations.md](docs/operations.md) | Multi-node, S3, TLS, authentication, RBAC, observability, branching, point-in-time restore |
 | [docs/architecture.md](docs/architecture.md) | Internals — WAL, checkpoints, election, replication |
+| [docs/benchmarks.md](docs/benchmarks.md) | Strata vs etcd benchmark results and analysis |
