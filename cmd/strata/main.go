@@ -57,6 +57,7 @@ func runCmd() *cobra.Command {
 		logLevel              string
 		// multi-node
 		nodeID                 string
+		walSyncUpload          string // "true", "false", or "" (default)
 		peerListenAddr         string
 		advertisePeerAddr      string
 		leaderWatchIntervalSec int
@@ -84,6 +85,10 @@ func runCmd() *cobra.Command {
 			}
 			logrus.SetLevel(lvl)
 
+			if walSyncUpload != "" && walSyncUpload != "true" && walSyncUpload != "false" {
+				return fmt.Errorf("--wal-sync-upload must be \"true\" or \"false\", got %q", walSyncUpload)
+			}
+
 			cfg := strata.Config{
 				DataDir:             dataDir,
 				ReadConsistency:     strata.ReadConsistency(readConsistency),
@@ -97,6 +102,11 @@ func runCmd() *cobra.Command {
 				LeaderWatchInterval: time.Duration(leaderWatchIntervalSec) * time.Second,
 				FollowerMaxRetries:  followerMaxRetries,
 				MetricsAddr:         metricsAddr,
+			}
+
+			if walSyncUpload != "" {
+				b := walSyncUpload == "true"
+				cfg.WALSyncUpload = &b
 			}
 
 			if peerTLSCA != "" || peerTLSCert != "" {
@@ -174,6 +184,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "custom S3 endpoint URL (for MinIO or other S3-compatible stores)")
 	cmd.Flags().Int64Var(&segmentMaxSizeMB, "segment-max-size-mb", 50, "WAL segment rotation size threshold in MiB")
 	cmd.Flags().IntVar(&segmentMaxAgeSec, "segment-max-age-sec", 10, "WAL segment rotation age threshold in seconds")
+	cmd.Flags().StringVar(&walSyncUpload, "wal-sync-upload", "", "upload WAL segments synchronously before ack (true/false; default true for safety, set false when local storage is durable)")
 	cmd.Flags().IntVar(&checkpointIntervalMin, "checkpoint-interval-min", 15, "checkpoint interval in minutes (requires --s3-bucket)")
 	cmd.Flags().Int64Var(&checkpointEntries, "checkpoint-entries", 0, "triggers a checkpoint after this many WAL entries regardless of time. 0 means disabled (requires --s3-bucket)")
 	cmd.Flags().StringVar(&readConsistency, "read-consistency", "linearizable", "read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale)")

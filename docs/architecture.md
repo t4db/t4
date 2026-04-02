@@ -67,7 +67,7 @@ Every write goes through the WAL before it touches the database:
 
 In single-node mode (no peers configured) steps 3–5 are skipped.
 
-WAL segment rotation is triggered by size (default 50 MB) or age (default 10 s). Sealed segments are queued for async upload to S3 and deleted locally once the upload confirms. In cluster mode uploads are fully async (S3 is disaster-recovery only); in single-node mode each segment is uploaded synchronously before the write is acknowledged.
+WAL segment rotation is triggered by size (default 50 MB) or age (default 10 s). Sealed segments are uploaded to S3 and deleted locally once the upload confirms. Upload timing depends on `WALSyncUpload`: in the default (`true`) mode the upload blocks the write acknowledgement, guaranteeing durability even on ephemeral storage; with `WALSyncUpload: false` uploads are asynchronous and run every `SegmentMaxAge`, reducing write latency at the cost of a small durability window. In cluster mode the default is still `true` — the quorum commit already provides durability, but sync upload removes the need for any local persistence guarantee.
 
 ### Segment naming
 
