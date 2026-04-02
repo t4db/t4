@@ -1877,6 +1877,9 @@ func (n *Node) checkpointLoop(ctx context.Context) {
 // forceCheckpoint writes a checkpoint unconditionally (bypassing the
 // entriesSinceCheckpoint guard). Used on startup to capture local state.
 func (n *Node) forceCheckpoint(ctx context.Context) {
+	n.fenceMu.Lock()
+	defer n.fenceMu.Unlock()
+
 	rev := n.db.CurrentRevision()
 	if rev == 0 {
 		return
@@ -1899,6 +1902,9 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {
+	n.fenceMu.Lock()
+	defer n.fenceMu.Unlock()
+
 	if atomic.LoadInt64(&n.entriesSinceCheckpoint) == 0 {
 		return
 	}
