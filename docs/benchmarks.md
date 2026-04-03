@@ -101,24 +101,37 @@ Understanding the write throughput numbers requires understanding exactly what e
 
 #### Single-node (quorum = 1)
 
-In a single-node cluster the leader is the entire quorum. Both systems **must** fsync to their WAL before ACKing — no other node can cover for a crash. There is no weaker guarantee on either side.
+In a single-node cluster the leader is the entire quorum. Both systems **must** fsync to their WAL before ACKing — no
+other node can cover for a crash. There is no weaker guarantee on either side.
 
-The single-node write gap (etcd ~4× faster on `seq-put`) is therefore not about durability tradeoffs — it comes down to raw fsync pipeline efficiency:
+The single-node write gap (etcd ~4× faster on `seq-put`) is therefore not about durability tradeoffs — it comes down to
+raw fsync pipeline efficiency:
 
-- **etcd** uses a raft "ready" loop that can batch multiple proposals into one WAL write even for a single serial client (heartbeat entries, internal metadata, and proposals can all coalesce). bbolt appends sequentially to a single file.
-- **Strata** uses a reactive commit loop: it blocks until a write arrives, fsyncs the batch, then loops. With one sequential client there is always exactly one write in the batch. Each op pays the full fsync cost independently.
+- **etcd** uses a raft "ready" loop that can batch multiple proposals into one WAL write even for a single serial
+  client (heartbeat entries, internal metadata, and proposals can all coalesce). bbolt appends sequentially to a single
+  file.
+- **Strata** uses a reactive commit loop: it blocks until a write arrives, fsyncs the batch, then loops. With one
+  sequential client there is always exactly one write in the batch. Each op pays the full fsync cost independently.
 
-Adding a time-based batch interval to Strata would **not** close this gap for sequential clients: with one writer waiting for the previous ACK before sending the next, the window would still only ever hold one write. The interval only helps when multiple concurrent clients would otherwise miss each other between reactive flushes — but at sufficient concurrency, Strata's reactive approach already batches optimally (and outperforms etcd at 8+ writers).
+Adding a time-based batch interval to Strata would **not** close this gap for sequential clients: with one writer
+waiting for the previous ACK before sending the next, the window would still only ever hold one write. The interval only
+helps when multiple concurrent clients would otherwise miss each other between reactive flushes — but at sufficient
+concurrency, Strata's reactive approach already batches optimally (and outperforms etcd at 8+ writers).
 
-The correct fix is **WAL fsync pipelining**: accept and begin the next batch while the previous batch's fsync is in flight, the same way etcd's raft ready loop does. This would close the single-writer gap without adding artificial latency or sacrificing the high-concurrency advantage.
+The correct fix is **WAL fsync pipelining**: accept and begin the next batch while the previous batch's fsync is in
+flight, the same way etcd's raft ready loop does. This would close the single-writer gap without adding artificial
+latency or sacrificing the high-concurrency advantage.
 
 #### 3-node cluster (quorum = 2)
 
 Here the systems diverge in design:
 
-**etcd** pipelines the leader's own WAL write with sending proposals to followers. The client is ACKed as soon as any two nodes have persisted — the leader's own fsync may still be in progress. This is correct by raft: if the leader crashes before its own fsync, the two followers still have the entry.
+**etcd** pipelines the leader's own WAL write with sending proposals to followers. The client is ACKed as soon as any
+two nodes have persisted — the leader's own fsync may still be in progress. This is correct by raft: if the leader
+crashes before its own fsync, the two followers still have the entry.
 
-**Strata** is more conservative: the leader fsyncs to its own WAL *first*, then broadcasts to followers, then waits for a follower ACK, then responds to the client. Sequential pipeline:
+**Strata** is more conservative: the leader fsyncs to its own WAL *first*, then broadcasts to followers, then waits for
+a follower ACK, then responds to the client. Sequential pipeline:
 
 ```
 leader fsync → broadcast → follower ack → client ack
@@ -130,7 +143,10 @@ etcd's pipeline:
 leader WAL write ∥ follower send → quorum ack → client ack
 ```
 
-**Both are equally correct by raft.** Strata's approach is more conservative than raft requires and is the root cause of the cluster write latency gap. Making Strata broadcast to followers concurrently with the leader's fsync (as etcd does) would bring cluster write latency close to single-node latency with no loss of correctness or durability. This is a known future optimization.
+**Both are equally correct by raft.** Strata's approach is more conservative than raft requires and is the root cause of
+the cluster write latency gap. Making Strata broadcast to followers concurrently with the leader's fsync (as etcd does)
+would bring cluster write latency close to single-node latency with no loss of correctness or durability. This is a
+known future optimization.
 
 Strata's watch latency (p50 702 µs) reflects the write path: a Put that triggers a watch event must first fsync to the
 WAL, then notify the watcher. etcd benefits from the same 100 ms batch amortisation that helps its write throughput.
@@ -154,7 +170,10 @@ the loss of any minority of nodes.
 **Read performance is equal or better:** `seq-get` is 46% faster on Strata; `par-get` is within 3% — both are
 effectively noise.
 
-**Write performance gap is explained by Strata's sequential pipeline.** The leader fsyncs first, then broadcasts to followers — more conservative than raft requires. See "Write pipeline architecture and durability guarantees" above. This is a known optimization opportunity: broadcasting concurrently with the leader fsync (as etcd does) would close most of this gap.
+**Write performance gap is explained by Strata's sequential pipeline.** The leader fsyncs first, then broadcasts to
+followers — more conservative than raft requires. See "Write pipeline architecture and durability guarantees" above.
+This is a known optimization opportunity: broadcasting concurrently with the leader fsync (as etcd does) would close
+most of this gap.
 
 **Strata p999 write latency is better than etcd's** (`seq-put` p999: 4,606 µs vs 15,979 µs) — etcd's tail spikes come
 from raft leader elections and snapshot transfers.
@@ -169,15 +188,15 @@ object storage even if the node is destroyed immediately after.
 
 ## Interpretation guide
 
-| Use case                                         | Recommendation                                                       |
-|--------------------------------------------------|----------------------------------------------------------------------|
-| Read-heavy workloads (caches, service discovery) | Strata equal or faster in both single and cluster                    |
-| Single-writer / low-concurrency writes           | etcd is ~2× faster due to time-based batching                        |
-| 8+ concurrent writers, single node               | Strata is faster; gap grows to 24% at 64 writers                     |
-| 3-node cluster, reads                            | Strata equal or faster (+46% seq-get)                                |
+| Use case                                         | Recommendation                                                                              |
+|--------------------------------------------------|---------------------------------------------------------------------------------------------|
+| Read-heavy workloads (caches, service discovery) | Strata equal or faster in both single and cluster                                           |
+| Single-writer / low-concurrency writes           | etcd is ~2× faster due to time-based batching                                               |
+| 8+ concurrent writers, single node               | Strata is faster; gap grows to 24% at 64 writers                                            |
+| 3-node cluster, reads                            | Strata equal or faster (+46% seq-get)                                                       |
 | 3-node cluster, writes                           | etcd faster due to concurrent pipeline (see analysis); fixable without correctness tradeoff |
-| Survive total cluster destruction                | Only Strata (`--wal-sync-upload=true`, single-node mode)             |
-| Embedded library in a Go binary                  | Only Strata                                                          |
+| Survive total cluster destruction                | Only Strata (`--wal-sync-upload=true`, single-node mode)                                    |
+| Embedded library in a Go binary                  | Only Strata                                                                                 |
 
 ---
 

@@ -42,16 +42,23 @@ type Store struct {
 // terminating when the replacement starts.
 const lockRetryTimeout = 30 * time.Second
 
+// PebbleOption is a functional option for configuring pebble.Options.
+type PebbleOption = func(*pebble.Options)
+
 // Open opens (or creates) the Pebble database at dir and returns a Store.
 // The caller should call Recover to replay WAL entries before serving requests.
 //
 // If the database is locked by another process, Open retries for up to
 // lockRetryTimeout before returning an error. This handles the Kubernetes pod
 // replacement race where the old instance has not yet released the lock.
-func Open(dir string) (*Store, error) {
+func Open(dir string, extraOpts ...func(*pebble.Options)) (*Store, error) {
+	opts := &pebble.Options{}
+	for _, fn := range extraOpts {
+		fn(opts)
+	}
 	deadline := time.Now().Add(lockRetryTimeout)
 	for {
-		db, err := pebble.Open(dir, &pebble.Options{})
+		db, err := pebble.Open(dir, opts)
 		if err == nil {
 			s := &Store{db: db, notify: make(chan struct{}), closed: make(chan struct{})}
 			if err := s.loadMeta(); err != nil {

@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	DefaultSegmentMaxSize = 50 << 20 // 50 MB
-	DefaultSegmentMaxAge  = 10 * time.Second
+	DefaultSegmentMaxSize = 50 << 20        // 50 MB
+	DefaultSegmentMaxAge  = 60 * time.Second // 1 minute; controls S3 PUT frequency
 )
 
 // Uploader is called when a segment is ready to be persisted to object storage.

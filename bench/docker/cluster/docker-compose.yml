@@ -33,8 +33,8 @@ x-strata-base: &strata-base
   deploy:
     resources:
       limits:
-        cpus: '2'
-        memory: 4G
+        cpus: '1'
+        memory: 2G
 
 x-etcd-base: &etcd-base
   image: gcr.io/etcd-development/etcd:v3.6.4
@@ -42,8 +42,8 @@ x-etcd-base: &etcd-base
   deploy:
     resources:
       limits:
-        cpus: '2'
-        memory: 4G
+        cpus: '1'
+        memory: 2G
 
 # Shared etcd cluster environment (node-specific vars added per service).
 x-etcd-cluster-env: &etcd-cluster-env

@@ -186,6 +186,83 @@ func Write(ctx context.Context, db *pebble.DB, store object.Store, term uint64, 
 		return fmt.Errorf("checkpoint: walk: %w", err)
 	}
 
+	return writeIndex(ctx, store, term, revision, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles)
+}
+
+// WriteWithRegistry creates a Pebble checkpoint using a pre-built SST registry
+// instead of uploading SSTs inline. All SSTs must already be present in store
+// (uploaded by SSTUploader). This is the fast path used when streaming SST
+// upload is active: the checkpoint write costs only a few small PUTs.
+//
+// localRegistry maps Pebble SST filename → "sst/{hash}/{name}" key in store.
+// inheritedRegistry maps Pebble SST filename → s3 key in the ancestor store
+// (for branch nodes); these are recorded as AncestorSSTFiles.
+func WriteWithRegistry(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision int64, lastWALKey string, localRegistry, inheritedRegistry map[string]string) error {
+	tmpDir, err := os.MkdirTemp("", "strata-checkpoint-*")
+	if err != nil {
+		return fmt.Errorf("checkpoint: mktemp: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cpDir := filepath.Join(tmpDir, "cp")
+	if err := db.Checkpoint(cpDir); err != nil {
+		return fmt.Errorf("checkpoint: pebble checkpoint: %w", err)
+	}
+
+	var sstFiles, ancestorSSTFiles, metaFiles []string
+	err = filepath.Walk(cpDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		name := filepath.Base(path)
+		if strings.HasSuffix(name, ".sst") {
+			if key, ok := inheritedRegistry[name]; ok {
+				ancestorSSTFiles = append(ancestorSSTFiles, key)
+				return nil
+			}
+			key, ok := localRegistry[name]
+			if !ok {
+				// SST created after registry snapshot — should not happen if
+				// Wait() was called before WriteWithRegistry, but handle it
+				// gracefully by hashing and uploading inline.
+				var uploadErr error
+				key, uploadErr = contentSSTKey(path, name)
+				if uploadErr != nil {
+					return uploadErr
+				}
+				f, ferr := os.Open(path)
+				if ferr != nil {
+					return ferr
+				}
+				defer f.Close()
+				if putErr := store.Put(ctx, key, f); putErr != nil {
+					return fmt.Errorf("upload missing sst %q: %w", name, putErr)
+				}
+			}
+			sstFiles = append(sstFiles, key)
+		} else {
+			metaFiles = append(metaFiles, name)
+			metaKey := fmt.Sprintf("checkpoint/%010d/%020d/%s", term, revision, name)
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			if err := store.Put(ctx, metaKey, f); err != nil {
+				return fmt.Errorf("upload meta %q: %w", name, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("checkpoint: walk: %w", err)
+	}
+
+	return writeIndex(ctx, store, term, revision, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles)
+}
+
+// writeIndex writes the checkpoint index JSON and updates manifest/latest.
+func writeIndex(ctx context.Context, store object.Store, term uint64, revision int64, lastWALKey string, sstFiles, ancestorSSTFiles, metaFiles []string) error {
 	indexKey := CheckpointIndexKey(term, revision)
 	idx := &CheckpointIndex{
 		Term:             term,
@@ -230,7 +307,7 @@ func knownSSTSets(ctx context.Context, store object.Store, ancestorStore object.
 	if err != nil || manifest == nil {
 		err = nil // fresh store; sets stay empty
 	} else {
-		prevIdx, idxErr := readCheckpointIndex(ctx, store, manifest.CheckpointKey)
+		prevIdx, idxErr := ReadCheckpointIndex(ctx, store, manifest.CheckpointKey)
 		if idxErr == nil {
 			for _, k := range prevIdx.SSTFiles {
 				local[k] = struct{}{}
@@ -283,7 +360,7 @@ func RestoreBranch(ctx context.Context, store object.Store, ancestorStore object
 // restoreFromIndex restores a v2 checkpoint from its CheckpointIndex.
 // ancestorStore is used for AncestorSSTFiles; if nil, store is used for all.
 func restoreFromIndex(ctx context.Context, store object.Store, ancestorStore object.Store, indexKey, targetDir string) (uint64, int64, error) {
-	idx, err := readCheckpointIndex(ctx, store, indexKey)
+	idx, err := ReadCheckpointIndex(ctx, store, indexKey)
 	if err != nil {
 		return 0, 0, fmt.Errorf("checkpoint: read index %q: %w", indexKey, err)
 	}
@@ -353,7 +430,7 @@ func RestoreVersioned(ctx context.Context, store object.VersionedStore, objKey, 
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func readCheckpointIndex(ctx context.Context, store object.Store, key string) (*CheckpointIndex, error) {
+func ReadCheckpointIndex(ctx context.Context, store object.Store, key string) (*CheckpointIndex, error) {
 	rc, err := store.Get(ctx, key)
 	if err != nil {
 		return nil, err
@@ -410,19 +487,23 @@ func ListRemote(ctx context.Context, store object.Store) ([]string, error) {
 // even if it would otherwise fall outside the `keep` window. Checkpoints
 // referenced by active branch entries are also always preserved, since branch
 // nodes need the checkpoint index to call RestoreBranch.
-func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, error) {
+// GCCheckpoints deletes old checkpoints (keeping the most recent keep) and
+// returns the count of deleted checkpoints. Pinned branch checkpoints are
+// never deleted. Also returns the set of SST keys that were referenced only
+// by deleted checkpoints (orphan candidates for GCOrphanSSTs).
+func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, map[string]struct{}, error) {
 	if keep < 1 {
 		keep = 1
 	}
 
 	manifest, err := ReadManifest(ctx, store)
 	if err != nil {
-		return 0, fmt.Errorf("checkpoint gc: read manifest: %w", err)
+		return 0, nil, fmt.Errorf("checkpoint gc: read manifest: %w", err)
 	}
 
 	branches, err := ReadBranchEntries(ctx, store)
 	if err != nil {
-		return 0, fmt.Errorf("checkpoint gc: read branch entries: %w", err)
+		return 0, nil, fmt.Errorf("checkpoint gc: read branch entries: %w", err)
 	}
 	pinnedKeys := make(map[string]bool, len(branches))
 	for _, entry := range branches {
@@ -433,11 +514,37 @@ func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, erro
 
 	keys, err := ListRemote(ctx, store)
 	if err != nil {
-		return 0, fmt.Errorf("checkpoint gc: list: %w", err)
+		return 0, nil, fmt.Errorf("checkpoint gc: list: %w", err)
 	}
 	if len(keys) <= keep {
-		return 0, nil
+		return 0, nil, nil
 	}
+
+	// Collect SSTs referenced by surviving checkpoints so we never delete them.
+	liveSSTs := make(map[string]struct{})
+	for _, k := range keys[len(keys)-keep:] {
+		idx, err := ReadCheckpointIndex(ctx, store, k)
+		if err != nil {
+			continue
+		}
+		for _, s := range idx.SSTFiles {
+			liveSSTs[s] = struct{}{}
+		}
+	}
+	// Also protect SSTs from pinned (branch) checkpoints.
+	for k := range pinnedKeys {
+		idx, err := ReadCheckpointIndex(ctx, store, k)
+		if err != nil {
+			continue
+		}
+		for _, s := range idx.SSTFiles {
+			liveSSTs[s] = struct{}{}
+		}
+	}
+
+	// Orphan candidates = SSTs from deleted checkpoints that are not live.
+	orphanCandidates := make(map[string]struct{})
+
 	toDelete := keys[:len(keys)-keep]
 	var deleted int
 	for _, k := range toDelete {
@@ -447,12 +554,21 @@ func GCCheckpoints(ctx context.Context, store object.Store, keep int) (int, erro
 		if pinnedKeys[k] {
 			continue // branch is pinned to this checkpoint; preserve it
 		}
+		// Harvest SST candidates from this checkpoint before deleting it.
+		idx, err := ReadCheckpointIndex(ctx, store, k)
+		if err == nil {
+			for _, s := range idx.SSTFiles {
+				if _, live := liveSSTs[s]; !live {
+					orphanCandidates[s] = struct{}{}
+				}
+			}
+		}
 		if err := deleteCheckpoint(ctx, store, k); err != nil {
-			return deleted, fmt.Errorf("checkpoint gc: delete %q: %w", k, err)
+			return deleted, orphanCandidates, fmt.Errorf("checkpoint gc: delete %q: %w", k, err)
 		}
 		deleted++
 	}
-	return deleted, nil
+	return deleted, orphanCandidates, nil
 }
 
 // deleteCheckpoint deletes all objects under "checkpoint/{term}/{rev}/".
@@ -470,67 +586,22 @@ func deleteCheckpoint(ctx context.Context, store object.Store, key string) error
 	return nil
 }
 
-// GCOrphanSSTs deletes SST files from "sst/" that are not referenced by any
-// live checkpoint index or branch registry entry. This is phase 2 of GC and
-// should be called after GCCheckpoints. Returns the number of SST files deleted.
-func GCOrphanSSTs(ctx context.Context, store object.Store) (int, error) {
-	referenced, err := collectReferencedSSTs(ctx, store)
-	if err != nil {
-		return 0, fmt.Errorf("checkpoint gc ssts: collect refs: %w", err)
-	}
-	allSSTs, err := store.List(ctx, "sst/")
-	if err != nil {
-		return 0, fmt.Errorf("checkpoint gc ssts: list: %w", err)
-	}
+// GCOrphanSSTs deletes SST files that were exclusively referenced by deleted
+// checkpoints. The candidates map must be built by GCCheckpoints — it already
+// excludes SSTs that are still referenced by any live checkpoint, so this
+// function simply deletes everything in the set.
+//
+// Using a pre-computed candidate set (rather than listing all "sst/" keys and
+// diffing against live checkpoints) closes a race where a newly-promoted leader
+// uploads SSTs before writing its first checkpoint: those SSTs would appear as
+// "orphans" in a full-LIST approach even though they are about to be referenced.
+func GCOrphanSSTs(ctx context.Context, store object.Store, candidates map[string]struct{}) (int, error) {
 	var deleted int
-	for _, k := range allSSTs {
-		if _, ok := referenced[k]; !ok {
-			if err := store.Delete(ctx, k); err != nil {
-				return deleted, fmt.Errorf("checkpoint gc ssts: delete %q: %w", k, err)
-			}
-			deleted++
+	for k := range candidates {
+		if err := store.Delete(ctx, k); err != nil {
+			return deleted, fmt.Errorf("checkpoint gc ssts: delete %q: %w", k, err)
 		}
+		deleted++
 	}
 	return deleted, nil
-}
-
-// collectReferencedSSTs returns the union of all SST keys referenced by live
-// checkpoint indexes and by branch registry entries in this store.
-func collectReferencedSSTs(ctx context.Context, store object.Store) (map[string]struct{}, error) {
-	referenced := make(map[string]struct{})
-
-	cpKeys, err := ListRemote(ctx, store)
-	if err != nil {
-		return nil, err
-	}
-	for _, k := range cpKeys {
-		idx, err := readCheckpointIndex(ctx, store, k)
-		if err != nil {
-			return nil, err
-		}
-		for _, sstKey := range idx.SSTFiles {
-			referenced[sstKey] = struct{}{}
-		}
-	}
-
-	branches, err := ReadBranchEntries(ctx, store)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range branches {
-		if entry.AncestorCheckpointKey == "" {
-			continue
-		}
-		idx, err := readCheckpointIndex(ctx, store, entry.AncestorCheckpointKey)
-		if err == object.ErrNotFound {
-			continue // ancestor checkpoint already GC'd; branch must have its own
-		}
-		if err != nil {
-			return nil, err
-		}
-		for _, sstKey := range idx.SSTFiles {
-			referenced[sstKey] = struct{}{}
-		}
-	}
-	return referenced, nil
 }

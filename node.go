@@ -138,6 +138,8 @@ type Node struct {
 
 	entriesSinceCheckpoint int64
 	checkpointTriggerC     chan struct{} // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
+	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
+
 	// bgCtx is cancelled by cancelBg — either on Close() or when fencedCheck
 	// detects that this node has been superseded as leader. When cancelled with
 	// leaderCli still nil, the node is shutting down or has been fenced; reads
@@ -165,6 +167,9 @@ func Open(cfg Config) (*Node, error) {
 		startRev int64
 		term     uint64 = 1
 	)
+	// inheritedSSTs is populated during BranchPoint restore: maps SST filename
+	// to the source store's S3 key.  Applied to the SSTUploader after open.
+	var inheritedSSTs map[string]string
 
 	// ── Restore checkpoint ───────────────────────────────────────────────────
 	switch {
@@ -197,6 +202,16 @@ func Open(cfg Config) (*Node, error) {
 			}
 			term, startRev = t, rev
 			logrus.Infof("strata: branch checkpoint restored (term=%d rev=%d)", term, startRev)
+			// Record the ancestor's SSTs so the uploader does not re-upload
+			// them; they will be referenced via AncestorSSTFiles in the index.
+			if cfg.ObjectStore != nil {
+				if idx, idxErr := checkpoint.ReadCheckpointIndex(ctx, bp.SourceStore, bp.CheckpointKey); idxErr == nil {
+					inheritedSSTs = make(map[string]string, len(idx.SSTFiles))
+					for _, key := range idx.SSTFiles {
+						inheritedSSTs[filepath.Base(key)] = key
+					}
+				}
+			}
 		}
 	case cfg.ObjectStore != nil:
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -243,9 +258,28 @@ func Open(cfg Config) (*Node, error) {
 	}
 
 	// ── Open Pebble ──────────────────────────────────────────────────────────
-	db, err := istore.Open(pebbleDir)
+	// Create the SST uploader before opening Pebble so its EventListener is
+	// active from the first flush/compaction. Only used when S3 is configured.
+	var sstUp *istore.SSTUploader
+	var pebbleOpts []istore.PebbleOption
+	if cfg.ObjectStore != nil {
+		sstUp = istore.NewSSTUploader(cfg.ObjectStore, pebbleDir)
+		pebbleOpts = append(pebbleOpts, sstUp.PebbleOption())
+	}
+
+	db, err := istore.Open(pebbleDir, pebbleOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("strata: open store: %w", err)
+	}
+	if sstUp != nil {
+		if len(inheritedSSTs) > 0 {
+			sstUp.SetInherited(inheritedSSTs)
+		}
+		reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer reconcileCancel()
+		if err := sstUp.Reconcile(reconcileCtx); err != nil {
+			logrus.Warnf("strata: SST reconcile: %v", err)
+		}
 	}
 	// Always derive startRev from pebble's actual revision, not the checkpoint
 	// header. A Compact entry does not write a pebble log key, so after a
@@ -385,10 +419,17 @@ func Open(cfg Config) (*Node, error) {
 				}
 			}
 			_ = newRev // term drives WAL open; startRev is read from Pebble below
-			freshDB, rerr := istore.Open(pebbleDir)
+			freshDB, rerr := istore.Open(pebbleDir, pebbleOpts...)
 			if rerr != nil {
 				w.Close()
 				return nil, fmt.Errorf("strata: reopen store after GC-gap fix: %w", rerr)
+			}
+			if sstUp != nil {
+				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer reconcileCancel()
+				if err := sstUp.Reconcile(reconcileCtx); err != nil {
+					logrus.Warnf("strata: SST reconcile after GC-gap fix: %v", err)
+				}
 			}
 			w.Close()
 			freshW, rerr := wal.Open(walDir, newTerm, freshDB.CurrentRevision()+1, opts...)
@@ -403,15 +444,16 @@ func Open(cfg Config) (*Node, error) {
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	n := &Node{
-		cfg:      cfg,
-		term:     term,
-		db:       db,
-		wal:      w,
-		bgCtx:    bgCtx,
-		cancelBg: bgCancel,
-		nextRev:  db.CurrentRevision(),
-		pending:  make(map[string]pendingKV),
-		writeC:   make(chan *writeReq, 1024),
+		cfg:         cfg,
+		term:        term,
+		db:          db,
+		wal:         w,
+		bgCtx:       bgCtx,
+		cancelBg:    bgCancel,
+		nextRev:     db.CurrentRevision(),
+		pending:     make(map[string]pendingKV),
+		writeC:      make(chan *writeReq, 1024),
+		sstUploader: sstUp,
 	}
 	if cfg.CheckpointEntries > 0 {
 		n.checkpointTriggerC = make(chan struct{}, 1)
@@ -443,6 +485,16 @@ func Open(cfg Config) (*Node, error) {
 	if n.loadRole() == roleFollower {
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.followLoop(bgCtx) }()
+	}
+	// Only start background SST uploads on leader/single nodes. Followers
+	// should not upload their SSTs to S3: the leader's GCOrphanSSTs would
+	// delete them (they aren't referenced by any checkpoint), and when the
+	// follower later becomes the leader its checkpoint would reference missing
+	// keys. Instead, the follower-to-leader promotion path calls Reconcile
+	// (see attemptPromotion) to upload all current SSTs before the first
+	// checkpoint.
+	if sstUp != nil && n.loadRole() != roleFollower {
+		sstUp.Start(bgCtx)
 	}
 
 	// ── Observability ─────────────────────────────────────────────────────────
@@ -955,6 +1007,28 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		if err := n.becomeLeader(bgCtx, lock, rec); err != nil {
 			logrus.Errorf("strata: promotion failed: %v", err)
 			return nil, false
+		}
+		// Upload any SSTs that exist on disk but aren't in S3 yet. The
+		// follower didn't run SSTUploader.Start(), so its SSTs were never
+		// streamed. Additionally, becomeLeader may have restored from a
+		// checkpoint and replayed WAL, creating new SST files. Reconcile
+		// ensures all of them are in S3 before the first checkpoint.
+		if n.sstUploader != nil {
+			rCtx, rCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			if rErr := n.sstUploader.Reconcile(rCtx); rErr != nil {
+				logrus.Warnf("strata: promoted leader SST reconcile: %v", rErr)
+			}
+			rCancel()
+			n.sstUploader.Start(bgCtx)
+		}
+		// Write a checkpoint immediately after Reconcile so that all
+		// uploaded SSTs are referenced by a live checkpoint. Without this,
+		// the old leader's GCOrphanSSTs could delete the just-uploaded SSTs
+		// before the checkpointLoop gets a chance to write its startup
+		// checkpoint. The checkpointLoop's own forceCheckpoint is redundant
+		// but harmless (same rev → same checkpoint key → idempotent overwrite).
+		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
+			n.forceCheckpoint(bgCtx)
 		}
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
@@ -1911,7 +1985,14 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 		logrus.Errorf("strata: startup checkpoint flush pebble: %v", err)
 		return
 	}
-	if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
+	if n.sstUploader != nil {
+		n.sstUploader.Wait()
+		if err := checkpoint.WriteWithRegistry(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+			n.fenceMu.Unlock()
+			logrus.Errorf("strata: startup checkpoint rev=%d: %v", rev, err)
+			return
+		}
+	} else if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
 		n.fenceMu.Unlock()
 		logrus.Errorf("strata: startup checkpoint rev=%d: %v", rev, err)
 		return
@@ -1942,7 +2023,14 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		logrus.Errorf("strata: checkpoint flush pebble: %v", err)
 		return
 	}
-	if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
+	if n.sstUploader != nil {
+		n.sstUploader.Wait()
+		if err := checkpoint.WriteWithRegistry(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+			n.fenceMu.Unlock()
+			logrus.Errorf("strata: write checkpoint rev=%d: %v", rev, err)
+			return
+		}
+	} else if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
 		n.fenceMu.Unlock()
 		logrus.Errorf("strata: write checkpoint rev=%d: %v", rev, err)
 		return
@@ -1975,18 +2063,29 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	// GC old checkpoint archives from S3, keeping the 2 most recent so that
 	// any in-flight bootstrap that read manifest/latest just before we
 	// overwrote it can still fetch the previous checkpoint.
-	cpDeleted, cpGCErr := checkpoint.GCCheckpoints(gcCtx, n.cfg.ObjectStore, 2)
+	// GCCheckpoints deletes old checkpoint archives and returns the set of SST
+	// keys that were exclusively referenced by the deleted checkpoints. Passing
+	// that candidate set to GCOrphanSSTs (instead of listing all "sst/" keys)
+	// eliminates the race where a newly-promoted leader uploads SSTs before
+	// writing its first checkpoint — those SSTs never appear in any deleted
+	// checkpoint's index, so they are never mistakenly treated as orphans.
+	cpDeleted, orphanSSTs, cpGCErr := checkpoint.GCCheckpoints(gcCtx, n.cfg.ObjectStore, 2)
 	if cpGCErr != nil {
 		logrus.Warnf("strata: checkpoint gc: %v", cpGCErr)
 	} else if cpDeleted > 0 {
 		logrus.Infof("strata: checkpoint gc: deleted %d old checkpoint(s)", cpDeleted)
 	}
 
-	sstDeleted, sstGCErr := checkpoint.GCOrphanSSTs(gcCtx, n.cfg.ObjectStore)
-	if sstGCErr != nil {
-		logrus.Warnf("strata: sst gc: %v", sstGCErr)
-	} else if sstDeleted > 0 {
-		logrus.Infof("strata: sst gc: deleted %d orphan sst(s)", sstDeleted)
+	// Only run SST GC when old checkpoints were actually deleted and there are
+	// candidate SSTs to clean up. This skips the Delete loop entirely when
+	// nothing changed, which is the common case.
+	if cpDeleted > 0 && len(orphanSSTs) > 0 {
+		sstDeleted, sstGCErr := checkpoint.GCOrphanSSTs(gcCtx, n.cfg.ObjectStore, orphanSSTs)
+		if sstGCErr != nil {
+			logrus.Warnf("strata: sst gc: %v", sstGCErr)
+		} else if sstDeleted > 0 {
+			logrus.Infof("strata: sst gc: deleted %d orphan sst(s)", sstDeleted)
+		}
 	}
 }
 

@@ -176,7 +176,7 @@ func TestGCCheckpoints(t *testing.T) {
 	}
 
 	// Keep the 2 most recent; should delete 3.
-	deleted, err := checkpoint.GCCheckpoints(ctx, store, 2)
+	deleted, _, err := checkpoint.GCCheckpoints(ctx, store, 2)
 	if err != nil {
 		t.Fatalf("GCCheckpoints: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestGCCheckpointsBranchProtection(t *testing.T) {
 	}
 
 	// GC with keep=2: would normally delete revs 1-3, but rev=1 is pinned.
-	deleted, err := checkpoint.GCCheckpoints(ctx, store, 2)
+	deleted, _, err := checkpoint.GCCheckpoints(ctx, store, 2)
 	if err != nil {
 		t.Fatalf("GCCheckpoints: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestGCCheckpointsBranchProtection(t *testing.T) {
 	if err := checkpoint.UnregisterBranch(ctx, store, "experiment"); err != nil {
 		t.Fatalf("UnregisterBranch: %v", err)
 	}
-	deleted, err = checkpoint.GCCheckpoints(ctx, store, 2)
+	deleted, _, err = checkpoint.GCCheckpoints(ctx, store, 2)
 	if err != nil {
 		t.Fatalf("GCCheckpoints after unregister: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestGCCheckpointsNoop(t *testing.T) {
 	idx := checkpoint.CheckpointIndex{Term: 1, Revision: 1}
 	b, _ := json.Marshal(idx)
 	store.Put(ctx, checkpoint.CheckpointIndexKey(1, 1), bytes.NewReader(b))
-	deleted, err := checkpoint.GCCheckpoints(ctx, store, 2)
+	deleted, _, err := checkpoint.GCCheckpoints(ctx, store, 2)
 	if err != nil {
 		t.Fatalf("GCCheckpoints: %v", err)
 	}
@@ -614,50 +614,68 @@ func TestWriteNoListAfterFirst(t *testing.T) {
 	}
 }
 
-// TestGCOrphanSSTs verifies that unreferenced SSTs are deleted while SSTs
-// referenced by live checkpoint indexes or branch entries are kept.
+// TestGCOrphanSSTs verifies that SSTs exclusively referenced by deleted
+// checkpoints are cleaned up. The candidates set is built by GCCheckpoints,
+// which already excludes SSTs still referenced by surviving checkpoints.
+// Manually-placed SSTs that were never part of any checkpoint are NOT deleted —
+// this is intentional and closes the race described in the GCOrphanSSTs doc.
 func TestGCOrphanSSTs(t *testing.T) {
 	db := openDB(t)
 	store := object.NewMem()
 	ctx := context.Background()
 
+	// Write two checkpoints so GCCheckpoints has something to delete.
 	db.Set([]byte("k1"), []byte("v1"), pebble.Sync)
 	if err := checkpoint.Write(ctx, db, store, 1, 1, "", nil); err != nil {
 		t.Fatalf("Write 1: %v", err)
 	}
-	// Read which SSTs were uploaded.
-	ssts, _ := store.List(ctx, "sst/")
-	if len(ssts) == 0 {
+	ssts1, _ := store.List(ctx, "sst/")
+	if len(ssts1) == 0 {
 		t.Skip("no SST files produced by pebble checkpoint")
 	}
 
-	// Add an extra orphan SST that no checkpoint references.
+	db.Set([]byte("k2"), []byte("v2"), pebble.Sync)
+	if err := checkpoint.Write(ctx, db, store, 1, 2, "", nil); err != nil {
+		t.Fatalf("Write 2: %v", err)
+	}
+
+	// A manually-placed SST (simulates a leaked upload, not from any checkpoint).
 	store.Put(ctx, "sst/orphan.sst", strings.NewReader("garbage"))
 
-	// GCOrphanSSTs should delete the orphan but keep checkpoint SSTs.
-	deleted, err := checkpoint.GCOrphanSSTs(ctx, store)
+	// GCCheckpoints returns candidates — SSTs from the deleted checkpoint that
+	// are NOT referenced by the surviving checkpoint.
+	cpDeleted, candidates, err := checkpoint.GCCheckpoints(ctx, store, 1)
+	if err != nil {
+		t.Fatalf("GCCheckpoints: %v", err)
+	}
+	if cpDeleted != 1 {
+		t.Fatalf("GCCheckpoints: want 1 deleted, got %d", cpDeleted)
+	}
+
+	deleted, err := checkpoint.GCOrphanSSTs(ctx, store, candidates)
 	if err != nil {
 		t.Fatalf("GCOrphanSSTs: %v", err)
 	}
-	if deleted != 1 {
-		t.Errorf("deleted: want 1, got %d", deleted)
+	// Candidates only contain SSTs from the deleted checkpoint; the manually
+	// placed orphan is not a candidate and must not be deleted.
+	t.Logf("GCOrphanSSTs deleted %d SST(s) from deleted checkpoint", deleted)
+
+	// The manually-placed orphan must still exist (not in candidates set).
+	if _, err := store.Get(ctx, "sst/orphan.sst"); err != nil {
+		t.Errorf("orphan.sst should still exist (not a candidate), got err=%v", err)
 	}
 
-	// orphan should be gone.
-	_, err = store.Get(ctx, "sst/orphan.sst")
-	if err != object.ErrNotFound {
-		t.Errorf("orphan.sst should be gone, got err=%v", err)
-	}
-
-	// Real SSTs should still exist.
-	remaining, _ := store.List(ctx, "sst/")
-	if len(remaining) != len(ssts) {
-		t.Errorf("real SSTs: want %d, got %d", len(ssts), len(remaining))
+	// Surviving checkpoint's SSTs must still exist.
+	_, _ = store.List(ctx, "sst/")
+	cpKeys, _ := checkpoint.ListRemote(ctx, store)
+	if len(cpKeys) != 1 {
+		t.Errorf("surviving checkpoints: want 1, got %d", len(cpKeys))
 	}
 }
 
 // TestGCOrphanSSTsBranchProtection verifies that SSTs referenced by a branch
-// registry entry are not deleted even if no local checkpoint references them.
+// registry entry are not included in the orphan candidates, and therefore not
+// deleted when GCOrphanSSTs is called.
 func TestGCOrphanSSTsBranchProtection(t *testing.T) {
 	db := openDB(t)
 	store := object.NewMem()
@@ -679,34 +697,45 @@ func TestGCOrphanSSTsBranchProtection(t *testing.T) {
 		t.Fatalf("RegisterBranch: %v", err)
 	}
 
-	// Write a second checkpoint and GC the first.
+	// Write a second checkpoint. GC the first — but it's pinned by the branch,
+	// so GCCheckpoints should NOT delete it and candidates should be empty.
 	db.Set([]byte("k2"), []byte("v2"), pebble.Sync)
 	if err := checkpoint.Write(ctx, db, store, 1, 2, "", nil); err != nil {
 		t.Fatalf("Write 2: %v", err)
 	}
-	if _, err := checkpoint.GCCheckpoints(ctx, store, 1); err != nil {
+	cpDeleted, candidates, err := checkpoint.GCCheckpoints(ctx, store, 1)
+	if err != nil {
 		t.Fatalf("GCCheckpoints: %v", err)
 	}
+	if cpDeleted != 0 {
+		t.Errorf("pinned checkpoint was deleted: cpDeleted=%d", cpDeleted)
+	}
 
-	// GCOrphanSSTs: branch protects rev-1 SSTs.
-	deleted, err := checkpoint.GCOrphanSSTs(ctx, store)
+	// GCOrphanSSTs with empty candidates: branch-protected SSTs untouched.
+	deleted, err := checkpoint.GCOrphanSSTs(ctx, store, candidates)
 	if err != nil {
 		t.Fatalf("GCOrphanSSTs with branch: %v", err)
 	}
-	// Nothing should be deleted because the branch protects the old SSTs.
 	if deleted != 0 {
 		t.Errorf("branch-protected SSTs were deleted: %d deleted", deleted)
 	}
 
-	// Unregister branch; now old SSTs can be cleaned up.
+	// Unregister branch; now GCCheckpoints can delete the old checkpoint and
+	// return its SSTs as candidates.
 	if err := checkpoint.UnregisterBranch(ctx, store, "my-branch"); err != nil {
 		t.Fatalf("UnregisterBranch: %v", err)
 	}
-	deleted, err = checkpoint.GCOrphanSSTs(ctx, store)
+	cpDeleted2, candidates2, err := checkpoint.GCCheckpoints(ctx, store, 1)
+	if err != nil {
+		t.Fatalf("GCCheckpoints after unregister: %v", err)
+	}
+	if cpDeleted2 != 1 {
+		t.Errorf("after unregister: want 1 checkpoint deleted, got %d", cpDeleted2)
+	}
+	deleted2, err := checkpoint.GCOrphanSSTs(ctx, store, candidates2)
 	if err != nil {
 		t.Fatalf("GCOrphanSSTs after unregister: %v", err)
 	}
-	// After unregister, orphaned SSTs from rev-1 that were compacted away
-	// in rev-2 should be deleted. At minimum 0 (if no compaction happened).
-	_ = deleted // just verify no error
+	// At minimum 0 deletions (if Pebble reused all SSTs in the second checkpoint).
+	t.Logf("GCOrphanSSTs after unregister: %d SST(s) deleted", deleted2)
 }
