@@ -9,7 +9,9 @@ package peer
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -50,14 +52,106 @@ func IsLeaderShutdown(err error) bool {
 	return ok && s.Code() == codes.Unavailable && s.Message() == "leader_shutdown"
 }
 
-// ── JSON codec ────────────────────────────────────────────────────────────────
+// ── Binary codec ─────────────────────────────────────────────────────────────
 
-// Codec is the JSON codec used for all peer gRPC messages.
+// Codec encodes peer gRPC messages. Hot-path messages (WalEntryMsg, AckMsg)
+// use a compact binary format; all other messages fall back to JSON.
+//
+// WalEntryMsg wire layout (little-endian, 50-byte fixed header):
+//
+//	[revision  : int64  ]  @0
+//	[term      : uint64 ]  @8
+//	[createRev : int64  ]  @16
+//	[prevRev   : int64  ]  @24
+//	[lease     : int64  ]  @32
+//	[op        : uint8  ]  @40
+//	[flags     : uint8  ]  @41  bit0 = shutdown
+//	[keyLen    : uint32 ]  @42
+//	[key bytes ]           @46
+//	[valueLen  : uint32 ]  @46+keyLen
+//	[value bytes]          @50+keyLen
+//
+// AckMsg wire layout:
+//
+//	[revision  : int64  ]  8 bytes
 type Codec struct{}
 
-func (Codec) Marshal(v interface{}) ([]byte, error)      { return json.Marshal(v) }
-func (Codec) Unmarshal(data []byte, v interface{}) error { return json.Unmarshal(data, v) }
-func (Codec) Name() string                               { return "strata-json" }
+func (Codec) Name() string { return "strata-bin" }
+
+func (Codec) Marshal(v interface{}) ([]byte, error) {
+	switch m := v.(type) {
+	case *WalEntryMsg:
+		return marshalWalEntryMsg(m)
+	case *AckMsg:
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(m.Revision))
+		return buf, nil
+	default:
+		return json.Marshal(v)
+	}
+}
+
+func (Codec) Unmarshal(data []byte, v interface{}) error {
+	switch m := v.(type) {
+	case *WalEntryMsg:
+		return unmarshalWalEntryMsg(data, m)
+	case *AckMsg:
+		if len(data) < 8 {
+			return fmt.Errorf("peer: AckMsg too short (%d bytes)", len(data))
+		}
+		m.Revision = int64(binary.LittleEndian.Uint64(data))
+		return nil
+	default:
+		return json.Unmarshal(data, v)
+	}
+}
+
+const walEntryMsgFixedSize = 50
+
+func marshalWalEntryMsg(m *WalEntryMsg) ([]byte, error) {
+	kl := len(m.Key)
+	vl := len(m.Value)
+	buf := make([]byte, walEntryMsgFixedSize+kl+vl)
+	binary.LittleEndian.PutUint64(buf[0:], uint64(m.Revision))
+	binary.LittleEndian.PutUint64(buf[8:], m.Term)
+	binary.LittleEndian.PutUint64(buf[16:], uint64(m.CreateRevision))
+	binary.LittleEndian.PutUint64(buf[24:], uint64(m.PrevRevision))
+	binary.LittleEndian.PutUint64(buf[32:], uint64(m.Lease))
+	buf[40] = m.Op
+	if m.Shutdown {
+		buf[41] = 1
+	}
+	binary.LittleEndian.PutUint32(buf[42:], uint32(kl))
+	copy(buf[46:], m.Key)
+	binary.LittleEndian.PutUint32(buf[46+kl:], uint32(vl))
+	copy(buf[50+kl:], m.Value)
+	return buf, nil
+}
+
+func unmarshalWalEntryMsg(data []byte, m *WalEntryMsg) error {
+	if len(data) < walEntryMsgFixedSize {
+		return fmt.Errorf("peer: WalEntryMsg too short (%d bytes)", len(data))
+	}
+	m.Revision = int64(binary.LittleEndian.Uint64(data[0:]))
+	m.Term = binary.LittleEndian.Uint64(data[8:])
+	m.CreateRevision = int64(binary.LittleEndian.Uint64(data[16:]))
+	m.PrevRevision = int64(binary.LittleEndian.Uint64(data[24:]))
+	m.Lease = int64(binary.LittleEndian.Uint64(data[32:]))
+	m.Op = data[40]
+	m.Shutdown = data[41] != 0
+	kl := int(binary.LittleEndian.Uint32(data[42:]))
+	if len(data) < walEntryMsgFixedSize+kl {
+		return fmt.Errorf("peer: WalEntryMsg truncated at key (need %d have %d)", walEntryMsgFixedSize+kl, len(data))
+	}
+	m.Key = string(data[46 : 46+kl])
+	vl := int(binary.LittleEndian.Uint32(data[46+kl:]))
+	if len(data) < walEntryMsgFixedSize+kl+vl {
+		return fmt.Errorf("peer: WalEntryMsg truncated at value (need %d have %d)", walEntryMsgFixedSize+kl+vl, len(data))
+	}
+	m.Value = make([]byte, vl)
+	copy(m.Value, data[50+kl:])
+	return nil
+}
 
 // ── WAL stream message types ──────────────────────────────────────────────────
 

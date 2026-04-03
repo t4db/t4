@@ -786,33 +786,40 @@ func (n *Node) followLoop(bgCtx context.Context) {
 	fromRev := n.db.CurrentRevision() + 1
 
 	for {
-		err := cli.Follow(bgCtx, fromRev, func(e wal.Entry) error {
+		err := cli.Follow(bgCtx, fromRev, func(entries []wal.Entry) error {
 			// Followers must apply a contiguous revision stream. If the leader
 			// stream skips (or rewinds) a revision, force a full resync rather
 			// than silently advancing currentRev with holes.
-			if e.Revision != fromRev {
-				return peer.ErrResyncRequired
+			for i, e := range entries {
+				if e.Revision != fromRev+int64(i) {
+					return peer.ErrResyncRequired
+				}
 			}
-			if err := n.wal.Append(&e); err != nil {
+			ptrs := make([]*wal.Entry, len(entries))
+			for i := range entries {
+				ptrs[i] = &entries[i]
+			}
+			if err := n.wal.AppendBatch(bgCtx, ptrs); err != nil {
 				return err
 			}
-			if err := n.db.Apply([]wal.Entry{e}); err != nil {
+			if err := n.db.Apply(entries); err != nil {
 				return err
 			}
 			// Track the leader's term so attemptPromotion uses the correct
 			// floorTerm when calling TakeOver.  Without this, n.term stays at
 			// its Open() value and TakeOver backs off because it sees the
 			// current lock term as "already taken over at a higher term".
-			if e.Term > n.term {
+			// The last entry in the batch has the highest-or-equal term.
+			if last := entries[len(entries)-1]; last.Term > n.term {
 				n.mu.Lock()
-				if e.Term > n.term {
-					n.term = e.Term
+				if last.Term > n.term {
+					n.term = last.Term
 				}
 				n.mu.Unlock()
 			}
 			// Advance only after a successful apply so a reconnect retries
-			// the same revision rather than skipping it.
-			fromRev = e.Revision + 1
+			// from the start of the failed batch rather than skipping it.
+			fromRev = entries[len(entries)-1].Revision + 1
 			return nil
 		})
 
@@ -1632,36 +1639,46 @@ func (n *Node) commitLoop(ctx context.Context) {
 		for i, req := range batch {
 			entries[i] = &req.entry
 		}
-		err := n.wal.AppendBatch(batchCtx, entries)
-		batchCancel() // release watcher goroutines
 
-		// Broadcast to followers immediately after WAL append — before Pebble
-		// apply — so they can start processing (WAL write + ACK) in parallel.
-		// Ordering note: Broadcast must happen in revision order to avoid the
-		// peer server's maxSent dedup filter dropping entries.
-		if err == nil && n.peerSrv != nil {
+		var err error
+		if n.peerSrv != nil {
+			// Pipeline: run the leader WAL fsync concurrently with follower
+			// replication. Broadcast entries to followers immediately so their
+			// WAL writes overlap the leader's fsync. The leader fsync and the
+			// follower quorum ACKs are both required before signalling callers,
+			// preserving the same durability guarantee as the sequential path.
+			//
+			// Broadcasting before the leader fsync completes is safe: a client
+			// is only ACKed after both the leader fsync and the quorum ACK
+			// succeed. If the leader crashes before its fsync, the entry is
+			// not yet committed, matching standard Raft behaviour (etcd uses
+			// the same concurrent-write pattern).
+			//
+			// Ordering note: Broadcast must happen in revision order to avoid
+			// the peer server's maxSent dedup filter dropping entries.
+			walErrC := make(chan error, 1)
+			go func() { walErrC <- n.wal.AppendBatch(batchCtx, entries) }()
+
 			for _, req := range batch {
 				n.peerSrv.Broadcast(&req.entry)
 			}
-		}
 
-		// Wait for follower ACKs according to the configured policy before
-		// committing to Pebble. In the default quorum mode this guarantees
-		// the entry exists on a majority of nodes' WALs before the caller sees
-		// success.
-		//
-		// Use the commit loop's own context (node lifetime), NOT batchCtx.
-		// batchCtx is cancelled immediately after AppendBatch to release the
-		// per-caller watcher goroutines; passing it here would cause
-		// WaitForFollowers to return instantly, defeating quorum commit.
-		//
-		// Availability policy: if all followers disconnect mid-wait, we
-		// proceed anyway — the entry is already durable in the leader's WAL
-		// and will be replayed by followers when they reconnect.
-		if err == nil && n.peerSrv != nil {
+			// Wait for follower ACKs according to the configured policy.
+			// Use the commit loop's own context (node lifetime), NOT batchCtx:
+			// batchCtx is cancelled after AppendBatch returns and passing it
+			// here would cause WaitForFollowers to return instantly.
+			//
+			// Availability policy: if all followers disconnect mid-wait, we
+			// proceed anyway — the entry is already durable in the leader's
+			// WAL and will be replayed by followers when they reconnect.
 			maxRev := batch[len(batch)-1].entry.Revision
 			_ = n.peerSrv.WaitForFollowers(ctx, maxRev, peer.WaitMode(n.cfg.FollowerWaitMode))
+
+			err = <-walErrC
+		} else {
+			err = n.wal.AppendBatch(batchCtx, entries)
 		}
+		batchCancel() // release watcher goroutines
 
 		// Apply all entries to Pebble as one batch (in order).
 		if err == nil {

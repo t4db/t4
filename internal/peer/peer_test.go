@@ -47,8 +47,10 @@ func TestStreamDelivery(t *testing.T) {
 
 	received := make(chan wal.Entry, 16)
 	go func() {
-		cli.Follow(ctx, 1, func(e wal.Entry) error {
-			received <- e
+		cli.Follow(ctx, 1, func(entries []wal.Entry) error {
+			for _, e := range entries {
+				received <- e
+			}
 			return nil
 		})
 	}()
@@ -90,8 +92,10 @@ func TestCatchUp(t *testing.T) {
 
 	received := make(chan wal.Entry, 16)
 	go func() {
-		cli.Follow(ctx, 1, func(e wal.Entry) error {
-			received <- e
+		cli.Follow(ctx, 1, func(entries []wal.Entry) error {
+			for _, e := range entries {
+				received <- e
+			}
 			return nil
 		})
 	}()
@@ -139,7 +143,7 @@ func TestResyncRequired(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		// Ask for revision 1, which has been evicted from the 3-entry buffer.
-		errCh <- cli.Follow(ctx, 1, func(e wal.Entry) error { return nil })
+		errCh <- cli.Follow(ctx, 1, func([]wal.Entry) error { return nil })
 	}()
 
 	select {
@@ -209,7 +213,7 @@ func TestLeaderUnreachable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	err := cli.Follow(ctx, 1, func(e wal.Entry) error { return nil })
+	err := cli.Follow(ctx, 1, func([]wal.Entry) error { return nil })
 	if !peer.IsLeaderUnreachable(err) {
 		t.Errorf("expected IsLeaderUnreachable, got: %v", err)
 	}
@@ -229,8 +233,10 @@ func TestMultipleFollowers(t *testing.T) {
 		received[i] = make(chan wal.Entry, 16)
 		ch := received[i]
 		cli := peer.NewClient(addr, fmt.Sprintf("follower-%d", i), 3, nil)
-		go cli.Follow(ctx, 1, func(e wal.Entry) error {
-			ch <- e
+		go cli.Follow(ctx, 1, func(entries []wal.Entry) error {
+			for _, e := range entries {
+				ch <- e
+			}
 			return nil
 		})
 	}
@@ -274,10 +280,12 @@ func TestNoDuplicatesOnCatchUp(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		cli.Follow(ctx, 1, func(e wal.Entry) error {
-			revisions = append(revisions, e.Revision)
-			if e.Revision >= 6 {
-				cancel() // we have enough
+		cli.Follow(ctx, 1, func(entries []wal.Entry) error {
+			for _, e := range entries {
+				revisions = append(revisions, e.Revision)
+				if e.Revision >= 6 {
+					cancel() // we have enough
+				}
 			}
 			return nil
 		})

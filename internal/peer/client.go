@@ -82,14 +82,16 @@ func (c *Client) getConn() (*grpc.ClientConn, error) {
 }
 
 // Follow streams WAL entries from the leader starting at fromRev, calling
-// applyFn for each entry. fromRev advances automatically as entries are applied.
+// applyFn for each batch of entries. fromRev advances automatically as entries
+// are applied. Batches contain all entries that arrived between consecutive
+// applyFn calls, amortising WAL fsyncs across multiple revisions.
 //
 // Follow reconnects on transient errors. It returns:
 //   - ctx.Err() on context cancellation.
 //   - ErrResyncRequired when the leader's buffer no longer covers fromRev.
 //   - ErrLeaderUnreachable after maxRetries consecutive connection failures.
 //   - ErrLeaderShutdown when the leader sent a graceful shutdown signal.
-func (c *Client) Follow(ctx context.Context, fromRev int64, applyFn func(wal.Entry) error) error {
+func (c *Client) Follow(ctx context.Context, fromRev int64, applyFn func([]wal.Entry) error) error {
 	consecutiveFailures := 0
 	for {
 		nextRev, err := c.followOnce(ctx, fromRev, applyFn)
@@ -130,13 +132,18 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, applyFn func(wal.Ent
 
 // followOnce makes one streaming attempt using the shared connection.
 // Returns the next fromRev (last applied revision + 1) on any error.
-func (c *Client) followOnce(ctx context.Context, fromRev int64, applyFn func(wal.Entry) error) (int64, error) {
+func (c *Client) followOnce(ctx context.Context, fromRev int64, applyFn func([]wal.Entry) error) (int64, error) {
 	conn, err := c.getConn()
 	if err != nil {
 		return fromRev, err
 	}
 
-	stream, err := NewWalStreamClient(conn).Follow(ctx, &FollowRequest{
+	// Cancel the stream context on return so the receiver goroutine below
+	// exits cleanly when followOnce returns for any reason.
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
+
+	stream, err := NewWalStreamClient(conn).Follow(streamCtx, &FollowRequest{
 		FromRevision: fromRev,
 		NodeID:       c.nodeID,
 	})
@@ -146,22 +153,64 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, applyFn func(wal
 
 	logrus.Infof("peer: connected to leader %s (fromRev=%d)", c.leaderAddr, fromRev)
 
+	// entryC buffers entries received from the stream so the main loop can
+	// drain multiple entries per batch, amortising WAL fsyncs (AppendBatch
+	// does one fsync for the whole batch rather than one per entry).
+	entryC := make(chan wal.Entry, 512)
+	recvErrC := make(chan error, 1)
+
+	go func() {
+		for {
+			msg, err := stream.Recv()
+			if err != nil {
+				recvErrC <- err
+				return
+			}
+			if msg.Shutdown {
+				recvErrC <- ErrLeaderShutdown
+				return
+			}
+			select {
+			case entryC <- MsgToEntry(msg):
+			case <-streamCtx.Done():
+				recvErrC <- streamCtx.Err()
+				return
+			}
+		}
+	}()
+
 	for {
-		msg, err := stream.Recv()
-		if err != nil {
+		// Block until at least one entry or an error.
+		var batch []wal.Entry
+		select {
+		case e := <-entryC:
+			batch = append(batch, e)
+		case err := <-recvErrC:
 			return fromRev, err
 		}
-		if msg.Shutdown {
-			return fromRev, ErrLeaderShutdown
+
+		// Drain any additional entries that are already buffered so we can
+		// process them in a single AppendBatch (one fsync for the lot).
+	drain:
+		for {
+			select {
+			case e := <-entryC:
+				batch = append(batch, e)
+			default:
+				break drain
+			}
 		}
-		e := MsgToEntry(msg)
-		if err := applyFn(e); err != nil {
-			return fromRev, err
+
+		batchStartRev := fromRev
+		if err := applyFn(batch); err != nil {
+			return batchStartRev, err
 		}
-		fromRev = e.Revision + 1
-		// ACK after durable local WAL write (applyFn writes to WAL before Pebble).
-		// Best-effort: a send error just causes reconnect, which is safe.
-		if err := stream.SendAck(e.Revision); err != nil {
+		fromRev = batch[len(batch)-1].Revision + 1
+
+		// ACK the highest revision in the batch. The leader only needs the
+		// maximum ACK'd revision to advance its quorum counter, so one ACK
+		// per batch is enough regardless of how many entries it contained.
+		if err := stream.SendAck(batch[len(batch)-1].Revision); err != nil {
 			return fromRev, err
 		}
 	}
