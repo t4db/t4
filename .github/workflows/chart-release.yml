@@ -1,0 +1,50 @@
+name: Release Helm Chart
+
+on:
+  push:
+    tags:
+      - "chart/v*"   # e.g. chart/v0.1.0
+
+permissions:
+  contents: read
+  packages: write   # needed to push to ghcr.io
+
+jobs:
+  release:
+    name: Package & publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Extract chart version from tag
+        # Tag format: chart/v1.2.3  →  CHART_VERSION=1.2.3
+        run: |
+          TAG="${GITHUB_REF_NAME}"          # e.g. chart/v0.1.0
+          echo "CHART_VERSION=${TAG#chart/v}" >> "$GITHUB_ENV"
+
+      - name: Stamp version into Chart.yaml
+        run: |
+          sed -i "s/^version:.*/version: ${CHART_VERSION}/" charts/strata/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" charts/strata/Chart.yaml
+
+      - name: Lint chart
+        run: helm lint charts/strata
+
+      - name: Package chart
+        run: helm package charts/strata --destination dist/
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io \
+                --username "${{ github.repository_owner }}" \
+                --password-stdin
+
+      - name: Push chart to GHCR
+        run: |
+          helm push dist/strata-${CHART_VERSION}.tgz \
+            oci://ghcr.io/${{ github.repository_owner }}/charts

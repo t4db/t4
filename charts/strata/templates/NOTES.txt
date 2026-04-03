@@ -1,0 +1,35 @@
+Strata has been deployed!
+
+  Release:   {{ .Release.Name }}
+  Namespace: {{ .Release.Namespace }}
+  Replicas:  {{ .Values.replicaCount }}
+
+━━ Client endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  etcd-compatible gRPC:
+    {{ include "strata.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+  Prometheus metrics:
+    {{ include "strata.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.metricsPort }}/metrics
+
+━━ Health probes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  kubectl port-forward svc/{{ include "strata.fullname" . }} {{ .Values.service.metricsPort }}:{{ .Values.service.metricsPort }} -n {{ .Release.Namespace }}
+  curl http://localhost:{{ .Values.service.metricsPort }}/healthz
+  curl http://localhost:{{ .Values.service.metricsPort }}/readyz
+
+━━ Kine integration example ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  --kine-endpoint="etcd://{{ include "strata.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+
+{{- if not .Values.s3.bucket }}
+
+⚠  WARNING: s3.bucket is not set.  Writes are not durable across pod restarts
+   without persistent volumes.  Set s3.bucket for production use.
+{{- end }}
+
+{{- if eq (int .Values.replicaCount) 1 }}
+
+ℹ  Running as a single node.  Set replicaCount ≥ 3 and configure s3.bucket
+   for a highly-available deployment.
+{{- end }}

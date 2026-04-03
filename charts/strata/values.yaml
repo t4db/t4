@@ -1,0 +1,194 @@
+# Default values for the strata Helm chart.
+
+image:
+  repository: ghcr.io/makhov/strata
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to .Chart.AppVersion
+
+replicaCount: 1
+
+# Stable node IDs are taken from the StatefulSet pod name (e.g. strata-0).
+# advertise-peer is derived automatically as:
+#   <pod>.<headless-svc>.<namespace>.svc.cluster.local:<peerPort>
+# Override advertiseAddr to use a custom domain (e.g. via Ingress or NodePort).
+advertiseAddr: ""
+
+# ── Strata runtime configuration ─────────────────────────────────────────────
+config:
+  # Directory for Pebble DB and local WAL segments.
+  dataDir: /var/lib/strata
+
+  # etcd-compatible gRPC listen address (client-facing).
+  listenAddr: "0.0.0.0:3379"
+
+  # Peer replication stream address.  Required when replicaCount > 1.
+  peerListenAddr: "0.0.0.0:3380"
+
+  # Prometheus metrics and health probe address.
+  metricsAddr: "0.0.0.0:9090"
+
+  # "linearizable" or "serializable"
+  readConsistency: linearizable
+
+  # "none" | "quorum" | "all"
+  followerWaitMode: quorum
+
+  # Number of stream failures before a follower attempts leader takeover.
+  followerMaxRetries: 5
+
+  # Upload each WAL segment to S3 before ACK-ing the write.
+  # Set to "false" when using a persistent volume (relies on PVC durability).
+  walSyncUpload: "false"
+
+  # WAL segment size in MiB before rotation.
+  segmentMaxSizeMb: 50
+
+  # WAL segment age in seconds before rotation.
+  segmentMaxAgeSec: 10
+
+  # Leader checkpoint frequency in minutes.
+  checkpointIntervalMin: 15
+
+  logLevel: info
+
+# ── S3 / object store ─────────────────────────────────────────────────────────
+s3:
+  # S3 bucket name.  Required for durability and multi-node mode.
+  bucket: ""
+
+  # Key prefix within the bucket (e.g. "k8s/prod").
+  prefix: ""
+
+  # AWS region.  Ignored when endpoint is set (S3-compatible stores).
+  region: ""
+
+  # Custom endpoint for S3-compatible stores (MinIO, Ceph, etc.).
+  endpoint: ""
+
+  # Credentials — choose one of:
+  #
+  #   useIRSA: true       → annotate the ServiceAccount for EKS IRSA /
+  #                          Workload Identity (no secret needed).
+  #
+  #   existingSecret: ""  → reference a pre-existing Secret whose keys are
+  #                         AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+  #
+  #   credentials: {}     → create a new Secret from these values (not
+  #                         recommended for production; prefer IRSA).
+  useIRSA: false
+
+  # ARN of the IAM role to annotate on the ServiceAccount (IRSA).
+  iamRoleArn: ""
+
+  # Name of an existing Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+  existingSecret: ""
+
+  # Inline credentials — a new Secret is created when non-empty.
+  credentials:
+    accessKeyId: ""
+    secretAccessKey: ""
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+tls:
+  # Client-facing gRPC TLS (termination inside strata).
+  client:
+    enabled: false
+    # Name of a Secret with keys tls.crt, tls.key, and optionally ca.crt.
+    secretName: ""
+
+  # Peer-to-peer mTLS between strata nodes.
+  peer:
+    enabled: false
+    secretName: ""
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  # storageClass: "-"  # Use cluster default
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  # etcd-compatible client port.
+  port: 3379
+  # Peer replication port (used by headless service).
+  peerPort: 3380
+  # Prometheus metrics port.
+  metricsPort: 9090
+  annotations: {}
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ── Prometheus ServiceMonitor ─────────────────────────────────────────────────
+serviceMonitor:
+  enabled: false
+  # Namespace where the Prometheus Operator is watching for ServiceMonitors.
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# ── Pod configuration ─────────────────────────────────────────────────────────
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 65532
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: metrics
+  initialDelaySeconds: 15
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels: {}  # filled in by _helpers.tpl
+          topologyKey: kubernetes.io/hostname
+
+imagePullSecrets: []

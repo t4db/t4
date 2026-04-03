@@ -1,0 +1,16 @@
+apiVersion: v2
+name: strata
+description: S3-backed distributed key-value store with an etcd-compatible API
+type: application
+version: 0.1.0
+appVersion: "0.11.0"
+keywords:
+  - etcd
+  - kv
+  - kine
+  - distributed
+home: https://github.com/makhov/strata
+sources:
+  - https://github.com/makhov/strata
+maintainers:
+  - name: strata maintainers
