@@ -1,6 +1,6 @@
 package strata
 
-import "github.com/makhov/strata/pkg/object"
+import "github.com/strata-db/strata/pkg/object"
 
 // PinnedObject identifies a specific version of an object in object storage.
 type PinnedObject struct {

@@ -1,4 +1,4 @@
-module github.com/makhov/strata
+module github.com/strata-db/strata
 
 go 1.25.1
 

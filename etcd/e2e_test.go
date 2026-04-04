@@ -12,9 +12,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/makhov/strata"
-	strataetcd "github.com/makhov/strata/etcd"
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata"
+	strataetcd "github.com/strata-db/strata/etcd"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────

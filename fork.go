@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/makhov/strata/internal/checkpoint"
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata/internal/checkpoint"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 // Fork registers a new branch in sourceStore under branchID, pinning the

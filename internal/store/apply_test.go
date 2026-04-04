@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/makhov/strata/internal/wal"
+	"github.com/strata-db/strata/internal/wal"
 )
 
 // ── Compaction fixes ─────────────────────────────────────────────────────────

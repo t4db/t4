@@ -11,8 +11,8 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
-	"github.com/makhov/strata/internal/wal"
 	"github.com/sirupsen/logrus"
+	"github.com/strata-db/strata/internal/wal"
 )
 
 // ErrClosed is returned by WaitForRevision when the store has been closed.

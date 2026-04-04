@@ -464,8 +464,8 @@ On first boot the branch node downloads SSTs and Pebble metadata from the source
 ### Creating a branch (Go library)
 
 ```go
-import "github.com/makhov/strata"
-import "github.com/makhov/strata/pkg/object"
+import "github.com/strata-db/strata"
+import "github.com/strata-db/strata/pkg/object"
 
 sourceStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "strata/"})
 branchStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "strata-branch/"})
@@ -502,7 +502,7 @@ strata branch fork \
 
 ```go
 // Go — use the internal package directly for a specific key
-import "github.com/makhov/strata/internal/checkpoint"
+import "github.com/strata-db/strata/internal/checkpoint"
 
 cpKey := "checkpoint/0000000001/00000000000000000050/manifest.json"
 if err := checkpoint.RegisterBranch(ctx, sourceStore, "my-branch", cpKey); err != nil {

@@ -20,8 +20,8 @@ import (
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 
-	"github.com/makhov/strata"
-	"github.com/makhov/strata/etcd/auth"
+	"github.com/strata-db/strata"
+	"github.com/strata-db/strata/etcd/auth"
 )
 
 // Server implements the etcd v3 gRPC protocol on top of a strata Node.

@@ -10,7 +10,7 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/makhov/strata"
+	"github.com/strata-db/strata"
 )
 
 // ── Watch unit tests ──────────────────────────────────────────────────────────

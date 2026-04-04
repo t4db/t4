@@ -9,8 +9,8 @@ keywords:
   - kv
   - kine
   - distributed
-home: https://github.com/makhov/strata
+home: https://github.com/strata-db/strata
 sources:
-  - https://github.com/makhov/strata
+  - https://github.com/strata-db/strata
 maintainers:
   - name: strata maintainers

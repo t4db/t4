@@ -20,13 +20,13 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 
-	"github.com/makhov/strata/internal/checkpoint"
-	"github.com/makhov/strata/internal/election"
-	"github.com/makhov/strata/internal/metrics"
-	"github.com/makhov/strata/internal/peer"
-	istore "github.com/makhov/strata/internal/store"
-	"github.com/makhov/strata/internal/wal"
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata/internal/checkpoint"
+	"github.com/strata-db/strata/internal/election"
+	"github.com/strata-db/strata/internal/metrics"
+	"github.com/strata-db/strata/internal/peer"
+	istore "github.com/strata-db/strata/internal/store"
+	"github.com/strata-db/strata/internal/wal"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 // walWriter is the subset of wal.WAL used by Node. The interface decouples Node

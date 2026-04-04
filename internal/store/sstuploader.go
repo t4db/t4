@@ -14,7 +14,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/sirupsen/logrus"
 
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 // SSTUploader streams Pebble SST files to object storage as they are created,

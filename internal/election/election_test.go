@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 func newLock(t *testing.T, nodeID, addr string) *Lock {

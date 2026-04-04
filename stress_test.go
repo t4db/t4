@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/makhov/strata"
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 func TestLongRunningConsistency(t *testing.T) {

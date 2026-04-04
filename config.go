@@ -6,7 +6,7 @@ import (
 
 	"google.golang.org/grpc/credentials"
 
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 // ReadConsistency controls the consistency guarantee for read operations served

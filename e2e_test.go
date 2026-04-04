@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/makhov/strata"
-	"github.com/makhov/strata/internal/checkpoint"
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata"
+	"github.com/strata-db/strata/internal/checkpoint"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 // snapshotStore wraps MemStore, recording a version ID for every Put so a

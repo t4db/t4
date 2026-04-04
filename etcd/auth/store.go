@@ -9,8 +9,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/makhov/strata"
-	"github.com/makhov/strata/internal/metrics"
+	"github.com/strata-db/strata"
+	"github.com/strata-db/strata/internal/metrics"
 )
 
 const (

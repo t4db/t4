@@ -1,8 +1,8 @@
 # Strata
 
-[![CI](https://github.com/makhov/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/makhov/strata/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/makhov/strata.svg)](https://pkg.go.dev/github.com/makhov/strata)
-[![Go Report Card](https://goreportcard.com/badge/github.com/makhov/strata)](https://goreportcard.com/report/github.com/makhov/strata)
+[![CI](https://github.com/strata-db/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/strata-db/strata/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/strata-db/strata.svg)](https://pkg.go.dev/github.com/strata-db/strata)
+[![Go Report Card](https://goreportcard.com/badge/github.com/strata-db/strata)](https://goreportcard.com/report/github.com/strata-db/strata)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 An embeddable, S3-durable key-value store for Go.
@@ -18,7 +18,7 @@ An embeddable, S3-durable key-value store for Go.
 ## Embedded usage
 
 ```go
-import "github.com/makhov/strata"
+import "github.com/strata-db/strata"
 
 node, err := strata.Open(strata.Config{
     DataDir: "/var/lib/myapp/strata",
@@ -42,7 +42,7 @@ for e := range events {
 import (
     awsconfig "github.com/aws/aws-sdk-go-v2/config"
     "github.com/aws/aws-sdk-go-v2/service/s3"
-    "github.com/makhov/strata/pkg/object"
+    "github.com/strata-db/strata/pkg/object"
 )
 
 awsCfg, _ := awsconfig.LoadDefaultConfig(ctx)
@@ -61,7 +61,7 @@ node, err := strata.Open(strata.Config{
 The `strata` binary exposes the etcd v3 gRPC protocol. Use `etcdctl`, the official Go client, or any other etcd v3 compatible tool.
 
 ```bash
-go install github.com/makhov/strata/cmd/strata@latest
+go install github.com/strata-db/strata/cmd/strata@latest
 
 # Single node, local only
 strata run --data-dir /var/lib/strata --listen 0.0.0.0:3379

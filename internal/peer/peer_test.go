@@ -9,8 +9,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/makhov/strata/internal/peer"
-	"github.com/makhov/strata/internal/wal"
+	"github.com/strata-db/strata/internal/peer"
+	"github.com/strata-db/strata/internal/wal"
 )
 
 // startServer starts a peer gRPC server on a random port, registers srv, and

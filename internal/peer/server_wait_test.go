@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/makhov/strata/internal/wal"
+	"github.com/strata-db/strata/internal/wal"
 )
 
 func TestWaitForFollowersNoneReturnsImmediately(t *testing.T) {

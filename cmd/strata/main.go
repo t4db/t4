@@ -19,11 +19,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	"github.com/makhov/strata"
-	strataetcd "github.com/makhov/strata/etcd"
-	"github.com/makhov/strata/etcd/auth"
-	"github.com/makhov/strata/internal/checkpoint"
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata"
+	strataetcd "github.com/strata-db/strata/etcd"
+	"github.com/strata-db/strata/etcd/auth"
+	"github.com/strata-db/strata/internal/checkpoint"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 func startupLogFields(

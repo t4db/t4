@@ -7,8 +7,8 @@ import (
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 
-	"github.com/makhov/strata"
-	strataetcd "github.com/makhov/strata/etcd"
+	"github.com/strata-db/strata"
+	strataetcd "github.com/strata-db/strata/etcd"
 )
 
 // newServer opens a single-node strata Node (no S3) and wraps it in an etcd Server.

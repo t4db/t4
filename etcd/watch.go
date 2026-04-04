@@ -8,7 +8,7 @@ import (
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 
-	"github.com/makhov/strata"
+	"github.com/strata-db/strata"
 )
 
 // Watch implements WatchServer.Watch (bidirectional streaming).

@@ -1,7 +1,7 @@
 # Default values for the strata Helm chart.
 
 image:
-  repository: ghcr.io/makhov/strata
+  repository: ghcr.io/strata-db/strata
   pullPolicy: IfNotPresent
   tag: ""  # Defaults to .Chart.AppVersion
 

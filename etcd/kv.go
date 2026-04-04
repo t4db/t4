@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/makhov/strata"
+	"github.com/strata-db/strata"
 )
 
 // Range implements KVServer.Range (Get / List).

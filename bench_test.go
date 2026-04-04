@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/makhov/strata"
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 func openBenchNode(b *testing.B) *strata.Node {
@@ -376,9 +376,9 @@ func BenchmarkGetLinearizableFollower(b *testing.B) {
 	b.Cleanup(func() { leader.Close() })
 
 	follower, err := strata.Open(strata.Config{
-		DataDir:     b.TempDir(),
-		ObjectStore: store,
-		NodeID:      "bench-follower",
+		DataDir:        b.TempDir(),
+		ObjectStore:    store,
+		NodeID:         "bench-follower",
 		PeerListenAddr: freeBenchAddr(b),
 	})
 	if err != nil {

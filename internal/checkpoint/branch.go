@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 // BranchEntry is stored at "branches/<id>" in the source object store.

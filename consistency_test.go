@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/makhov/strata"
-	"github.com/makhov/strata/pkg/object"
+	"github.com/strata-db/strata"
+	"github.com/strata-db/strata/pkg/object"
 )
 
 // checkConsistency verifies that every node in the slice can read all expected
