@@ -1025,6 +1025,17 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 			logrus.Errorf("strata: promotion failed: %v", err)
 			return nil, false
 		}
+		// Start write-processing loops immediately so that client writes are
+		// not blocked while we run Reconcile and the startup checkpoint below.
+		// forceCheckpoint (and periodic maybeCheckpoint) already hold
+		// fenceMu.Lock() during I/O, which briefly pauses new writes — that
+		// is the same behaviour as during a normal checkpoint interval.
+		n.bgWg.Add(1)
+		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
+		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
+			n.bgWg.Add(1)
+			go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()
+		}
 		// Upload any SSTs that exist on disk but aren't in S3 yet. The
 		// follower didn't run SSTUploader.Start(), so its SSTs were never
 		// streamed. Additionally, becomeLeader may have restored from a
@@ -1046,12 +1057,6 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		// but harmless (same rev → same checkpoint key → idempotent overwrite).
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
 			n.forceCheckpoint(bgCtx)
-		}
-		n.bgWg.Add(1)
-		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
-		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
-			n.bgWg.Add(1)
-			go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()
 		}
 		return nil, true
 	}
