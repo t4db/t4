@@ -101,6 +101,8 @@ SST files are stored at `sst/<hash16>/<name>` where `<hash16>` is the first 16 h
 - **Deduplication across checkpoints**: an SST that did not change between two checkpoints is uploaded once.
 - **Safe sharing across nodes**: multiple nodes restoring from the same checkpoint may produce SST files with the same Pebble filename but different content (due to non-deterministic WAL replay flush boundaries). Content addressing ensures they never collide.
 
+> **Implementation note:** Pebble fires a `TableCreated` event when an SST file is first created (while it is still empty). The uploader ignores 0-byte SST files during `Reconcile` to avoid registering an empty file in the content registry and silently skipping the real upload that follows when the flush or compaction completes.
+
 ---
 
 ## Leader election
@@ -150,6 +152,14 @@ Followers connect to the leader's gRPC peer address and open a **bidirectional**
 **Quorum ACK:** after fsyncing each entry to its local WAL and applying it to Pebble, a follower sends an ACK with the entry's revision back to the leader. The leader waits for ACKs from all connected followers before applying the batch to its own Pebble. This guarantees that every acknowledged write exists on at least two nodes' WALs.
 
 **Catch-up on connect:** when a follower connects, it sends its current revision. The leader replays from that revision using its in-memory ring buffer (`PeerBufferSize` entries, default 10 000). If the follower is too far behind (ring buffer miss), the leader returns `ErrResyncRequired` and the follower restores the latest S3 checkpoint then replays remaining WAL entries from S3.
+
+A full resync can be triggered by three conditions, each tracked in the `strata_follower_resyncs_total` metric:
+
+| `reason` label | When it fires |
+|---|---|
+| `behind_leader_start` | The follower's applied revision is behind the leader's own starting revision — it cannot replay missing entries from the ring buffer because the leader itself began at a higher point |
+| `ring_buffer_miss` | The follower's requested revision is older than the oldest entry in the ring buffer — it fell too far behind while connected |
+| `stream_gap` | A revision discontinuity was detected mid-stream — the follower missed entries and must restore from a checkpoint |
 
 **Write forwarding:** a client write arriving at a follower is forwarded to the leader via gRPC. The follower returns the leader's response (including the assigned revision) directly to the client.
 
@@ -209,3 +219,14 @@ Entries are stored at `branches/<id>` in the source store as JSON:
 - **Watchers** are registered in a fan-out broadcaster that sends events after each write. Each watcher runs in its own goroutine.
 - **WAL background goroutines** (rotation loop, upload loop) share the WAL mutex with write operations but hold it only briefly during segment rotation.
 - **Follower streams** each run in a dedicated goroutine; the leader pushes entries from a per-follower buffered channel.
+
+---
+
+## Follower promotion sequence
+
+When a follower wins a takeover election, it goes through the following steps in order:
+
+1. **`becomeLeader`** — reopens the WAL for writing, loads the latest S3 checkpoint, and replays any WAL segments ahead of the checkpoint. `IsLeader()` becomes `true` at the end of this step.
+2. **Start `commitLoop` and `checkpointLoop`** — these goroutines are started immediately so that client writes queued in the `writeC` channel are processed right away. Without this, writes would stall until steps 3–4 finish.
+3. **`Reconcile`** — uploads any SST files that exist on disk but were never streamed to S3 (followers don't run the SST uploader). `forceCheckpoint` takes a `fenceMu` write-lock during all I/O, briefly pausing new writes — the same behaviour as periodic checkpoints.
+4. **`forceCheckpoint`** — writes a startup checkpoint that references all local SSTs, ensuring the next GC cycle on the old leader cannot delete them before they are named in a live checkpoint.

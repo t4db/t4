@@ -2,6 +2,7 @@
 title: Configuration
 description: All strata.Config fields and CLI flags for the Strata standalone binary.
 ---
+
 # Configuration Reference
 
 ## Library: `strata.Config`
@@ -28,6 +29,7 @@ description: All strata.Config fields and CLI flags for the Strata standalone bi
 | `PeerServerTLS` | `credentials.TransportCredentials` | `nil` | mTLS credentials for the peer gRPC server (leader side). |
 | `PeerClientTLS` | `credentials.TransportCredentials` | `nil` | mTLS credentials for the peer gRPC client (follower side). |
 | `MetricsAddr` | `string` | `""` | HTTP address for `/metrics`, `/healthz`, `/readyz`. Empty = disabled. |
+| `ReadConsistency` | `ReadConsistency` | `"linearizable"` | Consistency guarantee for reads served by the etcd adapter. `"linearizable"` (default): each read syncs to the leader's current revision before returning, ensuring no stale reads. `"serializable"`: reads are served from local Pebble state without a round-trip to the leader; lower latency but may return slightly stale data on followers. |
 
 ### Using a custom S3-compatible store
 

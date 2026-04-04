@@ -166,7 +166,7 @@ Client TLS and peer mTLS are independent — each uses its own cert/key/CA and c
 
 ## Authentication and RBAC
 
-Strata implements the etcd v3 Auth API: username/password authentication with bearer tokens, and role-based access control scoped to key prefixes. Auth state (users, roles, enabled flag) is stored in Pebble and flows through the WAL, so it is replicated to followers and included in S3 checkpoints.
+Strata implements the etcd v3 Auth API: username/password authentication with bearer tokens, and role-based access control scoped to key prefixes. Auth state (users, roles, enabled flag) is stored in Pebble and flows through the WAL, so it is replicated to followers and included in S3 checkpoints. Bearer tokens are persisted to Pebble and survive node restarts — clients do not need to re-authenticate after a restart.
 
 Enable auth with `--auth-enabled`:
 
@@ -288,6 +288,15 @@ The `root` role always passes all checks regardless of the key.
 
 Keys under the `\x00auth/` prefix are reserved for internal auth storage. Access to these keys via the KV service is blocked for all users, including `root`. Attempting to read or write them returns `PermissionDenied`.
 
+### Rate limiting
+
+To protect against brute-force attacks, Strata enforces a per-username rate limit on failed authentication attempts:
+
+- **5 consecutive failures** within a **5-minute window** triggers a **15-minute lockout** for that username.
+- Subsequent `Authenticate` calls during the lockout period return an error without checking the password.
+- The lockout state is in-memory only and resets on node restart (intentional: a restart is already a privileged operation).
+- All authentication outcomes are recorded in the `strata_auth_attempts_total` metric with a `result` label (`success`, `fail`, `locked`).
+
 ### Disabling auth
 
 ```bash
@@ -347,6 +356,8 @@ strata run --metrics-addr 0.0.0.0:9090 ...
 | `strata_wal_gc_segments_total` | counter | — | WAL segments deleted from S3 after checkpointing |
 | `strata_checkpoints_total` | counter | — | Checkpoints written to S3 |
 | `strata_elections_total` | counter | `outcome` | Election attempts (`won`/`lost`) |
+| `strata_follower_resyncs_total` | counter | `reason` | Full resync events triggered on followers (`behind_leader_start` / `ring_buffer_miss` / `stream_gap`) |
+| `strata_auth_attempts_total` | counter | `result` | Authentication attempts (`success` / `fail` / `locked`) |
 
 `op` label values: `put`, `create`, `update`, `delete`, `compact`.
 
