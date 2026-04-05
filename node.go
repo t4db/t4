@@ -99,7 +99,7 @@ type Node struct {
 	term uint64
 	role atomic.Int32 // stores nodeRole values; use loadRole/storeRole
 
-	db  *istore.Store
+	db  atomic.Pointer[istore.Store]
 	wal walWriter // non-nil on leader/single; non-nil on follower (local WAL, no uploader)
 
 	// mu serialises all leader writes for CAS safety and role transitions.
@@ -113,7 +113,7 @@ type Node struct {
 	fenceMu sync.RWMutex
 
 	// nextRev is the last revision assigned to a write. Incremented under mu
-	// before the entry is sent to the commit loop. Replaces n.db.CurrentRevision()+1
+	// before the entry is sent to the commit loop. Replaces n.db.Load().CurrentRevision()+1
 	// on the write path so that in-flight entries have distinct revisions.
 	nextRev int64
 
@@ -453,7 +453,6 @@ func Open(cfg Config) (*Node, error) {
 	n := &Node{
 		cfg:         cfg,
 		term:        term,
-		db:          db,
 		wal:         w,
 		bgCtx:       bgCtx,
 		cancelBg:    bgCancel,
@@ -462,6 +461,7 @@ func Open(cfg Config) (*Node, error) {
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,
 	}
+	n.db.Store(db)
 	if cfg.CheckpointEntries > 0 {
 		n.checkpointTriggerC = make(chan struct{}, 1)
 	}
@@ -530,7 +530,7 @@ func (n *Node) serveMetrics(ctx context.Context, addr string) {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if n.db.CurrentRevision() >= 0 {
+		if n.db.Load().CurrentRevision() >= 0 {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
@@ -559,8 +559,8 @@ func (n *Node) updateMetrics() {
 	default:
 		metrics.SetRole("single")
 	}
-	metrics.CurrentRevision.Set(float64(n.db.CurrentRevision()))
-	metrics.CompactRevision.Set(float64(n.db.CompactRevision()))
+	metrics.CurrentRevision.Set(float64(n.db.Load().CurrentRevision()))
+	metrics.CompactRevision.Set(float64(n.db.Load().CompactRevision()))
 }
 
 // electAndStart runs leader election and configures the node as leader or follower.
@@ -570,7 +570,7 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	rec, won, err := lock.TryAcquire(ctx, n.term, n.db.CurrentRevision())
+	rec, won, err := lock.TryAcquire(ctx, n.term, n.db.Load().CurrentRevision())
 	if err != nil {
 		return fmt.Errorf("strata: election: %w", err)
 	}
@@ -618,7 +618,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		cpCancel()
 
 		reCtx, reCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		if err := replayRemote(reCtx, n.db, n.cfg.ObjectStore, n.db.CurrentRevision()); err != nil {
+		if err := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().CurrentRevision()); err != nil {
 			reCancel()
 			return fmt.Errorf("strata: becomeLeader replay remote WAL: %w", err)
 		}
@@ -629,7 +629,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// WALs before the caller sees success. S3 is disaster-recovery only (both
 	// nodes fail simultaneously), so uploads can be async — driven by
 	// SegmentMaxAge — without affecting write durability.
-	w2, err := wal.Open(walDir, rec.Term, n.db.CurrentRevision()+1,
+	w2, err := wal.Open(walDir, rec.Term, n.db.Load().CurrentRevision()+1,
 		wal.WithUploader(makeUploader(n.cfg.ObjectStore)),
 		wal.WithSegmentMaxSize(n.cfg.SegmentMaxSize),
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
@@ -661,7 +661,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.peerGRPC = grpcSrv
 	n.leaderCli.Store(nil) // leader does not forward writes
 	n.storeRole(roleLeader)
-	n.nextRev = n.db.CurrentRevision() // sync revision counter after any replay
+	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.pending = make(map[string]pendingKV)
 	n.mu.Unlock()
 
@@ -672,7 +672,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// Followers connecting with a lower fromRev are missing entries that were
 	// only replayed into Pebble from S3 (never in the ring buffer) and must
 	// re-sync before consuming the live stream.
-	peerSrv.SetStartRev(n.db.CurrentRevision() + 1)
+	peerSrv.SetStartRev(n.db.Load().CurrentRevision() + 1)
 
 	go func() {
 		if err := grpcSrv.Serve(lis); err != nil {
@@ -786,7 +786,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		}
 		if touch && n.peerSrv != nil {
 			tCtx, tCancel := context.WithTimeout(ctx, 5*time.Second)
-			err := lock.TouchIfMatch(tCtx, term, n.cfg.AdvertisePeerAddr, etag, n.db.CurrentRevision())
+			err := lock.TouchIfMatch(tCtx, term, n.cfg.AdvertisePeerAddr, etag, n.db.Load().CurrentRevision())
 			tCancel()
 			if errors.Is(err, object.ErrPreconditionFailed) {
 				// Another node wrote the lock between our Read and our Touch —
@@ -851,7 +851,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 func (n *Node) followLoop(bgCtx context.Context) {
 	lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
 	cli := n.peerCli
-	fromRev := n.db.CurrentRevision() + 1
+	fromRev := n.db.Load().CurrentRevision() + 1
 
 	for {
 		err := cli.Follow(
@@ -876,7 +876,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				return nil
 			},
 			func(entries []wal.Entry) error {
-				if err := n.db.Apply(entries); err != nil {
+				if err := n.db.Load().Apply(entries); err != nil {
 					return err
 				}
 				// Track the leader's term so attemptPromotion uses the correct
@@ -920,7 +920,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				return
 			}
 			reCtx, reCancel := context.WithTimeout(bgCtx, 5*time.Minute)
-			rerr := replayRemote(reCtx, n.db, n.cfg.ObjectStore, n.db.CurrentRevision())
+			rerr := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().CurrentRevision())
 			reCancel()
 			if rerr != nil {
 				logrus.Errorf("strata: follower S3 resync failed: %v — retrying", rerr)
@@ -930,13 +930,13 @@ func (n *Node) followLoop(bgCtx context.Context) {
 					return
 				}
 			} else {
-				fromRev = n.db.CurrentRevision() + 1
+				fromRev = n.db.Load().CurrentRevision() + 1
 				// Wake any goroutines blocked in WaitForRevision that entered
 				// their wait loop while replayRemote was running. Recover does
 				// not broadcast, so without this they would sleep until the
 				// next live Apply — causing unnecessary read latency.
-				n.db.NotifyRevision()
-				logrus.Infof("strata: follower resync complete (now at rev=%d)", n.db.CurrentRevision())
+				n.db.Load().NotifyRevision()
+				logrus.Infof("strata: follower resync complete (now at rev=%d)", n.db.Load().CurrentRevision())
 			}
 			continue
 		}
@@ -1012,16 +1012,16 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	// If the lock already points to a current leader, return their address so
 	// followLoop switches to following them — connecting will trigger an
 	// in-place resync that catches up this node's revision.
-	if existing != nil && existing.CommittedRev > n.db.CurrentRevision() {
+	if existing != nil && existing.CommittedRev > n.db.Load().CurrentRevision() {
 		logrus.Infof("strata: takeover: node is behind leader committed rev (ours=%d, leader=%d) — following current leader to catch up",
-			n.db.CurrentRevision(), existing.CommittedRev)
+			n.db.Load().CurrentRevision(), existing.CommittedRev)
 		if existing.LeaderAddr != "" {
 			return peer.NewClient(existing.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS), false
 		}
 		return nil, false
 	}
 
-	rec, won, err := lock.TakeOver(ctx, n.term, n.db.CurrentRevision())
+	rec, won, err := lock.TakeOver(ctx, n.term, n.db.Load().CurrentRevision())
 	if err != nil {
 		logrus.Errorf("strata: takeover election error: %v", err)
 		return nil, false
@@ -1227,7 +1227,7 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 	if err := n.WaitForRevision(ctx, resp.Revision); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return fmt.Errorf("strata: read sync: leader reported rev=%d but local node only reached rev=%d before wait ended: %w",
-				resp.Revision, n.db.CurrentRevision(), err)
+				resp.Revision, n.db.Load().CurrentRevision(), err)
 		}
 		return fmt.Errorf("strata: read sync: wait for local revision %d: %w", resp.Revision, err)
 	}
@@ -1304,7 +1304,7 @@ func (n *Node) Close() error {
 		// hold a readWg count) so they can return ErrClosed immediately instead
 		// of waiting until the context expires — which would cause readWg.Wait()
 		// to block for tens of seconds and deadlock Close().
-		n.db.SignalClose()
+		n.db.Load().SignalClose()
 		// Wait for followLoop / checkpointLoop to exit before closing WAL and
 		// DB. cancelBg has already been called above, so the loops will drain
 		// promptly; we just need to avoid closing DB under a concurrent Apply.
@@ -1339,7 +1339,7 @@ func (n *Node) Close() error {
 		// A stale lock is safe: followers use TakeOver (term bump) after stream
 		// failure. Deleting here is unsafe because it is not conditional and can
 		// erase a newer leader's lock during overlap/restart races.
-		if dberr := n.db.Close(); dberr != nil {
+		if dberr := n.db.Load().Close(); dberr != nil {
 			err = dberr
 		}
 	})
@@ -1477,7 +1477,7 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 		return 0, nil, false, err
 	}
 	if existing == nil || existing.Revision != revision {
-		curRev := n.db.CurrentRevision()
+		curRev := n.db.Load().CurrentRevision()
 		n.mu.Unlock()
 		return curRev, toKV(existing), false, nil
 	}
@@ -1557,7 +1557,7 @@ func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64)
 		n.mu.Unlock()
 		return 0, nil, false, err
 	}
-	curRev := n.db.CurrentRevision()
+	curRev := n.db.Load().CurrentRevision()
 	if existing == nil {
 		n.mu.Unlock()
 		return curRev, nil, false, nil
@@ -1610,7 +1610,7 @@ func (n *Node) readKey(key string) (*istore.KeyValue, error) {
 		// observe that in-flight state before the batch is durably applied.
 		return p.kv, nil
 	}
-	return n.db.Get(key)
+	return n.db.Load().Get(key)
 }
 
 func opLabel(op wal.Op) string {
@@ -1815,7 +1815,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 			for i, req := range batch {
 				dbEntries[i] = req.entry
 			}
-			err = n.db.Apply(dbEntries)
+			err = n.db.Load().Apply(dbEntries)
 		}
 
 		// Clear optimistic state before waking callers so a failed batch cannot
@@ -1879,7 +1879,7 @@ func (n *Node) Get(key string) (*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	sv, err := n.db.Get(key)
+	sv, err := n.db.Load().Get(key)
 	if err != nil || sv == nil {
 		return nil, err
 	}
@@ -1895,7 +1895,7 @@ func (n *Node) List(prefix string) ([]*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	svs, err := n.db.List(prefix)
+	svs, err := n.db.Load().List(prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -1906,9 +1906,9 @@ func (n *Node) List(prefix string) ([]*KeyValue, error) {
 	return out, nil
 }
 
-func (n *Node) Count(prefix string) (int64, error) { return n.db.Count(prefix) }
-func (n *Node) CurrentRevision() int64             { return n.db.CurrentRevision() }
-func (n *Node) CompactRevision() int64             { return n.db.CompactRevision() }
+func (n *Node) Count(prefix string) (int64, error) { return n.db.Load().Count(prefix) }
+func (n *Node) CurrentRevision() int64             { return n.db.Load().CurrentRevision() }
+func (n *Node) CompactRevision() int64             { return n.db.Load().CompactRevision() }
 func (n *Node) Config() Config                     { return n.cfg }
 func (n *Node) IsLeader() bool                     { return n.loadRole() != roleFollower }
 
@@ -1921,7 +1921,7 @@ func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
 	if n.closed.Load() {
 		return ErrClosed
 	}
-	if err := n.db.WaitForRevision(ctx, rev); err != nil {
+	if err := n.db.Load().WaitForRevision(ctx, rev); err != nil {
 		if errors.Is(err, istore.ErrClosed) {
 			return ErrClosed
 		}
@@ -1933,16 +1933,16 @@ func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
 // Watch streams prefix-matching events using etcd revision semantics:
 // startRev=0 means "from now"; startRev=N means replay from revision N (inclusive).
 func (n *Node) Watch(ctx context.Context, prefix string, startRev int64) (<-chan Event, error) {
-	if startRev > 0 && startRev <= n.db.CompactRevision() {
+	if startRev > 0 && startRev <= n.db.Load().CompactRevision() {
 		return nil, ErrCompacted
 	}
 	// internal/store.Watch uses last-seen revision semantics (start at rev+1),
 	// so adapt etcd-style startRev here.
 	storeStartRev := startRev - 1
 	if startRev == 0 {
-		storeStartRev = n.db.CurrentRevision()
+		storeStartRev = n.db.Load().CurrentRevision()
 	}
-	sch, err := n.db.Watch(ctx, prefix, storeStartRev)
+	sch, err := n.db.Load().Watch(ctx, prefix, storeStartRev)
 	if err != nil {
 		return nil, err
 	}
@@ -2029,7 +2029,7 @@ func (n *Node) checkpointLoop(ctx context.Context) {
 // entriesSinceCheckpoint guard). Used on startup to capture local state.
 func (n *Node) forceCheckpoint(ctx context.Context) {
 	n.fenceMu.Lock()
-	rev := n.db.CurrentRevision()
+	rev := n.db.Load().CurrentRevision()
 	if rev == 0 {
 		n.fenceMu.Unlock()
 		return
@@ -2039,19 +2039,19 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 		logrus.Errorf("strata: startup checkpoint seal WAL: %v", err)
 		return
 	}
-	if err := n.db.Flush(); err != nil {
+	if err := n.db.Load().Flush(); err != nil {
 		n.fenceMu.Unlock()
 		logrus.Errorf("strata: startup checkpoint flush pebble: %v", err)
 		return
 	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := checkpoint.WriteWithRegistry(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := checkpoint.WriteWithRegistry(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
 			n.fenceMu.Unlock()
 			logrus.Errorf("strata: startup checkpoint rev=%d: %v", rev, err)
 			return
 		}
-	} else if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
+	} else if err := checkpoint.Write(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
 		n.fenceMu.Unlock()
 		logrus.Errorf("strata: startup checkpoint rev=%d: %v", rev, err)
 		return
@@ -2067,7 +2067,7 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		return
 	}
 	n.fenceMu.Lock()
-	rev := n.db.CurrentRevision()
+	rev := n.db.Load().CurrentRevision()
 	if rev == 0 {
 		n.fenceMu.Unlock()
 		return
@@ -2077,19 +2077,19 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		logrus.Errorf("strata: checkpoint seal WAL: %v", err)
 		return
 	}
-	if err := n.db.Flush(); err != nil {
+	if err := n.db.Load().Flush(); err != nil {
 		n.fenceMu.Unlock()
 		logrus.Errorf("strata: checkpoint flush pebble: %v", err)
 		return
 	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := checkpoint.WriteWithRegistry(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := checkpoint.WriteWithRegistry(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
 			n.fenceMu.Unlock()
 			logrus.Errorf("strata: write checkpoint rev=%d: %v", rev, err)
 			return
 		}
-	} else if err := checkpoint.Write(ctx, n.db.Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
+	} else if err := checkpoint.Write(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
 		n.fenceMu.Unlock()
 		logrus.Errorf("strata: write checkpoint rev=%d: %v", rev, err)
 		return
@@ -2276,11 +2276,11 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read manifest: %w", err)
 	}
-	if manifest == nil || manifest.Revision <= n.db.CurrentRevision() {
+	if manifest == nil || manifest.Revision <= n.db.Load().CurrentRevision() {
 		return false, nil // already at or above checkpoint
 	}
 	logrus.Infof("strata: node at rev=%d is behind checkpoint rev=%d — restoring in place",
-		n.db.CurrentRevision(), manifest.Revision)
+		n.db.Load().CurrentRevision(), manifest.Revision)
 
 	pebbleDir := filepath.Join(n.cfg.DataDir, "db")
 	tmpDir := pebbleDir + ".resync"
@@ -2315,9 +2315,15 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	}
 
 	// ── Phase 2: swap Pebble directories under fenceMu.Lock ─────────────────
-	// fenceMu.Lock pauses all in-flight reads and writes while we replace n.db.
+	// fenceMu.Lock blocks in-flight writes (which hold fenceMu.RLock). We must
+	// call Close() on the old store before RemoveAll: Pebble tracks open
+	// databases by path in-process and will refuse to re-open the same path
+	// while the old instance is still open. Close() also calls SignalClose(),
+	// unblocking any goroutine stuck in WaitForRevision on the old store.
+	// The atomic pointer swap (n.db.Store) provides the happens-before guarantee
+	// for concurrent readers once the new store is ready.
 	n.fenceMu.Lock()
-	n.db.Close()
+	n.db.Load().Close()
 	if rerr := os.RemoveAll(pebbleDir); rerr != nil {
 		n.fenceMu.Unlock()
 		os.RemoveAll(tmpDir)
@@ -2333,7 +2339,7 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 		n.fenceMu.Unlock()
 		return false, fmt.Errorf("open new pebble after restore: %w", rerr)
 	}
-	n.db = newDB
+	n.db.Store(newDB)
 	n.term = newTerm
 	n.fenceMu.Unlock()
 	return true, nil
@@ -2359,7 +2365,7 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 	// followLoop is the sole WAL writer for a follower, so no concurrent
 	// Append calls can race with this replacement.
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
-	newRev := n.db.CurrentRevision()
+	newRev := n.db.Load().CurrentRevision()
 	n.wal.Close()
 	if rerr := os.RemoveAll(walDir); rerr != nil {
 		logrus.Warnf("strata: remove old wal dir during resync: %v", rerr)
