@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -412,4 +413,86 @@ func BenchmarkGetLinearizableFollower(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// ── Percentile benchmarks ─────────────────────────────────────────────────────
+//
+// These benchmarks collect per-iteration latencies and report p50 / p95 / p99
+// via b.ReportMetric (µs).  Run with -benchtime=10s for stable tail numbers.
+
+// latencyPercentiles sorts latencies and reports p50/p95/p99 to b.
+func latencyPercentiles(b *testing.B, latencies []time.Duration) {
+	b.Helper()
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	p := func(pct float64) float64 {
+		idx := int(float64(len(latencies)-1) * pct / 100)
+		return float64(latencies[idx].Microseconds())
+	}
+	b.ReportMetric(p(50), "p50_us")
+	b.ReportMetric(p(95), "p95_us")
+	b.ReportMetric(p(99), "p99_us")
+}
+
+// BenchmarkPutLatencyPercentiles reports p50/p95/p99 single-node write latency.
+// Each iteration is one serial Put (WAL fsync + Pebble apply).
+func BenchmarkPutLatencyPercentiles(b *testing.B) {
+	n := openBenchNode(b)
+	ctx := context.Background()
+	latencies := make([]time.Duration, 0, b.N)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		start := time.Now()
+		if _, err := n.Put(ctx, fmt.Sprintf("/bench/pct/%d", i), []byte("value"), 0); err != nil {
+			b.Fatal(err)
+		}
+		latencies = append(latencies, time.Since(start))
+	}
+	b.StopTimer()
+	latencyPercentiles(b, latencies)
+}
+
+// BenchmarkPutClusterLatencyPercentiles reports p50/p95/p99 write latency on a
+// 3-node cluster (loopback). Each write requires a quorum ACK from followers.
+func BenchmarkPutClusterLatencyPercentiles(b *testing.B) {
+	leader := openBenchCluster(b)
+	ctx := context.Background()
+	var counter atomic.Int64
+	latencies := make([]time.Duration, 0, b.N)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		k := counter.Add(1)
+		start := time.Now()
+		if _, err := leader.Put(ctx, fmt.Sprintf("/bench/cluster/pct/%d", k), []byte("value"), 0); err != nil {
+			b.Fatal(err)
+		}
+		latencies = append(latencies, time.Since(start))
+	}
+	b.StopTimer()
+	latencyPercentiles(b, latencies)
+}
+
+// BenchmarkWatchLatencyPercentiles reports p50/p95/p99 watch event delivery
+// latency: time from the Put call returning to the event arriving on the
+// watch channel.
+func BenchmarkWatchLatencyPercentiles(b *testing.B) {
+	n := openBenchNode(b)
+	ctx, cancel := context.WithCancel(context.Background())
+	b.Cleanup(cancel)
+
+	ch, err := n.Watch(ctx, "/bench/watchpct/", 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	latencies := make([]time.Duration, 0, b.N)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		start := time.Now()
+		if _, err := n.Put(ctx, fmt.Sprintf("/bench/watchpct/%d", i), []byte("v"), 0); err != nil {
+			b.Fatal(err)
+		}
+		<-ch
+		latencies = append(latencies, time.Since(start))
+	}
+	b.StopTimer()
+	latencyPercentiles(b, latencies)
 }

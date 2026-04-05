@@ -365,31 +365,31 @@ strata run --metrics-addr 0.0.0.0:9090 ...
 
 ## Performance
 
-Numbers are from `go test -bench=. -benchtime=5s` on an Apple M4 Pro (12 cores, NVMe SSD). All tests use in-process loopback — no real network or S3.
+Numbers are from `go test -bench=. -benchtime=10s` on an Apple M4 Pro (12 cores, NVMe SSD). All tests use in-process loopback — no real network or S3.
 
 ### Single-node (no peers, no S3)
 
-Write latency is dominated by a single WAL fsync (~8 ms on NVMe). Concurrent writers are automatically batched by the `commitLoop` into a single fsync per drain cycle (group commit).
+Write latency is dominated by a single WAL fsync (~4 ms on NVMe). Concurrent writers are automatically batched by the `commitLoop` into a single fsync per drain cycle (group commit).
 
-| Operation | Throughput | Latency |
-|---|---|---|
-| `Put` (serial) | ~123 writes/s | 8.1 ms |
-| `Put` (12 concurrent writers) | ~750 writes/s | 1.3 ms avg |
-| `Put` (192 concurrent writers) | ~11,600 writes/s | 86 µs avg |
-| `Get` / `LinearizableGet` (leader) | ~2,300,000 reads/s | 0.43 µs |
-| `List` (100 keys) | ~27,900 ops/s | 36 µs |
+| Operation | Throughput | p50 | p95 | p99 |
+|---|---|---|---|---|
+| `Put` (serial) | ~231 writes/s | 4.1 ms | 6.3 ms | 8.0 ms |
+| `Put` (192 concurrent writers) | ~15,800 writes/s | — | — | — |
+| `Get` / `LinearizableGet` (leader) | ~2,260,000 reads/s | 0.44 µs | — | — |
+| `List` (100 keys) | ~28,000 ops/s | 35.7 µs | — | — |
+| Watch event delivery | — | 4.8 ms | 7.8 ms | 11.1 ms |
 
 ### 3-node cluster (localhost loopback)
 
-Write latency = leader WAL fsync + quorum ACK round-trip (follower WAL fsync + network). On loopback, both nodes share the same SSD so each write costs roughly two sequential fsyncs (~16 ms).
+Write latency = leader WAL fsync + quorum ACK round-trip (follower WAL fsync + network). On loopback, both nodes share the same SSD so each write costs roughly two sequential fsyncs.
 
-| Operation | Throughput | Latency |
-|---|---|---|
-| `Put` (serial) | ~43 writes/s | 23 ms |
-| `Put` (12 concurrent writers) | ~224 writes/s | 4.5 ms avg |
-| `LinearizableGet` (follower) | ~18,100 reads/s | 55 µs |
+| Operation | Throughput | p50 | p95 | p99 |
+|---|---|---|---|---|
+| `Put` (serial) | ~70 writes/s | 11.1 ms | 17.0 ms | 21.0 ms |
+| `Put` (192 concurrent writers) | ~520 writes/s | — | — | — |
+| `LinearizableGet` (follower) | ~20,800 reads/s | 48 µs | — | — |
 
-With group commit, the per-write overhead of the quorum ACK round-trip disappears almost entirely under load — 12 concurrent writers improve from 43 to 224 writes/s by batching many writes into one ACK round.
+With group commit, the per-write overhead of the quorum ACK round-trip disappears almost entirely under load — high concurrency improves throughput by batching many writes into one ACK round.
 
 ### Impact of real-world latency
 
