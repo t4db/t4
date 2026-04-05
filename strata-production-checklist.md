@@ -88,10 +88,10 @@ It is divided into stages and clear pass/fail requirements.
 - [ ] Alerting defined
 
 ### Upgrade & Compatibility
-- [ ] Backward-compatible WAL format
-- [ ] Backward-compatible checkpoint format
-- [ ] Rolling upgrade supported
-- [ ] Downgrade path defined
+- [x] Backward-compatible WAL format — format version in magic byte (`\x01`); exported `WALFormatVersion = 1`; incompatible changes bump the byte; documented in `docs/operations.md`
+- [x] Backward-compatible checkpoint format — `format_version` field in `Manifest` + `CheckpointIndex` JSON; old nodes ignore unknown fields; new nodes warn on unknown versions; `CheckpointFormatVersion = 1`
+- [x] Rolling upgrade supported — documented in `docs/operations.md` (add new node → transfer leader → drain old nodes)
+- [x] Downgrade path defined — documented in `docs/operations.md` (safe until format_version > 1 is written)
 
 ### Security
 - [x] TLS between nodes — peer mTLS (`--peer-tls-*` flags)

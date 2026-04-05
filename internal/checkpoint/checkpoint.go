@@ -16,12 +16,37 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/sirupsen/logrus"
 	"github.com/strata-db/strata/pkg/object"
+)
+
+// FormatVersion constants for checkpoint objects.
+//
+// Version history:
+//
+//	1 — original format (all existing clusters); introduced as an explicit
+//	    field so future incompatible changes can be detected at runtime.
+//
+// Compatibility rules:
+//   - Adding new JSON fields with omitempty tags is always backward-compatible:
+//     older nodes that do not know the field simply ignore it.
+//   - Incrementing FormatVersion signals an incompatible change. A node that
+//     reads a FormatVersion it does not understand logs a warning and returns
+//     an error rather than silently producing corrupt state.
+//   - Nodes running version N can safely read checkpoints written by version N-1.
+//     Downgrade (new → old) is only safe if no FormatVersion > 1 checkpoint
+//     has been written.
+const (
+	// CheckpointFormatVersion is the format version written into every new
+	// Manifest and CheckpointIndex. Increment this when a format change is
+	// incompatible with older readers.
+	CheckpointFormatVersion uint32 = 1
 )
 
 // Manifest is stored at "manifest/latest" in object storage.
 // It points to the latest checkpoint so startup only needs one GET.
 type Manifest struct {
+	FormatVersion uint32 `json:"format_version,omitempty"`
 	CheckpointKey string `json:"checkpoint_key"`
 	Revision      int64  `json:"revision"`
 	Term          uint64 `json:"term"`
@@ -36,8 +61,9 @@ const ManifestKey = "manifest/latest"
 // CheckpointIndex is the per-checkpoint manifest stored at
 // "checkpoint/{term}/{rev}/manifest.json".
 type CheckpointIndex struct {
-	Term     uint64 `json:"term"`
-	Revision int64  `json:"revision"`
+	FormatVersion uint32 `json:"format_version,omitempty"`
+	Term          uint64 `json:"term"`
+	Revision      int64  `json:"revision"`
 	// SSTFiles are full object keys ("sst/{hash16}/{name}") of SST files
 	// stored in this store.
 	SSTFiles []string `json:"sst_files"`
@@ -91,6 +117,12 @@ func ReadManifest(ctx context.Context, store object.Store) (*Manifest, error) {
 	var m Manifest
 	if err := json.NewDecoder(rc).Decode(&m); err != nil {
 		return nil, fmt.Errorf("checkpoint: decode manifest: %w", err)
+	}
+	// FormatVersion == 0 means the manifest was written by an older node that
+	// did not emit the field (backward-compatible: treat as version 1).
+	if m.FormatVersion > CheckpointFormatVersion {
+		logrus.Warnf("checkpoint: manifest format_version=%d > known=%d — this node may be too old; upgrade recommended",
+			m.FormatVersion, CheckpointFormatVersion)
 	}
 	return &m, nil
 }
@@ -265,6 +297,7 @@ func WriteWithRegistry(ctx context.Context, db *pebble.DB, store object.Store, t
 func writeIndex(ctx context.Context, store object.Store, term uint64, revision int64, lastWALKey string, sstFiles, ancestorSSTFiles, metaFiles []string) error {
 	indexKey := CheckpointIndexKey(term, revision)
 	idx := &CheckpointIndex{
+		FormatVersion:    CheckpointFormatVersion,
 		Term:             term,
 		Revision:         revision,
 		SSTFiles:         sstFiles,
@@ -280,6 +313,7 @@ func writeIndex(ctx context.Context, store object.Store, term uint64, revision i
 	}
 
 	m := &Manifest{
+		FormatVersion: CheckpointFormatVersion,
 		CheckpointKey: indexKey,
 		Revision:      revision,
 		Term:          term,
@@ -440,6 +474,10 @@ func ReadCheckpointIndex(ctx context.Context, store object.Store, key string) (*
 	rc.Close()
 	if decErr != nil {
 		return nil, fmt.Errorf("decode checkpoint index %q: %w", key, decErr)
+	}
+	if idx.FormatVersion > CheckpointFormatVersion {
+		logrus.Warnf("checkpoint: index %q format_version=%d > known=%d — this node may be too old; upgrade recommended",
+			key, idx.FormatVersion, CheckpointFormatVersion)
 	}
 	return &idx, nil
 }

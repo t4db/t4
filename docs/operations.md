@@ -585,6 +585,72 @@ For zero-copy forking (no SST downloads) use `strata branch fork` instead — se
 
 ---
 
+## Upgrades and compatibility
+
+### WAL format versioning
+
+Each WAL segment file begins with an 8-byte magic header `"STRATA\x01\n"`. The sixth byte (`\x01`) is the **WAL format version** (currently 1). Readers verify the full magic string on open; a format change bumps this byte, causing old readers to reject new segments with a clear error rather than silently misinterpreting them.
+
+**Current: WAL format version 1.** Entry wire format: CRC32C-framed records with big-endian fixed-width fields (see `internal/wal/entry.go`).
+
+### Checkpoint format versioning
+
+Checkpoint manifests and index files are JSON. Both include a `format_version` field (integer, omitempty). The current version is **1**. Older nodes that do not know this field treat it as version 0 (the original format) — identical to version 1.
+
+When a node reads a manifest or index with `format_version` higher than it knows, it logs a warning and continues. A future incompatible change will increment `format_version` and require the old nodes to be upgraded before they can read new checkpoints.
+
+**Compatibility rule:** adding new JSON fields with `omitempty` is always backward-compatible. Only structural changes that alter how existing fields are interpreted require a version bump.
+
+### Rolling upgrade
+
+A rolling upgrade replaces nodes one at a time without cluster downtime.
+
+```
+cluster state: [old, old, old]
+
+1. Add a new node (same S3 prefix, new binary):
+   cluster: [old, old, old, new]
+   — new node reads old checkpoints (format_version absent → treated as v1 ✓)
+   — new node writes format_version=1 (old nodes ignore the field ✓)
+
+2. Transfer leadership to the new node (close one old leader or wait for natural failover).
+   cluster: [old, old, new(leader), new]
+
+3. Remove one old node at a time. Repeat until all old nodes are gone.
+   cluster: [new, new, new]
+```
+
+**Minimum viable rolling upgrade (3-node cluster):**
+
+```bash
+# Step 1 — Add node D (new binary, same S3 prefix).
+strata run --node-id node-d ... &
+
+# Step 2 — Gracefully shut down node A (old binary).
+#           A sends GoodBye; remaining followers elect a new leader from B/C/D.
+kill -TERM <pid-A>
+
+# Step 3 — Repeat for B, then C.
+kill -TERM <pid-B>
+kill -TERM <pid-C>
+```
+
+After the last old node is stopped, all writes go through the new binary and all new checkpoints carry `format_version=1`.
+
+### Downgrade path
+
+A downgrade is safe as long as no checkpoint with `format_version > 1` has been written by the new binary.
+
+```bash
+# Replace new nodes with old binary, one at a time — same procedure as upgrade.
+# Verify no format_version > 1 checkpoint exists first:
+strata restore list --s3-bucket my-bucket --s3-prefix strata/
+```
+
+If a new format version was introduced (e.g., format_version=2), downgrade to the old binary requires restoring from the last format_version=1 checkpoint instead of the latest one.
+
+---
+
 ## Branching
 
 Branches let you fork a database at any checkpoint with zero S3 data copies. SST files are content-addressed and shared between the source and all branches — no data is duplicated.

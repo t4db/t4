@@ -17,7 +17,21 @@ import (
 //	[8:  term     uint64 BE]
 //	[8:  firstRev int64  BE]      ← first revision in this segment (0 if unknown at open time)
 //	[entry frames ... ]
+//
+// The sixth byte of the magic string (\x01) is the WAL format version.
+// Readers check the full 8-byte magic; an incompatible format change bumps
+// this byte (e.g. \x02), causing old readers to reject new segments with a
+// clear error rather than silently misinterpreting them.
+//
+// Version history:
+//
+//	1 (\x01) — original format; CRC32C-framed entries, big-endian fixed fields.
 const (
+	// WALFormatVersion is the format version encoded in the magic byte of every
+	// segment file. Increment this constant (and update segMagic) when making
+	// an incompatible change to the segment or entry wire format.
+	WALFormatVersion = 1
+
 	segMagic     = "STRATA\x01\n"
 	segHeaderLen = 24
 )
