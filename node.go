@@ -160,6 +160,13 @@ func (n *Node) storeRole(r nodeRole) { n.role.Store(int32(r)) }
 func Open(cfg Config) (*Node, error) {
 	cfg.setDefaults()
 
+	// Wrap the object store with Prometheus instrumentation so every S3
+	// operation is counted and timed without scattering metrics calls
+	// throughout the codebase.
+	if cfg.ObjectStore != nil {
+		cfg.ObjectStore = object.NewInstrumentedStore(cfg.ObjectStore)
+	}
+
 	pebbleDir := filepath.Join(cfg.DataDir, "db")
 	walDir := filepath.Join(cfg.DataDir, "wal")
 
