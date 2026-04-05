@@ -362,6 +362,133 @@ strata run --metrics-addr 0.0.0.0:9090 ...
 
 `op` label values: `put`, `create`, `update`, `delete`, `compact`.
 
+The two object-store metrics cover all S3 operations (WAL upload, checkpoint write, manifest read, SST download, leader-lock conditional PUT, etc.):
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `strata_object_store_ops_total` | counter | `op`, `result` | S3 operations by type and outcome (`success`/`error`) |
+| `strata_object_store_duration_seconds` | histogram | `op` | S3 operation latency |
+
+`op` label values for object store: `get`, `put`, `delete`, `list`, `get_etag`, `put_if_absent`, `put_if_match`.
+
+### Alerting
+
+The rules below cover the most operationally significant failure modes. Tune thresholds for your deployment.
+
+```yaml
+groups:
+  - name: strata
+    rules:
+
+      # ── Availability ────────────────────────────────────────────────────────
+
+      # No leader in the cluster for > 30 s (election stalled or all nodes down).
+      - alert: StrataMissingLeader
+        expr: sum(strata_role{role="leader"}) == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "No Strata leader elected"
+          description: "No node reports role=leader. Check S3 connectivity and peer network."
+
+      # More than one leader simultaneously (split-brain — should be impossible,
+      # but worth alerting if it ever fires).
+      - alert: StrataSplitBrain
+        expr: sum(strata_role{role="leader"}) > 1
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Multiple Strata leaders detected"
+
+      # ── Write health ────────────────────────────────────────────────────────
+
+      # Write error rate > 1 % over 5 m.
+      - alert: StrataHighWriteErrorRate
+        expr: |
+          rate(strata_write_errors_total[5m])
+          / (rate(strata_writes_total[5m]) + rate(strata_write_errors_total[5m]))
+          > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Strata write error rate > 1%"
+          description: "{{ $value | humanizePercentage }} of writes are failing on {{ $labels.instance }}."
+
+      # p99 write latency > 500 ms (tune for your SLA).
+      - alert: StrataHighWriteLatency
+        expr: |
+          histogram_quantile(0.99,
+            rate(strata_write_duration_seconds_bucket[5m])
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Strata write p99 latency > 500 ms"
+
+      # ── WAL / S3 health ─────────────────────────────────────────────────────
+
+      # WAL upload errors in the last 5 m.
+      - alert: StrataWALUploadErrors
+        expr: increase(strata_wal_upload_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Strata WAL upload errors"
+          description: "WAL segments are failing to upload to S3. Data durability is degraded."
+
+      # S3 error rate > 5 % over 5 m (any operation).
+      - alert: StrataS3ErrorRate
+        expr: |
+          rate(strata_object_store_ops_total{result="error"}[5m])
+          / rate(strata_object_store_ops_total[5m])
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Strata S3 error rate > 5%"
+          description: "{{ $value | humanizePercentage }} of S3 calls are failing on {{ $labels.instance }}."
+
+      # S3 p95 latency > 5 s (slow S3 hurts WAL uploads and checkpoint restore).
+      - alert: StrataS3HighLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(strata_object_store_duration_seconds_bucket[5m])
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Strata S3 p95 latency > 5 s"
+
+      # ── Replication health ──────────────────────────────────────────────────
+
+      # Follower lag > 1000 revisions for > 1 m (follower falling behind).
+      - alert: StrataFollowerLagging
+        expr: strata_follower_lag_revisions > 1000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Strata follower lagging"
+          description: "Follower {{ $labels.follower_id }} is {{ $value }} revisions behind the leader."
+
+      # Follower full resync triggered (ring buffer miss or stream gap).
+      - alert: StrataFollowerResync
+        expr: increase(strata_follower_resyncs_total[10m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Strata follower triggered a full resync"
+          description: "Follower fell too far behind and is restoring from checkpoint (reason: {{ $labels.reason }})."
+```
+
 ---
 
 ## Performance

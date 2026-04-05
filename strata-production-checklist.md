@@ -85,7 +85,7 @@ It is divided into stages and clear pass/fail requirements.
 - [x] Follower lag metrics — `strata_follower_lag_revisions{follower_id=...}` gauge; updated on every ACK, deleted on disconnect
 - [x] WAL throughput metrics — `strata_wal_uploads_total`, `strata_wal_upload_duration_seconds`
 - [ ] S3 error + latency metrics — WAL upload errors tracked; no general S3 latency metric
-- [ ] Alerting defined
+- [x] Alerting defined — 9 alert rules in `docs/operations.md`: MissingLeader, SplitBrain, HighWriteErrorRate, HighWriteLatency, WALUploadErrors, S3ErrorRate, S3HighLatency, FollowerLagging, FollowerResync
 
 ### Upgrade & Compatibility
 - [x] Backward-compatible WAL format — format version in magic byte (`\x01`); exported `WALFormatVersion = 1`; incompatible changes bump the byte; documented in `docs/operations.md`
