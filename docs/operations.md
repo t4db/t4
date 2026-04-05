@@ -485,6 +485,105 @@ While followers are disconnected, the leader's `WaitForFollowers` returns immedi
 
 ---
 
+## Restore from checkpoint
+
+`strata restore` lets you inspect available checkpoints and download one to a local data directory so that `strata run` can boot from it.
+
+### Listing checkpoints
+
+```bash
+strata restore list \
+  --s3-bucket my-bucket \
+  --s3-prefix strata/
+```
+
+Output:
+
+```
+CHECKPOINT                                                                  REVISION    TERM
+checkpoint/0000000001/00000000000000000050/manifest.json                          50       1
+checkpoint/0000000001/00000000000000000100/manifest.json                         100       1  (latest)
+```
+
+### Restoring a checkpoint
+
+```bash
+# Restore the latest checkpoint (default).
+strata restore checkpoint \
+  --s3-bucket my-bucket \
+  --s3-prefix strata/ \
+  --data-dir /var/lib/strata-restored
+
+# Restore a specific earlier revision.
+strata restore checkpoint \
+  --s3-bucket my-bucket \
+  --s3-prefix strata/ \
+  --checkpoint checkpoint/0000000001/00000000000000000050/manifest.json \
+  --data-dir /var/lib/strata-restored
+```
+
+The command downloads all SST files and Pebble metadata to `<data-dir>/db/` and prints a summary:
+
+```
+Restored checkpoint
+  key:       checkpoint/0000000001/00000000000000000050/manifest.json
+  revision:  50
+  term:      1
+  data-dir:  /var/lib/strata-restored
+
+Start the restored node:
+  strata run --data-dir /var/lib/strata-restored [--s3-bucket <new-bucket>] --listen 0.0.0.0:3379
+```
+
+### Starting the restored node
+
+After the download, run the node pointing at the prepared data directory:
+
+```bash
+# Inspect the restored state without connecting to S3 (stays at the restored revision).
+strata run \
+  --data-dir /var/lib/strata-restored \
+  --listen   0.0.0.0:3379
+
+# Or write to a separate S3 prefix so the restored node has its own durable history.
+# The node opens the local Pebble database, then replays any WAL segments in
+# <new-prefix> that are newer than the restored revision.
+strata run \
+  --data-dir  /var/lib/strata-restored \
+  --s3-bucket my-bucket \
+  --s3-prefix strata-restored/ \
+  --listen    0.0.0.0:3379
+```
+
+> **Note:** If you point `--s3-bucket/prefix` at the **original** cluster's prefix, the node will replay all WAL segments written after the restored checkpoint and arrive at the current state — this is recovery, not a rollback. To stay at the past revision, omit `--s3-bucket` or use a different prefix.
+
+### Point-in-time recovery workflow
+
+```bash
+# 1. Find the last good checkpoint.
+strata restore list --s3-bucket my-bucket --s3-prefix strata/
+
+# 2. Download it to a local directory.
+strata restore checkpoint \
+  --s3-bucket my-bucket --s3-prefix strata/ \
+  --checkpoint checkpoint/0000000001/00000000000000000050/manifest.json \
+  --data-dir /var/lib/strata-pitr
+
+# 3. Start a verification node (no S3 → stays at rev 50).
+strata run --data-dir /var/lib/strata-pitr --listen 0.0.0.0:3380
+
+# 4. Validate. If correct, promote by starting with a new S3 prefix.
+strata run \
+  --data-dir  /var/lib/strata-pitr \
+  --s3-bucket my-bucket \
+  --s3-prefix strata-recovered/ \
+  --listen    0.0.0.0:3379
+```
+
+For zero-copy forking (no SST downloads) use `strata branch fork` instead — see [Branching](#branching).
+
+---
+
 ## Branching
 
 Branches let you fork a database at any checkpoint with zero S3 data copies. SST files are content-addressed and shared between the source and all branches — no data is duplicated.
