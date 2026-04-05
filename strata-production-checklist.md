@@ -52,7 +52,7 @@ It is divided into stages and clear pass/fail requirements.
 ### Backup / Restore
 - [x] Restore CLI implemented — `strata branch fork/unfork`; `RestorePoint` in `restore.go`
 - [x] Restore tested end-to-end — `TestRestorePoint`
-- [ ] Restore from arbitrary checkpoint works — `RestorePoint` struct supports it but no CLI flag or guide
+- [x] Restore from arbitrary checkpoint works — `strata restore list` + `strata restore checkpoint`; documented in `docs/operations.md`
 
 ### Operations
 - [x] Install documented — `docs/operations.md`
