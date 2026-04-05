@@ -118,6 +118,19 @@ var (
 		Name: "strata_follower_lag_revisions",
 		Help: "Number of revisions the follower is behind the leader (0 = fully caught up).",
 	}, []string{"follower_id"})
+
+	// ObjectStoreOpsTotal counts object storage operations by op type and result.
+	ObjectStoreOpsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "strata_object_store_ops_total",
+		Help: "Total object storage operations by op (get/put/delete/list/get_etag/put_if_absent/put_if_match) and result (success/error).",
+	}, []string{"op", "result"})
+
+	// ObjectStoreDuration measures object storage operation latency by op type.
+	ObjectStoreDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "strata_object_store_duration_seconds",
+		Help:    "Object storage operation latency.",
+		Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+	}, []string{"op"})
 )
 
 // SetRole updates the role gauges so exactly one has value 1.
