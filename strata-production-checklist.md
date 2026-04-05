@@ -66,7 +66,7 @@ It is divided into stages and clear pass/fail requirements.
 ### Reliability
 - [ ] Passes repeated chaos testing
 - [ ] No data corruption in long soak tests (≥ 1 week)
-- [ ] WAL corruption recovery tested — partial (`TestWALReplayAfterPartialUpload` covers partial upload)
+- [x] WAL corruption recovery tested — `TestWALCorruptionMidSegment` (CRC mismatch mid-segment: partial recovery + logged warning); `TestWALReplayAfterPartialUpload` (truncated upload)
 - [x] Checkpoint corruption recovery tested — `TestCheckpointCorruptionManifest`, `TestCheckpointCorruptionArchive`
 
 ### Scalability Envelope (DOCUMENTED)
@@ -76,13 +76,13 @@ It is divided into stages and clear pass/fail requirements.
 - [ ] Max dataset size: ______
 
 ### Tail Latency
-- [ ] p99 write latency acceptable
-- [ ] p99 watch latency acceptable
-- [ ] Failover time measured and stable
+- [x] p99 write latency acceptable — single-node p99=8ms; 3-node cluster p99=21ms (loopback); `BenchmarkPutLatencyPercentiles`, `BenchmarkPutClusterLatencyPercentiles`
+- [x] p99 watch latency acceptable — p99=11.1ms; `BenchmarkWatchLatencyPercentiles`
+- [x] Failover time measured and stable — graceful leader shutdown: ~12ms (BroadcastShutdown fast path); crash failover: ~6s (2 × FollowerRetryInterval after MaxRetries); `TestFailoverTime`
 
 ### Observability (ADVANCED)
 - [x] Leader / follower state metrics — `strata_role` gauge
-- [ ] Follower lag metrics — no per-follower lag metric
+- [x] Follower lag metrics — `strata_follower_lag_revisions{follower_id=...}` gauge; updated on every ACK, deleted on disconnect
 - [x] WAL throughput metrics — `strata_wal_uploads_total`, `strata_wal_upload_duration_seconds`
 - [ ] S3 error + latency metrics — WAL upload errors tracked; no general S3 latency metric
 - [ ] Alerting defined

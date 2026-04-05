@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/strata-db/strata"
 	"github.com/strata-db/strata/internal/checkpoint"
+	"github.com/strata-db/strata/internal/wal"
 	"github.com/strata-db/strata/pkg/object"
 )
 
@@ -1329,4 +1331,144 @@ func TestNetworkPartitionNoSplitBrain(t *testing.T) {
 		}
 	}
 	t.Logf("partition healed: follower converged on all %d keys", phase1+phase2)
+}
+
+// ── TestWALCorruptionMidSegment ───────────────────────────────────────────────
+
+// TestWALCorruptionMidSegment verifies that a WAL segment with a corrupt CRC
+// in the middle is handled gracefully: entries before the corrupt frame are
+// returned and a non-nil error is reported. The node layer (replayLocal) uses
+// ReadAll with this exact contract — it logs the error as a warning and applies
+// only the recovered prefix.
+//
+// WAL wire format (entry.go):
+//
+//	[4: payload_len uint32 BE]
+//	[4: crc32c      uint32 BE]
+//	[payload_len bytes: entry data]
+//
+// Segment header: 24 bytes ("STRATA\x01\n" + term uint64 BE + firstRev int64 BE).
+// For key "/wal/N" (N < 10): payload = 49 fixed + 6 key + 1 val = 56 → frame = 64 bytes.
+// Entry 10 (key "/wal/10") starts at byte 24 + 10*64 = 664; CRC at offset +4 = 668.
+func TestWALCorruptionMidSegment(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a WAL segment directly using the segment writer API.
+	sw, err := wal.OpenSegmentWriter(dir, 1, 1)
+	if err != nil {
+		t.Fatalf("OpenSegmentWriter: %v", err)
+	}
+	const total = 30
+	for i := 0; i < total; i++ {
+		e := &wal.Entry{
+			Revision: int64(i + 1),
+			Term:     1,
+			Op:       wal.OpCreate,
+			Key:      fmt.Sprintf("/wal/%d", i),
+			Value:    []byte("v"),
+		}
+		if err := sw.AppendNoSync(e); err != nil {
+			t.Fatalf("AppendNoSync %d: %v", i, err)
+		}
+	}
+	if err := sw.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := sw.Seal(); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	// Corrupt the CRC of entry at index 10 (key "/wal/10").
+	// Entries 0–9 have key len 6 → frame = 8 header + 49 fixed + 6 key + 1 val = 64 bytes.
+	// Entry 10 starts at: 24 (segment header) + 10*64 = 664; CRC at +4 → byte 668.
+	const corruptOffset = 24 + 10*64 + 4 // = 668
+	segPath := sw.Path()
+	data, err := os.ReadFile(segPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if corruptOffset >= len(data) {
+		t.Fatalf("corruptOffset %d >= file len %d — frame layout changed?", corruptOffset, len(data))
+	}
+	data[corruptOffset] ^= 0xff
+	if err := os.WriteFile(segPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Read all entries from the corrupted segment.
+	sr, closer, err := wal.OpenSegmentFile(segPath)
+	if err != nil {
+		t.Fatalf("OpenSegmentFile: %v", err)
+	}
+	defer closer()
+
+	entries, readErr := sr.ReadAll()
+
+	// ReadAll must return entries before the corruption and a non-nil error.
+	if readErr == nil {
+		t.Fatal("ReadAll on corrupted segment: expected non-nil error, got nil")
+	}
+	if len(entries) != 10 {
+		t.Errorf("recovered %d entries before corruption, want 10", len(entries))
+	}
+	for i, e := range entries {
+		want := fmt.Sprintf("/wal/%d", i)
+		if e.Key != want {
+			t.Errorf("entry[%d].Key = %q, want %q", i, e.Key, want)
+		}
+	}
+	t.Logf("WAL corruption recovery: %d entries recovered before corrupt frame (err: %v)",
+		len(entries), readErr)
+}
+
+// ── TestFailoverTime ──────────────────────────────────────────────────────────
+
+// TestFailoverTime measures how long it takes for a follower to detect leader
+// failure and win election. With FollowerMaxRetries=2 and the default 2 s retry
+// interval, followers exhaust retries in ~4 s then race for the S3 lock.
+// The test asserts failover completes within 30 s and logs the measured time
+// for documentation purposes.
+func TestFailoverTime(t *testing.T) {
+	store := object.NewMem()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	nodes := openCluster(t, 3, store)
+	leader := waitForLeaderNode(t, nodes, 10*time.Second)
+
+	// Write a key so there is something durable to verify after failover.
+	rev, err := leader.Put(ctx, "/failover/probe", []byte("before"), 0)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Kill the leader and note the time.
+	start := time.Now()
+	leader.Close()
+
+	// Collect the surviving followers.
+	var survivors []*strata.Node
+	for _, n := range nodes {
+		if n != leader {
+			survivors = append(survivors, n)
+		}
+	}
+
+	// Poll until one survivor is elected leader.
+	newLeader := waitForLeaderNode(t, survivors, 30*time.Second)
+	elapsed := time.Since(start)
+	t.Logf("failover completed in %v (new leader: %v)", elapsed, newLeader.IsLeader())
+
+	// The written key must be visible on the new leader.
+	if err := newLeader.WaitForRevision(ctx, rev); err != nil {
+		t.Fatalf("WaitForRevision after failover: %v", err)
+	}
+	kv, err := newLeader.Get("/failover/probe")
+	if err != nil || kv == nil {
+		t.Errorf("/failover/probe missing on new leader after failover")
+	}
+
+	if elapsed > 30*time.Second {
+		t.Errorf("failover took %v, want < 30s", elapsed)
+	}
 }

@@ -36,11 +36,12 @@ const (
 //
 // Thread safety: Broadcast and Follow both hold mu.
 type Server struct {
-	mu              sync.Mutex
-	buf             *entryBuffer
-	followers       map[string]chan *wal.Entry
-	followerAckRevs map[string]int64 // last ACK'd revision per follower
-	forwardHandler  ForwardHandler
+	mu               sync.Mutex
+	buf              *entryBuffer
+	followers        map[string]chan *wal.Entry
+	followerAckRevs  map[string]int64 // last ACK'd revision per follower
+	maxBroadcastRev  int64            // highest revision sent via Broadcast
+	forwardHandler   ForwardHandler
 
 	// ackNotify is a buffered-1 channel. A non-blocking send is made whenever
 	// any follower ACKs an entry or disconnects, waking WaitForFollowers.
@@ -112,6 +113,9 @@ func (s *Server) SetForwardHandler(h ForwardHandler) {
 func (s *Server) Broadcast(e *wal.Entry) {
 	s.mu.Lock()
 	s.buf.push(e)
+	if e.Revision > s.maxBroadcastRev {
+		s.maxBroadcastRev = e.Revision
+	}
 	var toKick []string
 	for id, ch := range s.followers {
 		select {
@@ -284,6 +288,8 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			}
 		}
 		s.mu.Unlock()
+		// Remove the lag metric so disconnected followers don't linger in dashboards.
+		metrics.FollowerLag.DeleteLabelValues(req.NodeID)
 		// Wake WaitForFollowers: this follower is no longer required.
 		s.notifyACK()
 	}()
@@ -303,7 +309,12 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			if ack.Revision > s.followerAckRevs[req.NodeID] {
 				s.followerAckRevs[req.NodeID] = ack.Revision
 			}
+			lag := s.maxBroadcastRev - s.followerAckRevs[req.NodeID]
+			if lag < 0 {
+				lag = 0
+			}
 			s.mu.Unlock()
+			metrics.FollowerLag.WithLabelValues(req.NodeID).Set(float64(lag))
 			s.notifyACK()
 		}
 	}()

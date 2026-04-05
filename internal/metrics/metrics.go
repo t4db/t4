@@ -110,6 +110,14 @@ var (
 		Name: "strata_auth_attempts_total",
 		Help: "Total authentication attempts by result (success/fail/locked).",
 	}, []string{"result"})
+
+	// FollowerLag tracks how many revisions behind the leader each follower is.
+	// Labelled by follower node ID. The gauge is deleted when a follower
+	// disconnects so only currently-connected followers appear.
+	FollowerLag = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "strata_follower_lag_revisions",
+		Help: "Number of revisions the follower is behind the leader (0 = fully caught up).",
+	}, []string{"follower_id"})
 )
 
 // SetRole updates the role gauges so exactly one has value 1.

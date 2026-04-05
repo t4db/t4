@@ -357,6 +357,7 @@ strata run --metrics-addr 0.0.0.0:9090 ...
 | `strata_checkpoints_total` | counter | — | Checkpoints written to S3 |
 | `strata_elections_total` | counter | `outcome` | Election attempts (`won`/`lost`) |
 | `strata_follower_resyncs_total` | counter | `reason` | Full resync events triggered on followers (`behind_leader_start` / `ring_buffer_miss` / `stream_gap`) |
+| `strata_follower_lag_revisions` | gauge | `follower_id` | Revisions the follower is behind the leader (0 = fully caught up); absent when no followers connected |
 | `strata_auth_attempts_total` | counter | `result` | Authentication attempts (`success` / `fail` / `locked`) |
 
 `op` label values: `put`, `create`, `update`, `delete`, `compact`.
