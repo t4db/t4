@@ -1,0 +1,83 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
+
+	"github.com/strata-db/strata/internal/checkpoint"
+	"github.com/strata-db/strata/internal/wal"
+)
+
+func gcCmd() *cobra.Command {
+	var (
+		bucket   string
+		prefix   string
+		endpoint string
+		keep     int
+	)
+	cmd := &cobra.Command{
+		Use:   "gc",
+		Short: "Garbage-collect old checkpoints, orphan SSTs, and stale WAL segments from S3",
+		Long: `Remove objects from S3 that are no longer needed for recovery or active branches.
+
+Three passes are performed in order:
+  1. Checkpoint GC  — deletes old checkpoint archives, keeping the most recent --keep.
+                      Checkpoints pinned by active branch registrations are never deleted.
+  2. Orphan SST GC  — deletes SST files that were exclusively referenced by deleted checkpoints.
+  3. WAL segment GC — deletes WAL segments whose entire revision range is covered by the
+                      latest surviving checkpoint.
+
+Run this periodically (e.g. once a day) to reclaim S3 storage.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			store, err := newS3Store(cmd.Context(), bucket, prefix, endpoint)
+			if err != nil {
+				return fmt.Errorf("init S3: %w", err)
+			}
+			ctx := cmd.Context()
+
+			// Pass 1: checkpoint GC.
+			deletedCPs, orphanSSTs, err := checkpoint.GCCheckpoints(ctx, store, keep)
+			if err != nil {
+				return fmt.Errorf("checkpoint gc: %w", err)
+			}
+			logrus.Infof("checkpoint gc: deleted %d checkpoint(s), %d orphan SST candidate(s)", deletedCPs, len(orphanSSTs))
+
+			// Pass 2: orphan SST GC.
+			deletedSSTs, err := checkpoint.GCOrphanSSTs(ctx, store, orphanSSTs)
+			if err != nil {
+				return fmt.Errorf("orphan sst gc: %w", err)
+			}
+			logrus.Infof("orphan sst gc: deleted %d SST file(s)", deletedSSTs)
+
+			// Pass 3: WAL segment GC — use the current manifest revision as the safe horizon.
+			manifest, err := checkpoint.ReadManifest(ctx, store)
+			if err != nil {
+				return fmt.Errorf("read manifest: %w", err)
+			}
+			var deletedWAL int
+			if manifest != nil {
+				deletedWAL, err = wal.GCSegments(ctx, store, manifest.Revision)
+				if err != nil {
+					return fmt.Errorf("wal gc: %w", err)
+				}
+				logrus.Infof("wal gc: deleted %d segment(s) covered by checkpoint rev=%d", deletedWAL, manifest.Revision)
+			} else {
+				logrus.Info("wal gc: no manifest found, skipping WAL segment GC")
+			}
+
+			fmt.Printf("GC complete\n")
+			fmt.Printf("  checkpoints deleted: %d\n", deletedCPs)
+			fmt.Printf("  orphan SSTs deleted: %d\n", deletedSSTs)
+			fmt.Printf("  WAL segments deleted: %d\n", deletedWAL)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&bucket, "s3-bucket", "", "S3 bucket to GC (required)")
+	cmd.Flags().StringVar(&prefix, "s3-prefix", "", "key prefix inside the S3 bucket")
+	cmd.Flags().StringVar(&endpoint, "s3-endpoint", "", "custom S3 endpoint URL")
+	cmd.Flags().IntVar(&keep, "keep", 3, "number of most-recent checkpoints to retain")
+	cmd.MarkFlagRequired("s3-bucket")
+	return cmd
+}
