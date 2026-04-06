@@ -343,6 +343,34 @@ strata run --metrics-addr 0.0.0.0:9090 ...
 | `GET /healthz` | 200 once the node has started |
 | `GET /readyz` | 200 when the node is ready to serve reads |
 
+### Inspecting S3 storage state
+
+`strata status` reads directly from S3 (no running node required) and prints the current checkpoint, object counts, and any registered branch forks:
+
+```bash
+strata status \
+  --s3-bucket my-bucket \
+  --s3-prefix strata/
+```
+
+```
+S3 status  s3://my-bucket/strata/
+
+Latest checkpoint
+  key:       checkpoint/0000000001/00000000000000000100/manifest.json
+  revision:  100
+  term:      1
+
+Storage objects
+  checkpoints: 7
+  WAL segments: 43
+
+Branch forks
+  (none)
+```
+
+Use this to confirm a node is checkpointing regularly and to estimate how much storage GC will reclaim.
+
 ### Grafana dashboard
 
 A pre-built Grafana dashboard is available for [download](/grafana-dashboard.json).
@@ -461,6 +489,43 @@ Steps 4–5 ensure that no committed write is lost even if the node is killed be
 ### S3 unavailability
 
 In cluster mode, S3 uploads are fully async — WAL segments and checkpoints are uploaded in the background without blocking writes. In single-node mode, each WAL segment is uploaded to S3 synchronously before the write is acknowledged. In both modes, on restart local WAL segments are replayed first, so no data written to the local WAL is lost even if it was never uploaded to S3.
+
+---
+
+## Storage management
+
+### Garbage collection
+
+Old checkpoints and WAL segments accumulate in S3 unless explicitly pruned. Run `strata gc` periodically (e.g. daily via cron) to reclaim storage:
+
+```bash
+strata gc \
+  --s3-bucket my-bucket \
+  --s3-prefix strata/ \
+  --keep 3
+```
+
+`--keep` (default: 3) sets how many of the most recent checkpoints to retain. The command performs three passes in order:
+
+1. **Checkpoint GC** — deletes old checkpoint archives beyond the `--keep` window.
+2. **Orphan SST GC** — deletes SST files exclusively referenced by the deleted checkpoints.
+3. **WAL segment GC** — deletes WAL segments whose entire revision range is covered by the latest surviving checkpoint.
+
+Output:
+
+```
+GC complete
+  checkpoints deleted: 4
+  orphan SSTs deleted: 31
+  WAL segments deleted: 18
+```
+
+#### Branch safety
+
+Before deleting any checkpoint, `strata gc` reads all active branch registrations. Any checkpoint pinned by an active branch is skipped unconditionally — even if it falls outside the `--keep` window. The SSTs it references are also excluded from orphan deletion.
+
+- Call `strata branch fork` **before** running GC on the source.
+- Call `strata branch unfork` only after the branch node is fully decommissioned.
 
 ---
 

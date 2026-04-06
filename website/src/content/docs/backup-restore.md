@@ -178,7 +178,7 @@ See [API reference — RestorePoint](api#point-in-time-restore-s3-versioning) fo
 
 ## Backup retention and GC
 
-Old checkpoints accumulate in S3 unless explicitly pruned. Use `strata gc` to remove checkpoints outside a retention window:
+Old checkpoints and WAL segments accumulate in S3 unless explicitly pruned. Use `strata gc` to remove objects outside a retention window:
 
 ```bash
 strata gc \
@@ -187,9 +187,21 @@ strata gc \
   --keep 5
 ```
 
-This keeps the 5 most recent checkpoints and deletes the rest, including orphaned SST files not referenced by any surviving checkpoint or live branch.
+This keeps the 5 most recent checkpoints and deletes everything else in three passes:
 
-> **Important:** GC reads the branch registry before deleting. A pinned branch prevents deletion of its referenced checkpoint and all its SST files.
+1. Old checkpoint archives beyond the `--keep` window.
+2. SST files exclusively referenced by the deleted checkpoints (orphans not needed by any surviving checkpoint or active branch).
+3. WAL segments whose entire revision range is covered by the latest surviving checkpoint.
+
+Use `strata status` first to see current counts:
+
+```bash
+strata status --s3-bucket my-bucket --s3-prefix strata/
+```
+
+> **Branch safety:** GC reads the branch registry before deleting. A checkpoint pinned by an active `strata branch fork` is never deleted, nor are its SST files. Call `strata branch unfork` only after the branch node is fully decommissioned.
+
+See [Storage management — Garbage collection](/operations#garbage-collection) for retention recommendations.
 
 ---
 
