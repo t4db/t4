@@ -2314,32 +2314,45 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 		}
 	}
 
-	// ── Phase 2: swap Pebble directories under fenceMu.Lock ─────────────────
-	// fenceMu.Lock blocks in-flight writes (which hold fenceMu.RLock). We must
-	// call Close() on the old store before RemoveAll: Pebble tracks open
-	// databases by path in-process and will refuse to re-open the same path
-	// while the old instance is still open. Close() also calls SignalClose(),
-	// unblocking any goroutine stuck in WaitForRevision on the old store.
-	// The atomic pointer swap (n.db.Store) provides the happens-before guarantee
-	// for concurrent readers once the new store is ready.
+	// ── Phase 2: swap Pebble directories under fenceMu.Lock + readMu.Lock ───
+	// fenceMu.Lock drains in-flight writes (which hold fenceMu.RLock).
+	//
+	// We close the old store before acquiring readMu.Lock. Close calls
+	// SignalClose(), which unblocks any goroutine blocked in WaitForRevision
+	// (those goroutines hold readMu.RLock while waiting). If we acquired
+	// readMu.Lock first, WaitForRevision callers would never release their
+	// RLocks → deadlock.
+	//
+	// After Close(), readMu.Lock drains the remaining in-flight reads
+	// (Get/List and any WaitForRevision callers that were unblocked by
+	// SignalClose). We hold readMu until n.db.Store(newDB) so that no new
+	// read can load the old (now-removed) path from n.db.
+	//
+	// Lock order: fenceMu → readMu (no other code path acquires them in the
+	// reverse order, so no deadlock is possible here).
 	n.fenceMu.Lock()
-	n.db.Load().Close()
+	n.db.Load().Close() // unblocks WaitForRevision waiters before we take readMu.Lock
+	n.readMu.Lock()
 	if rerr := os.RemoveAll(pebbleDir); rerr != nil {
+		n.readMu.Unlock()
 		n.fenceMu.Unlock()
 		os.RemoveAll(tmpDir)
 		return false, fmt.Errorf("remove old pebble dir: %w", rerr)
 	}
 	if rerr := os.Rename(tmpDir, pebbleDir); rerr != nil {
+		n.readMu.Unlock()
 		n.fenceMu.Unlock()
 		os.RemoveAll(tmpDir)
 		return false, fmt.Errorf("rename resync dir: %w", rerr)
 	}
 	newDB, rerr := istore.Open(pebbleDir)
 	if rerr != nil {
+		n.readMu.Unlock()
 		n.fenceMu.Unlock()
 		return false, fmt.Errorf("open new pebble after restore: %w", rerr)
 	}
 	n.db.Store(newDB)
+	n.readMu.Unlock()
 	n.term = newTerm
 	n.fenceMu.Unlock()
 	return true, nil
