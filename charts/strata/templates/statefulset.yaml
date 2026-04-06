@@ -148,7 +148,9 @@ spec:
               mountPath: /etc/strata/tls/peer
               readOnly: true
             {{- end }}
-            # readOnlyRootFilesystem requires a writable tmp dir for the shell wrapper.
+            # readOnlyRootFilesystem: /tmp must be writable for the shell and any
+            # runtime temp files (e.g. pebble compaction scratch space lives in DataDir,
+            # not /tmp, but tools like etcdctl may write to /tmp).
             - name: tmp
               mountPath: /tmp
       volumes:
