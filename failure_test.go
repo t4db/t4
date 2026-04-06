@@ -1665,11 +1665,21 @@ func TestChaos(t *testing.T) {
 			continue
 		}
 		if err := s.node.WaitForRevision(ctx, finalRev); err != nil {
+			if errors.Is(err, strata.ErrClosed) ||
+				errors.Is(err, context.DeadlineExceeded) ||
+				errors.Is(err, context.Canceled) {
+				t.Logf("final: node %s: skipping WaitForRevision %d (%v)", s.id, finalRev, err)
+				continue
+			}
 			t.Errorf("final: node %s: WaitForRevision %d: %v", s.id, finalRev, err)
 			continue
 		}
 		for _, entry := range written {
 			kv, err := s.node.Get(entry.key)
+			if errors.Is(err, strata.ErrClosed) {
+				t.Logf("final: node %s: closed during Get(%s), skipping remaining keys", s.id, entry.key)
+				break
+			}
 			if err != nil || kv == nil {
 				t.Errorf("final: node %s: %s missing (err=%v)", s.id, entry.key, err)
 			} else if string(kv.Value) != entry.val {

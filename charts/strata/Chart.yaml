@@ -2,8 +2,8 @@ apiVersion: v2
 name: strata
 description: S3-backed distributed key-value store with an etcd-compatible API
 type: application
-version: 0.2.3
-appVersion: "0.12.2"
+version: 0.1.0 # Will be overridden by the version in Chart.yaml during packaging chart release process
+appVersion: "0.1.0" # Will be overridden by the version in Chart.yaml during packaging chart release process
 keywords:
   - etcd
   - kv

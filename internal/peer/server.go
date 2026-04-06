@@ -36,12 +36,12 @@ const (
 //
 // Thread safety: Broadcast and Follow both hold mu.
 type Server struct {
-	mu               sync.Mutex
-	buf              *entryBuffer
-	followers        map[string]chan *wal.Entry
-	followerAckRevs  map[string]int64 // last ACK'd revision per follower
-	maxBroadcastRev  int64            // highest revision sent via Broadcast
-	forwardHandler   ForwardHandler
+	mu              sync.Mutex
+	buf             *entryBuffer
+	followers       map[string]chan *wal.Entry
+	followerAckRevs map[string]int64 // last ACK'd revision per follower
+	maxBroadcastRev int64            // highest revision sent via Broadcast
+	forwardHandler  ForwardHandler
 
 	// ackNotify is a buffered-1 channel. A non-blocking send is made whenever
 	// any follower ACKs an entry or disconnects, waking WaitForFollowers.
@@ -250,13 +250,17 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 		s.mu.Unlock()
 		logrus.Warnf("peer: follower %q needs resync (fromRev=%d < leaderStartRev=%d)",
 			req.NodeID, req.FromRevision, s.startRev)
-		metrics.FollowerResyncsTotal.WithLabelValues("behind_leader_start").Inc()
+		if metrics.FollowerResyncsTotal != nil {
+			metrics.FollowerResyncsTotal.WithLabelValues("behind_leader_start").Inc()
+		}
 		return ErrResyncRequired
 	}
 	snapshot, ok := s.buf.since(req.FromRevision)
 	if !ok {
 		s.mu.Unlock()
-		metrics.FollowerResyncsTotal.WithLabelValues("ring_buffer_miss").Inc()
+		if metrics.FollowerResyncsTotal != nil {
+			metrics.FollowerResyncsTotal.WithLabelValues("ring_buffer_miss").Inc()
+		}
 		return ErrResyncRequired
 	}
 	ch := make(chan *wal.Entry, 512)
@@ -289,7 +293,9 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 		}
 		s.mu.Unlock()
 		// Remove the lag metric so disconnected followers don't linger in dashboards.
-		metrics.FollowerLag.DeleteLabelValues(req.NodeID)
+		if metrics.FollowerLag != nil {
+			metrics.FollowerLag.DeleteLabelValues(req.NodeID)
+		}
 		// Wake WaitForFollowers: this follower is no longer required.
 		s.notifyACK()
 	}()
@@ -314,7 +320,9 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				lag = 0
 			}
 			s.mu.Unlock()
-			metrics.FollowerLag.WithLabelValues(req.NodeID).Set(float64(lag))
+			if metrics.FollowerLag != nil {
+				metrics.FollowerLag.WithLabelValues(req.NodeID).Set(float64(lag))
+			}
 			s.notifyACK()
 		}
 	}()

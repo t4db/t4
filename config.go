@@ -4,6 +4,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/credentials"
 
 	"github.com/strata-db/strata/pkg/object"
@@ -164,8 +165,17 @@ type Config struct {
 
 	// ── Observability ────────────────────────────────────────────────────────
 
+	// MetricsRegisterer is the Prometheus registerer used to register all
+	// Strata metrics. If nil, prometheus.DefaultRegisterer is used, which
+	// preserves the default behaviour for standalone deployments. Embedders
+	// should supply a dedicated registry to avoid collisions with the host
+	// application's collectors.
+	MetricsRegisterer prometheus.Registerer
+
 	// MetricsAddr is the TCP address for the Prometheus /metrics, /healthz,
 	// and /readyz HTTP endpoints (e.g. "0.0.0.0:9090"). Empty means disabled.
+	// Embedders typically leave this empty and scrape metrics via their own
+	// HTTP server using the registry they provided in MetricsRegisterer.
 	MetricsAddr string
 }
 

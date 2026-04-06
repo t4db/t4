@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -159,6 +160,8 @@ func (n *Node) storeRole(r nodeRole) { n.role.Store(int32(r)) }
 // Open creates and starts a Node.
 func Open(cfg Config) (*Node, error) {
 	cfg.setDefaults()
+
+	gatherer := metrics.Register(cfg.MetricsRegisterer)
 
 	// Wrap the object store with Prometheus instrumentation so every S3
 	// operation is counted and timed without scattering metrics calls
@@ -507,7 +510,7 @@ func Open(cfg Config) (*Node, error) {
 	// ── Observability ─────────────────────────────────────────────────────────
 	n.updateMetrics()
 	if cfg.MetricsAddr != "" {
-		go n.serveMetrics(bgCtx, cfg.MetricsAddr)
+		go n.serveMetrics(bgCtx, cfg.MetricsAddr, gatherer)
 	}
 
 	return n, nil
@@ -515,9 +518,9 @@ func Open(cfg Config) (*Node, error) {
 
 // serveMetrics starts an HTTP server exposing /metrics, /healthz, /readyz,
 // and /healthz/leader (used by Envoy active health checks to identify the leader).
-func (n *Node) serveMetrics(ctx context.Context, addr string) {
+func (n *Node) serveMetrics(ctx context.Context, addr string, gatherer prometheus.Gatherer) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

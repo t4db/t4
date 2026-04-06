@@ -161,7 +161,9 @@ func (s *Store) ListUsers() ([]User, error) {
 // CheckPassword returns nil when password matches the stored hash for name.
 func (s *Store) CheckPassword(name, password string) error {
 	if s.rateLim.IsLocked(name) {
-		metrics.AuthAttemptsTotal.WithLabelValues("locked").Inc()
+		if metrics.AuthAttemptsTotal != nil {
+			metrics.AuthAttemptsTotal.WithLabelValues("locked").Inc()
+		}
 		return errors.New("authentication failed: too many attempts, try again later")
 	}
 
@@ -171,16 +173,22 @@ func (s *Store) CheckPassword(name, password string) error {
 
 	if err != nil {
 		s.rateLim.RecordFailure(name)
-		metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
+		if metrics.AuthAttemptsTotal != nil {
+			metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
+		}
 		return errors.New("authentication failed")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
 		s.rateLim.RecordFailure(name)
-		metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
+		if metrics.AuthAttemptsTotal != nil {
+			metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
+		}
 		return errors.New("authentication failed")
 	}
 	s.rateLim.RecordSuccess(name)
-	metrics.AuthAttemptsTotal.WithLabelValues("success").Inc()
+	if metrics.AuthAttemptsTotal != nil {
+		metrics.AuthAttemptsTotal.WithLabelValues("success").Inc()
+	}
 	return nil
 }
 
