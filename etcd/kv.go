@@ -172,22 +172,12 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 // Txn implements KVServer.Txn.
 //
 // Supported patterns:
-//   - No compare: execute Success ops unconditionally.
 //   - Single compare on MOD == 0 or VERSION == 0: create-if-not-exists.
 //   - Single compare on MOD == X, Success=Put: compare-and-swap update.
 //   - Single compare on MOD == X, Success=Delete: compare-and-swap delete.
 func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserverpb.TxnResponse, error) {
-	// No compare: run Success ops directly.
 	if len(r.Compare) == 0 {
-		ops, err := s.execOps(ctx, r.Success)
-		if err != nil {
-			return nil, err
-		}
-		return &etcdserverpb.TxnResponse{
-			Header:    s.header(),
-			Succeeded: true,
-			Responses: ops,
-		}, nil
+		return nil, status.Error(codes.Unimplemented, "transactions without compares are not supported")
 	}
 
 	if len(r.Compare) != 1 {

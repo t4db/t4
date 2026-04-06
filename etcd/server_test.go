@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/strata-db/strata"
 	strataetcd "github.com/strata-db/strata/etcd"
@@ -358,24 +360,15 @@ func TestTxnUnconditional(t *testing.T) {
 	srv := newServer(t)
 	ctx := context.Background()
 
-	// No compare: success ops always run.
-	resp, err := srv.Txn(ctx, &etcdserverpb.TxnRequest{
+	_, err := srv.Txn(ctx, &etcdserverpb.TxnRequest{
 		Success: []*etcdserverpb.RequestOp{{
 			Request: &etcdserverpb.RequestOp_RequestPut{
 				RequestPut: &etcdserverpb.PutRequest{Key: []byte("/uncond"), Value: []byte("yes")},
 			},
 		}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Succeeded {
-		t.Error("unconditional txn should always succeed")
-	}
-
-	r, _ := srv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/uncond")})
-	if len(r.Kvs) != 1 || string(r.Kvs[0].Value) != "yes" {
-		t.Errorf("expected key to be set: %v", r.Kvs)
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented, got %v", err)
 	}
 }
 

@@ -12,6 +12,7 @@ package etcd_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -398,37 +399,24 @@ func TestCompatTxnCAS(t *testing.T) {
 	}
 }
 
-// TestCompatTxnMultipleOps verifies that an unconditional Txn (no If) can
-// batch multiple Put operations atomically. Conditional multi-op transactions
-// are not supported by strata's etcd adapter.
+// TestCompatTxnMultipleOps verifies that unconditional multi-op transactions
+// fail closed until true etcd txn semantics are implemented.
 func TestCompatTxnMultipleOps(t *testing.T) {
 	_, cli := newCompatNode(t)
 	ctx := context.Background()
 
-	// No condition → Success ops run unconditionally.
-	txnResp, err := cli.Txn(ctx).
+	_, err := cli.Txn(ctx).
 		Then(
 			clientv3.OpPut("/compat/txn/multi/a", "va"),
 			clientv3.OpPut("/compat/txn/multi/b", "vb"),
 			clientv3.OpPut("/compat/txn/multi/c", "vc"),
 		).
 		Commit()
-	if err != nil {
-		t.Fatalf("Txn multi-op: %v", err)
+	if err == nil {
+		t.Fatal("Txn multi-op: expected error")
 	}
-	if !txnResp.Succeeded {
-		t.Error("Txn multi-op: want Succeeded=true")
-	}
-	if len(txnResp.Responses) != 3 {
-		t.Errorf("Txn multi-op: want 3 responses, got %d", len(txnResp.Responses))
-	}
-
-	resp, err := cli.Get(ctx, "/compat/txn/multi/", clientv3.WithPrefix())
-	if err != nil {
-		t.Fatalf("Get after multi-op txn: %v", err)
-	}
-	if len(resp.Kvs) != 3 {
-		t.Errorf("after multi-op txn: want 3 keys, got %d", len(resp.Kvs))
+	if !strings.Contains(err.Error(), "transactions without compares are not supported") {
+		t.Fatalf("Txn multi-op: unexpected error: %v", err)
 	}
 }
 

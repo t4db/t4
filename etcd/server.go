@@ -140,16 +140,13 @@ func (s *Server) MemberPromote(_ context.Context, _ *etcdserverpb.MemberPromoteR
 // ── Maintenance (stubs) ──────────────────────────────────────────────────────
 
 func (s *Server) Alarm(_ context.Context, _ *etcdserverpb.AlarmRequest) (*etcdserverpb.AlarmResponse, error) {
-	return &etcdserverpb.AlarmResponse{Header: s.header()}, nil
+	return nil, unimplemented()
 }
 func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcdserverpb.StatusResponse, error) {
-	return &etcdserverpb.StatusResponse{
-		Header:  s.header(),
-		Version: "3.5.0",
-	}, nil
+	return nil, unimplemented()
 }
 func (s *Server) Defragment(_ context.Context, _ *etcdserverpb.DefragmentRequest) (*etcdserverpb.DefragmentResponse, error) {
-	return &etcdserverpb.DefragmentResponse{Header: s.header()}, nil
+	return nil, unimplemented()
 }
 func (s *Server) Hash(_ context.Context, _ *etcdserverpb.HashRequest) (*etcdserverpb.HashResponse, error) {
 	return nil, unimplemented()
