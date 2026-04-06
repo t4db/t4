@@ -84,6 +84,39 @@ helm install strata oci://ghcr.io/strata-db/charts/strata \
   --set s3.existingSecret=minio-credentials
 ```
 
+### Built-in MinIO (development / CI)
+
+The chart can deploy a single-node MinIO instance alongside Strata and wire everything up automatically — no external object store needed:
+
+```bash
+helm install strata oci://ghcr.io/strata-db/charts/strata \
+  --set minio.enabled=true
+```
+
+This creates a MinIO Deployment, PVC, Service, and a post-install Job that creates the `strata` bucket. Strata's S3 endpoint, bucket, and credentials are configured automatically.
+
+Customise credentials, bucket name, and storage:
+
+```yaml
+# values.yaml
+minio:
+  enabled: true
+  rootUser: myuser
+  rootPassword: mypassword  # change this!
+  bucket: strata
+  persistence:
+    size: 20Gi
+```
+
+Access the MinIO web console:
+
+```bash
+kubectl port-forward svc/strata-minio 9001:9001
+open http://localhost:9001
+```
+
+> ⚠ **Not for production.** Use a managed S3 service or a dedicated MinIO cluster for production deployments.
+
 ---
 
 ## Persistence

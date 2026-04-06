@@ -242,3 +242,53 @@ proxy:
 
   nodeSelector: {}
   tolerations: []
+
+# ── MinIO (built-in S3 for development / CI) ──────────────────────────────────
+# When enabled, deploys a single-node MinIO instance alongside Strata and
+# automatically wires up s3.bucket, s3.endpoint, and S3 credentials so no
+# external object store is needed.
+#
+# ⚠  Not recommended for production.  Use a managed S3 service or a dedicated
+#    MinIO cluster instead.
+minio:
+  enabled: false
+
+  image:
+    repository: minio/minio
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # Credentials for the MinIO root user.  Also used as AWS_ACCESS_KEY_ID /
+  # AWS_SECRET_ACCESS_KEY when strata connects to MinIO.
+  rootUser: minioadmin
+  rootPassword: minioadmin  # Change this!
+
+  # Bucket that strata will use.  Created automatically by the init job.
+  bucket: strata
+
+  # Optional key prefix within the bucket (e.g. "dev/").
+  prefix: ""
+
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+  service:
+    # S3 API port.
+    port: 9000
+    # Web console port.
+    consolePort: 9001
+
+  # Image used by the bucket-init Job (minio/mc).
+  mcImage:
+    repository: minio/mc
+    tag: latest
+    pullPolicy: IfNotPresent
