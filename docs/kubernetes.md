@@ -15,7 +15,14 @@ This guide covers running Strata on Kubernetes — both single-node and multi-no
 ## Quick start with Helm
 
 ```bash
-# Single node
+# Single node (no S3 — local PVC only)
+helm install strata oci://ghcr.io/strata-db/charts/strata
+
+# Single node with built-in MinIO (easy S3 for dev/CI)
+helm install strata oci://ghcr.io/strata-db/charts/strata \
+  --set minio.enabled=true
+
+# Single node with AWS S3
 helm install strata oci://ghcr.io/strata-db/charts/strata \
   --set s3.bucket=my-bucket \
   --set s3.region=us-east-1
@@ -27,7 +34,7 @@ helm install strata oci://ghcr.io/strata-db/charts/strata \
   --set s3.region=us-east-1
 ```
 
-See the [full Kubernetes deployment guide](https://strata-db.github.io/docs/deployment/kubernetes) for Helm values, TLS, IRSA, and Envoy proxy configuration.
+See the [full Kubernetes deployment guide](https://strata-db.github.io/strata/deployment/kubernetes/) for Helm values, TLS, IRSA, Envoy proxy, and MinIO configuration.
 
 ---
 

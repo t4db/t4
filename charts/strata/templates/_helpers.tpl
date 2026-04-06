@@ -107,3 +107,59 @@ The pod-name prefix is prepended at runtime (see statefulset.yaml args).
 {{- printf ".%s.%s.svc.cluster.local:%d" (include "strata.headlessServiceName" .) .Release.Namespace (int .Values.service.peerPort) }}
 {{- end }}
 {{- end }}
+
+{{/*
+MinIO sub-deployment full name.
+*/}}
+{{- define "strata.minio.fullname" -}}
+{{- printf "%s-minio" (include "strata.fullname" .) }}
+{{- end }}
+
+{{/*
+Name of the Secret that holds MinIO / strata S3 credentials when minio.enabled.
+*/}}
+{{- define "strata.minio.secretName" -}}
+{{- printf "%s-minio" (include "strata.fullname" .) }}
+{{- end }}
+
+{{/*
+Internal S3 endpoint for the MinIO sub-deployment.
+*/}}
+{{- define "strata.minio.endpoint" -}}
+{{- printf "http://%s:%d" (include "strata.minio.fullname" .) (int .Values.minio.service.port) }}
+{{- end }}
+
+{{/*
+Effective S3 bucket: explicit s3.bucket takes priority, then minio.bucket.
+*/}}
+{{- define "strata.effectiveS3Bucket" -}}
+{{- if .Values.s3.bucket }}
+{{- .Values.s3.bucket }}
+{{- else if .Values.minio.enabled }}
+{{- .Values.minio.bucket }}
+{{- end }}
+{{- end }}
+
+{{/*
+Effective S3 endpoint: explicit s3.endpoint takes priority, then MinIO service.
+*/}}
+{{- define "strata.effectiveS3Endpoint" -}}
+{{- if .Values.s3.endpoint }}
+{{- .Values.s3.endpoint }}
+{{- else if .Values.minio.enabled }}
+{{- include "strata.minio.endpoint" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Name of the Secret that holds AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for
+the strata pods.  When minio.enabled, use the MinIO secret; otherwise fall
+back to the standard s3SecretName helper.
+*/}}
+{{- define "strata.effectiveS3SecretName" -}}
+{{- if .Values.minio.enabled }}
+{{- include "strata.minio.secretName" . }}
+{{- else }}
+{{- include "strata.s3SecretName" . }}
+{{- end }}
+{{- end }}

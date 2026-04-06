@@ -64,13 +64,16 @@ spec:
                 --advertise-peer="${MY_POD_NAME}{{ include "strata.peerDomainSuffix" . }}" \
                 {{- end }}
                 {{- end }}
-                {{- if .Values.s3.bucket }}
-                --s3-bucket={{ .Values.s3.bucket | quote }} \
-                {{- if .Values.s3.prefix }}
-                --s3-prefix={{ .Values.s3.prefix | quote }} \
+                {{- $effectiveBucket := include "strata.effectiveS3Bucket" . }}
+                {{- if $effectiveBucket }}
+                --s3-bucket={{ $effectiveBucket | quote }} \
+                {{- $effectivePrefix := .Values.s3.prefix | default (ternary .Values.minio.prefix "" .Values.minio.enabled) }}
+                {{- if $effectivePrefix }}
+                --s3-prefix={{ $effectivePrefix | quote }} \
                 {{- end }}
-                {{- if .Values.s3.endpoint }}
-                --s3-endpoint={{ .Values.s3.endpoint | quote }} \
+                {{- $effectiveEndpoint := include "strata.effectiveS3Endpoint" . }}
+                {{- if $effectiveEndpoint }}
+                --s3-endpoint={{ $effectiveEndpoint | quote }} \
                 {{- end }}
                 {{- end }}
                 {{- if .Values.tls.client.enabled }}
@@ -96,7 +99,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- $secretName := include "strata.s3SecretName" . }}
+            {{- $secretName := include "strata.effectiveS3SecretName" . }}
             {{- if $secretName }}
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
@@ -109,9 +112,10 @@ spec:
                   name: {{ $secretName }}
                   key: AWS_SECRET_ACCESS_KEY
             {{- end }}
-            {{- if .Values.s3.region }}
+            {{- $effectiveRegion := .Values.s3.region | default (ternary "us-east-1" "" .Values.minio.enabled) }}
+            {{- if $effectiveRegion }}
             - name: AWS_DEFAULT_REGION
-              value: {{ .Values.s3.region | quote }}
+              value: {{ $effectiveRegion | quote }}
             {{- end }}
           ports:
             - name: client
