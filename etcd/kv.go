@@ -160,35 +160,61 @@ func (s *Server) Put(ctx context.Context, r *etcdserverpb.PutRequest) (*etcdserv
 }
 
 // DeleteRange implements KVServer.DeleteRange.
-// Single-key deletes are fully supported. Range deletes are not.
 func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeRequest) (*etcdserverpb.DeleteRangeResponse, error) {
-	if string(r.RangeEnd) != "" {
-		return nil, status.Error(codes.Unimplemented, "range deletes not supported")
-	}
 	key := string(r.Key)
-	if err := validateUserKey(key); err != nil {
-		return nil, err
-	}
-	resp := &etcdserverpb.DeleteRangeResponse{Header: s.header()}
+	rangeEnd := string(r.RangeEnd)
 
-	if r.PrevKv {
-		prev, err := s.node.Get(key)
+	// Single-key delete.
+	if rangeEnd == "" {
+		if err := validateUserKey(key); err != nil {
+			return nil, err
+		}
+		resp := &etcdserverpb.DeleteRangeResponse{Header: s.header()}
+		if r.PrevKv {
+			prev, err := s.node.Get(key)
+			if err != nil {
+				return nil, err
+			}
+			if prev != nil {
+				resp.PrevKvs = []*mvccpb.KeyValue{kvToProto(prev)}
+			}
+		}
+		newRev, err := s.node.Delete(ctx, key)
 		if err != nil {
 			return nil, err
 		}
-		if prev != nil {
-			resp.PrevKvs = []*mvccpb.KeyValue{kvToProto(prev)}
+		resp.Header = s.header()
+		if newRev > 0 {
+			resp.Deleted = 1
 		}
+		return resp, nil
 	}
 
-	newRev, err := s.node.Delete(ctx, key)
+	// Range / prefix delete: list all keys under the prefix and delete matching ones.
+	prefix := key
+	if key == "\x00" {
+		prefix = ""
+	}
+	all, err := s.node.List(prefix)
 	if err != nil {
 		return nil, err
 	}
-	resp.Header = s.header()
-	if newRev > 0 {
-		resp.Deleted = 1
+	all = userKeyValues(all)
+
+	resp := &etcdserverpb.DeleteRangeResponse{Header: s.header()}
+	for _, kv := range all {
+		if rangeEnd != "\x00" && kv.Key >= rangeEnd {
+			continue
+		}
+		if r.PrevKv {
+			resp.PrevKvs = append(resp.PrevKvs, kvToProto(kv))
+		}
+		if _, err := s.node.Delete(ctx, kv.Key); err != nil {
+			return nil, err
+		}
+		resp.Deleted++
 	}
+	resp.Header = s.header()
 	return resp, nil
 }
 
@@ -200,7 +226,11 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 //   - Single compare on MOD == X, Success=Delete: compare-and-swap delete.
 func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserverpb.TxnResponse, error) {
 	if len(r.Compare) == 0 {
-		return nil, status.Error(codes.Unimplemented, "transactions without compares are not supported")
+		ops, err := s.execOps(ctx, r.Success)
+		if err != nil {
+			return nil, err
+		}
+		return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: true, Responses: ops}, nil
 	}
 
 	if len(r.Compare) != 1 {

@@ -400,23 +400,29 @@ func TestCompatTxnCAS(t *testing.T) {
 }
 
 // TestCompatTxnMultipleOps verifies that unconditional multi-op transactions
-// fail closed until true etcd txn semantics are implemented.
+// execute all ops in the Success branch.
 func TestCompatTxnMultipleOps(t *testing.T) {
 	_, cli := newCompatNode(t)
 	ctx := context.Background()
 
-	_, err := cli.Txn(ctx).
+	resp, err := cli.Txn(ctx).
 		Then(
 			clientv3.OpPut("/compat/txn/multi/a", "va"),
 			clientv3.OpPut("/compat/txn/multi/b", "vb"),
 			clientv3.OpPut("/compat/txn/multi/c", "vc"),
 		).
 		Commit()
-	if err == nil {
-		t.Fatal("Txn multi-op: expected error")
-	}
-	if !strings.Contains(err.Error(), "transactions without compares are not supported") {
+	if err != nil {
 		t.Fatalf("Txn multi-op: unexpected error: %v", err)
+	}
+	if !resp.Succeeded {
+		t.Fatal("Txn multi-op: expected Succeeded=true")
+	}
+	for _, key := range []string{"/compat/txn/multi/a", "/compat/txn/multi/b", "/compat/txn/multi/c"} {
+		r, err := cli.Get(ctx, key)
+		if err != nil || r.Count == 0 {
+			t.Errorf("key %s not found after txn: err=%v count=%d", key, err, r.Count)
+		}
 	}
 }
 

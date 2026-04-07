@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4"
 	t4etcd "github.com/t4db/t4/etcd"
@@ -360,15 +358,22 @@ func TestTxnUnconditional(t *testing.T) {
 	srv := newServer(t)
 	ctx := context.Background()
 
-	_, err := srv.Txn(ctx, &etcdserverpb.TxnRequest{
+	resp, err := srv.Txn(ctx, &etcdserverpb.TxnRequest{
 		Success: []*etcdserverpb.RequestOp{{
 			Request: &etcdserverpb.RequestOp_RequestPut{
 				RequestPut: &etcdserverpb.PutRequest{Key: []byte("/uncond"), Value: []byte("yes")},
 			},
 		}},
 	})
-	if status.Code(err) != codes.Unimplemented {
-		t.Fatalf("expected Unimplemented, got %v", err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Succeeded {
+		t.Fatal("expected Succeeded=true for unconditional txn")
+	}
+	kv, err := srv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/uncond")})
+	if err != nil || kv.Count != 1 || string(kv.Kvs[0].Value) != "yes" {
+		t.Fatalf("key not written: resp=%v err=%v", kv, err)
 	}
 }
 

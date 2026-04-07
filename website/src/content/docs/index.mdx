@@ -123,4 +123,4 @@ Requires Go 1.22+.
 | Write throughput (1–4 concurrent writers) | slower | faster |
 | Read throughput | equivalent | equivalent |
 
-¹ T4 implements the KV, Watch, Lease, and Auth services. Maintenance RPCs (Status, Defrag, Snapshot, etc.) and cluster membership mutations (MemberAdd/Remove) are not supported. See the [compatibility guide](/etcd-migration/) for details.
+¹ T4 implements the KV, Watch, Lease, and Auth services. `Status` and `Defragment` return sensible responses. `Alarm`, `Snapshot`, `Hash`, and cluster membership mutations (MemberAdd/Remove) are not supported. See the [compatibility guide](/etcd-migration/) for details.

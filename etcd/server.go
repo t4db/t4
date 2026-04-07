@@ -141,17 +141,35 @@ func (s *Server) MemberPromote(_ context.Context, _ *etcdserverpb.MemberPromoteR
 	return nil, unimplemented()
 }
 
-// ── Maintenance (stubs) ──────────────────────────────────────────────────────
+// ── Maintenance ──────────────────────────────────────────────────────────────
 
+// Alarm is not implemented — t4 has no alarm subsystem.
 func (s *Server) Alarm(_ context.Context, _ *etcdserverpb.AlarmRequest) (*etcdserverpb.AlarmResponse, error) {
 	return nil, unimplemented()
 }
+
+// Status returns basic node status: current revision, leader, and version.
 func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcdserverpb.StatusResponse, error) {
-	return nil, unimplemented()
+	rev := s.node.CurrentRevision()
+	leader := uint64(0)
+	if s.node.IsLeader() {
+		leader = 1
+	}
+	return &etcdserverpb.StatusResponse{
+		Header:           s.header(),
+		Version:          "t4",
+		Leader:           leader,
+		RaftIndex:        uint64(rev),
+		RaftAppliedIndex: uint64(rev),
+		RaftTerm:         1,
+	}, nil
 }
+
+// Defragment is a no-op — Pebble manages compaction internally.
 func (s *Server) Defragment(_ context.Context, _ *etcdserverpb.DefragmentRequest) (*etcdserverpb.DefragmentResponse, error) {
-	return nil, unimplemented()
+	return &etcdserverpb.DefragmentResponse{Header: s.header()}, nil
 }
+
 func (s *Server) Hash(_ context.Context, _ *etcdserverpb.HashRequest) (*etcdserverpb.HashResponse, error) {
 	return nil, unimplemented()
 }
