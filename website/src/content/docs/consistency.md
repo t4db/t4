@@ -5,7 +5,7 @@ description: Write durability, linearizable vs serializable reads, CAP classific
 
 # Consistency Model
 
-This document describes the consistency guarantees Strata provides for reads and writes, the CAP classification, and how the system behaves under partitions and failures.
+This document describes the consistency guarantees T4 provides for reads and writes, the CAP classification, and how the system behaves under partitions and failures.
 
 ---
 
@@ -29,7 +29,7 @@ Revisions are assigned under a mutex and are strictly monotonically increasing. 
 
 ## Read consistency
 
-Strata supports two read consistency levels, controlled by `--read-consistency` (CLI) or `ReadConsistency` (library).
+T4 supports two read consistency levels, controlled by `--read-consistency` (CLI) or `ReadConsistency` (library).
 
 ### Linearizable (default)
 
@@ -59,7 +59,7 @@ Reads are served from the local Pebble state without contacting the leader.
 
 ## CAP classification
 
-Strata is a **CP system** (Consistent + Partition-tolerant) in cluster mode:
+T4 is a **CP system** (Consistent + Partition-tolerant) in cluster mode:
 
 - **Consistent:** writes require a quorum of nodes (all connected followers) before being acknowledged. Readers on any node see a consistent revision sequence.
 - **Partition-tolerant:** the cluster survives single-node failures and network partitions between nodes.

@@ -1,4 +1,4 @@
-package strata_test
+package t4_test
 
 import (
 	"bytes"
@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strata-db/strata"
-	"github.com/strata-db/strata/internal/checkpoint"
-	"github.com/strata-db/strata/internal/wal"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4"
+	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/internal/wal"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // ── walBlockingStore ──────────────────────────────────────────────────────────
@@ -150,12 +150,12 @@ func (t *trackingStore) putCount(prefix string) int {
 
 // openCluster starts count nodes sharing the same object store with short
 // segment/checkpoint intervals so S3 state is flushed quickly.
-func openCluster(t *testing.T, count int, store object.Store) []*strata.Node {
+func openCluster(t *testing.T, count int, store object.Store) []*t4.Node {
 	t.Helper()
-	nodes := make([]*strata.Node, count)
+	nodes := make([]*t4.Node, count)
 	for i := 0; i < count; i++ {
 		peerAddr := freeAddrImpl(t)
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            t.TempDir(),
 			ObjectStore:        store,
 			NodeID:             fmt.Sprintf("node-%d", i),
@@ -204,7 +204,7 @@ func TestLateNodeJoin(t *testing.T) {
 
 	// Start a 3rd node with a fresh data directory but the same object store.
 	peerAddr := freeAddrImpl(t)
-	late, err := strata.Open(strata.Config{
+	late, err := t4.Open(t4.Config{
 		DataDir:            t.TempDir(), // fresh: no local DB
 		ObjectStore:        store,
 		NodeID:             "node-late",
@@ -310,7 +310,7 @@ func TestObjectStoreUnavailableWritesSucceed(t *testing.T) {
 	// First run: write 5 keys while S3 is healthy, then break S3 and verify
 	// that subsequent writes fail.
 	func() {
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            dir,
 			ObjectStore:        store,
 			CheckpointInterval: 24 * time.Hour,
@@ -336,7 +336,7 @@ func TestObjectStoreUnavailableWritesSucceed(t *testing.T) {
 
 	// Repair S3 and reopen: the 5 pre-break keys must all be present.
 	store.repair()
-	node, err := strata.Open(strata.Config{
+	node, err := t4.Open(t4.Config{
 		DataDir:     dir,
 		ObjectStore: store,
 	})
@@ -363,7 +363,7 @@ func TestObjectStoreUnavailableRecovery(t *testing.T) {
 
 	// First run: write data with S3 healthy, then close.
 	func() {
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            dir,
 			ObjectStore:        store,
 			CheckpointInterval: 24 * time.Hour,
@@ -380,7 +380,7 @@ func TestObjectStoreUnavailableRecovery(t *testing.T) {
 	}()
 
 	// Reopen: all data should be recovered from S3 WAL.
-	node, err := strata.Open(strata.Config{
+	node, err := t4.Open(t4.Config{
 		DataDir:     dir,
 		ObjectStore: store,
 	})
@@ -409,7 +409,7 @@ func TestCheckpointCorruptionManifest(t *testing.T) {
 	// Write a corrupt manifest.
 	store.Put(ctx, "manifest/latest", strings.NewReader("this is not valid json"))
 
-	_, err := strata.Open(strata.Config{
+	_, err := t4.Open(t4.Config{
 		DataDir:     t.TempDir(), // fresh dir → will try to restore checkpoint
 		ObjectStore: store,
 	})
@@ -430,7 +430,7 @@ func TestCheckpointCorruptionArchive(t *testing.T) {
 	store.Put(ctx, "manifest/latest", strings.NewReader(manifest))
 	store.Put(ctx, "checkpoint/0000000001/00000000000000000001", strings.NewReader("not a real checkpoint"))
 
-	_, err := strata.Open(strata.Config{
+	_, err := t4.Open(t4.Config{
 		DataDir:     t.TempDir(),
 		ObjectStore: store,
 	})
@@ -458,10 +458,10 @@ func TestLeaderCrashBeforeWALFlush(t *testing.T) {
 	const segAge = 24 * time.Hour
 
 	const count = 3
-	nodes := make([]*strata.Node, count)
+	nodes := make([]*t4.Node, count)
 	for i := 0; i < count; i++ {
 		peerAddr := freeAddrImpl(t)
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            t.TempDir(),
 			ObjectStore:        tracked,
 			NodeID:             fmt.Sprintf("node-%d", i),
@@ -521,7 +521,7 @@ func TestLeaderCrashBeforeWALFlush(t *testing.T) {
 	leader.Close()
 
 	// A survivor should become the new leader.
-	survivors := make([]*strata.Node, 0, count-1)
+	survivors := make([]*t4.Node, 0, count-1)
 	for _, n := range nodes {
 		if n != leader {
 			survivors = append(survivors, n)
@@ -552,7 +552,7 @@ func TestWALReplayAfterPartialUpload(t *testing.T) {
 
 	// First run: write data, close cleanly (triggers WAL seal).
 	func() {
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            dir,
 			ObjectStore:        store,
 			CheckpointInterval: 24 * time.Hour,
@@ -573,7 +573,7 @@ func TestWALReplayAfterPartialUpload(t *testing.T) {
 	}()
 
 	// Second run: should recover all data from local WAL segments.
-	node, err := strata.Open(strata.Config{
+	node, err := t4.Open(t4.Config{
 		DataDir:     dir,
 		ObjectStore: store,
 	})
@@ -609,7 +609,7 @@ func TestStartupCheckpointCoversLocalWAL(t *testing.T) {
 
 	// ── Phase 1: write data (S3 receives all WAL segments via sync upload) ────
 	func() {
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            dir,
 			ObjectStore:        store,
 			CheckpointInterval: 24 * time.Hour, // no auto-checkpoint
@@ -627,7 +627,7 @@ func TestStartupCheckpointCoversLocalWAL(t *testing.T) {
 
 	// ── Phase 2: restart node; startup checkpoint is written immediately ──────
 	func() {
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            dir,
 			ObjectStore:        store,
 			CheckpointInterval: 50 * time.Millisecond, // allow startup checkpoint
@@ -642,7 +642,7 @@ func TestStartupCheckpointCoversLocalWAL(t *testing.T) {
 	}()
 
 	// ── Phase 3: fresh node, empty data dir, must see all data via checkpoint ─
-	fresh, err := strata.Open(strata.Config{
+	fresh, err := t4.Open(t4.Config{
 		DataDir:     t.TempDir(), // no local state
 		ObjectStore: store,
 	})
@@ -742,7 +742,7 @@ func TestDeletedKeyDurability(t *testing.T) {
 	// Phase 1: write, delete, compact.
 	var lastRev int64
 	func() {
-		n, err := strata.Open(strata.Config{
+		n, err := t4.Open(t4.Config{
 			DataDir:            t.TempDir(),
 			ObjectStore:        store,
 			CheckpointInterval: 300 * time.Millisecond,
@@ -774,7 +774,7 @@ func TestDeletedKeyDurability(t *testing.T) {
 	}()
 
 	// Phase 2: fresh node bootstraps from S3 only.
-	fresh, err := strata.Open(strata.Config{
+	fresh, err := t4.Open(t4.Config{
 		DataDir:     t.TempDir(),
 		ObjectStore: store,
 	})
@@ -855,7 +855,7 @@ func TestBootstrapGCRace(t *testing.T) {
 
 	// Phase 1: write 20 keys and let a checkpoint + GC cycle complete.
 	func() {
-		n, err := strata.Open(strata.Config{
+		n, err := t4.Open(t4.Config{
 			DataDir:            t.TempDir(),
 			ObjectStore:        inner,
 			CheckpointInterval: 200 * time.Millisecond,
@@ -895,7 +895,7 @@ func TestBootstrapGCRace(t *testing.T) {
 	// were covering the stale manifest's revision.
 	var lastRev int64
 	func() {
-		n, err := strata.Open(strata.Config{
+		n, err := t4.Open(t4.Config{
 			DataDir:            t.TempDir(),
 			ObjectStore:        inner,
 			CheckpointInterval: 200 * time.Millisecond,
@@ -924,7 +924,7 @@ func TestBootstrapGCRace(t *testing.T) {
 	// re-restores from the newer checkpoint, so the node must still recover all
 	// 40 keys despite the stale first read.
 	staleStore := newStaleFirstManifestStore(inner, staleManifestBytes)
-	fresh, err := strata.Open(strata.Config{
+	fresh, err := t4.Open(t4.Config{
 		DataDir:     t.TempDir(),
 		ObjectStore: staleStore,
 	})
@@ -972,7 +972,7 @@ func TestLocalWALUploadedOnLeaderElection(t *testing.T) {
 
 	// ── Phase 1: write data without any object store (WAL stays local) ────────
 	func() {
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            dir,
 			ObjectStore:        nil, // no S3 — WAL is local only
 			CheckpointInterval: 24 * time.Hour,
@@ -999,7 +999,7 @@ func TestLocalWALUploadedOnLeaderElection(t *testing.T) {
 	// ── Phase 2: restart in multi-node mode with S3 ───────────────────────────
 	// becomeLeader will call uploadLocalWALSegments before opening the new WAL.
 	peerAddr := freeAddrImpl(t)
-	node, err := strata.Open(strata.Config{
+	node, err := t4.Open(t4.Config{
 		DataDir:            dir,
 		ObjectStore:        tracked,
 		NodeID:             "upload-test",
@@ -1013,7 +1013,7 @@ func TestLocalWALUploadedOnLeaderElection(t *testing.T) {
 		t.Fatalf("phase-2 Open: %v", err)
 	}
 	// Wait for leader election so becomeLeader (and the upload) has run.
-	waitForLeaderNode(t, []*strata.Node{node}, 15*time.Second)
+	waitForLeaderNode(t, []*t4.Node{node}, 15*time.Second)
 	node.Close()
 
 	// The local WAL segment must now be present in S3.
@@ -1024,7 +1024,7 @@ func TestLocalWALUploadedOnLeaderElection(t *testing.T) {
 	t.Logf("WAL segments uploaded on leader election: %d", walUploads)
 
 	// ── Phase 3: fresh node must see all data ─────────────────────────────────
-	fresh, err := strata.Open(strata.Config{
+	fresh, err := t4.Open(t4.Config{
 		DataDir:     t.TempDir(),
 		ObjectStore: tracked,
 	})
@@ -1183,7 +1183,7 @@ func TestFollowerKilledDuringCommit(t *testing.T) {
 	// entirely from S3 (checkpoint restore + WAL replay), then catch up via
 	// the live peer stream from the leader.
 	rejoinPeer := freeAddrImpl(t)
-	rejoined, err := strata.Open(strata.Config{
+	rejoined, err := t4.Open(t4.Config{
 		DataDir:            t.TempDir(),
 		ObjectStore:        store,
 		NodeID:             fmt.Sprintf("node-%d", victimIdx),
@@ -1238,7 +1238,7 @@ func TestNetworkPartitionNoSplitBrain(t *testing.T) {
 	leaderPeerReal := freeAddrImpl(t)
 	proxy := newBlockableProxy(t, leaderPeerReal)
 
-	leaderNode, err := strata.Open(strata.Config{
+	leaderNode, err := t4.Open(t4.Config{
 		DataDir:            t.TempDir(),
 		ObjectStore:        store,
 		NodeID:             "leader",
@@ -1265,7 +1265,7 @@ func TestNetworkPartitionNoSplitBrain(t *testing.T) {
 	}
 
 	followerPeer := freeAddrImpl(t)
-	followerNode, err := strata.Open(strata.Config{
+	followerNode, err := t4.Open(t4.Config{
 		DataDir:            t.TempDir(),
 		ObjectStore:        store,
 		NodeID:             "follower",
@@ -1460,7 +1460,7 @@ func TestFailoverTime(t *testing.T) {
 	leader.Close()
 
 	// Collect the surviving followers.
-	var survivors []*strata.Node
+	var survivors []*t4.Node
 	for _, n := range nodes {
 		if n != leader {
 			survivors = append(survivors, n)
@@ -1524,12 +1524,12 @@ func TestChaos(t *testing.T) {
 	type chaosSlot struct {
 		id      string
 		dataDir string
-		node    *strata.Node
+		node    *t4.Node
 	}
 
 	openSlot := func(s *chaosSlot) {
 		peerAddr := freeAddrImpl(t)
-		n, err := strata.Open(strata.Config{
+		n, err := t4.Open(t4.Config{
 			DataDir:            s.dataDir,
 			ObjectStore:        store,
 			NodeID:             s.id,
@@ -1561,8 +1561,8 @@ func TestChaos(t *testing.T) {
 	}
 
 	// Wait for initial leader election.
-	liveNodes := func() []*strata.Node {
-		var ns []*strata.Node
+	liveNodes := func() []*t4.Node {
+		var ns []*t4.Node
 		for _, s := range slots {
 			if s.node != nil {
 				ns = append(ns, s.node)
@@ -1579,7 +1579,7 @@ func TestChaos(t *testing.T) {
 
 	for round := 0; round < rounds; round++ {
 		// Find the current leader.
-		var leader *strata.Node
+		var leader *t4.Node
 		for _, n := range liveNodes() {
 			if n.IsLeader() {
 				leader = n
@@ -1616,7 +1616,7 @@ func TestChaos(t *testing.T) {
 
 		// Verify the writes we just made survive the kill.
 		// Use the new leader for the check.
-		var checker *strata.Node
+		var checker *t4.Node
 		for _, n := range liveNodes() {
 			if n.IsLeader() {
 				checker = n
@@ -1656,7 +1656,7 @@ func TestChaos(t *testing.T) {
 	}
 
 	// Find the final leader revision.
-	var finalLeader *strata.Node
+	var finalLeader *t4.Node
 	for _, n := range liveNodes() {
 		if n.IsLeader() {
 			finalLeader = n

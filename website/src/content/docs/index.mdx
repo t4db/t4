@@ -1,5 +1,5 @@
 ---
-title: Strata
+title: T4
 description: An S3-durable key-value store with etcd v3 compatibility — run as a server or embed in your Go app.
 template: splash
 hero:
@@ -10,7 +10,7 @@ hero:
       icon: right-arrow
       variant: primary
     - text: View on GitHub
-      link: https://github.com/strata-db/strata
+      link: https://github.com/t4db/t4
       icon: github
       variant: minimal
 ---
@@ -24,14 +24,14 @@ import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
 
 ```bash
 # Install
-go install github.com/strata-db/strata/cmd/strata@latest
+go install github.com/t4db/t4/cmd/t4@latest
 
 # Start — S3-durable, etcd-compatible
-strata run \
-  --data-dir  /var/lib/strata \
+t4 run \
+  --data-dir  /var/lib/t4 \
   --listen    0.0.0.0:3379   \
   --s3-bucket my-bucket      \
-  --s3-prefix strata/
+  --s3-prefix t4/
 
 # Use any etcd v3 client
 etcdctl --endpoints=localhost:3379 put /config/timeout 30s
@@ -42,10 +42,10 @@ etcdctl --endpoints=localhost:3379 get /config/timeout
   <TabItem label="Go library">
 
 ```go
-import "github.com/strata-db/strata"
+import "github.com/t4db/t4"
 
-node, err := strata.Open(strata.Config{
-    DataDir:     "/var/lib/myapp/strata",
+node, err := t4.Open(t4.Config{
+    DataDir:     "/var/lib/myapp/t4",
     ObjectStore: s3Store, // nil for local-only
 })
 defer node.Close()
@@ -59,7 +59,7 @@ kv, _  := node.Get("/config/timeout")
 
 </div>
 
-## Why Strata?
+## Why T4?
 
 <CardGrid stagger>
   <Card title="etcd v3 compatible" icon="approve-check">
@@ -72,7 +72,7 @@ kv, _  := node.Get("/config/timeout")
     Leader election via S3 atomic locks — no Raft, no ZooKeeper, no cluster membership config. Any node can join or leave at any time.
   </Card>
   <Card title="Embeddable Go library" icon="puzzle">
-    One `strata.Open(cfg)` call. No sidecar process, no daemon. Run the store inside your binary for zero-overhead local reads.
+    One `t4.Open(cfg)` call. No sidecar process, no daemon. Run the store inside your binary for zero-overhead local reads.
   </Card>
   <Card title="Zero-copy branching" icon="fork">
     Fork a database at any checkpoint without copying S3 objects. Shared SSTs are content-addressed and deduplicated automatically.
@@ -88,20 +88,20 @@ kv, _  := node.Get("/config/timeout")
   <TabItem label="Standalone binary">
 
 ```bash
-go install github.com/strata-db/strata/cmd/strata@latest
+go install github.com/t4db/t4/cmd/t4@latest
 ```
 
 Or pull the Docker image:
 
 ```bash
-docker pull ghcr.io/strata-db/strata:latest
+docker pull ghcr.io/t4db/t4:latest
 ```
 
   </TabItem>
   <TabItem label="Go library">
 
 ```bash
-go get github.com/strata-db/strata
+go get github.com/t4db/t4
 ```
 
 Requires Go 1.22+.
@@ -109,9 +109,9 @@ Requires Go 1.22+.
   </TabItem>
 </Tabs>
 
-## Strata vs etcd
+## T4 vs etcd
 
-| | Strata | etcd |
+| | T4 | etcd |
 |---|---|---|
 | etcd v3 protocol | ✅ | ✅ |
 | S3-backed disaster recovery | ✅ | ❌ |

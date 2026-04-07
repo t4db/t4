@@ -1,4 +1,4 @@
-package strata
+package t4
 
 import (
 	"context"
@@ -20,13 +20,13 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 
-	"github.com/strata-db/strata/internal/checkpoint"
-	"github.com/strata-db/strata/internal/election"
-	"github.com/strata-db/strata/internal/metrics"
-	"github.com/strata-db/strata/internal/peer"
-	istore "github.com/strata-db/strata/internal/store"
-	"github.com/strata-db/strata/internal/wal"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/internal/election"
+	"github.com/t4db/t4/internal/metrics"
+	"github.com/t4db/t4/internal/peer"
+	istore "github.com/t4db/t4/internal/store"
+	"github.com/t4db/t4/internal/wal"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // walWriter is the subset of wal.WAL used by Node. The interface decouples Node
@@ -40,10 +40,10 @@ type walWriter interface {
 
 // Sentinel errors.
 var (
-	ErrKeyExists = errors.New("strata: key already exists")
-	ErrNotLeader = errors.New("strata: this node is not the leader; writes are rejected")
-	ErrClosed    = errors.New("strata: node is closed")
-	ErrCompacted = errors.New("strata: required revision has been compacted")
+	ErrKeyExists = errors.New("t4: key already exists")
+	ErrNotLeader = errors.New("t4: this node is not the leader; writes are rejected")
+	ErrClosed    = errors.New("t4: node is closed")
+	ErrCompacted = errors.New("t4: required revision has been compacted")
 )
 
 // nodeRole identifies whether the node is leader, follower, or single-node.
@@ -55,7 +55,7 @@ const (
 	roleFollower                 // following a remote leader
 )
 
-// Node is the top-level Strata instance.
+// Node is the top-level T4 instance.
 //
 // Single-node mode (PeerListenAddr == ""):
 //
@@ -192,10 +192,10 @@ func Open(cfg Config) (*Node, error) {
 				t, rev, err := checkpoint.RestoreVersioned(ctx, rp.Store,
 					rp.CheckpointArchive.Key, rp.CheckpointArchive.VersionID, pebbleDir)
 				if err != nil {
-					return nil, fmt.Errorf("strata: restore versioned checkpoint: %w", err)
+					return nil, fmt.Errorf("t4: restore versioned checkpoint: %w", err)
 				}
 				term, startRev = t, rev
-				logrus.Infof("strata: versioned checkpoint restored (term=%d rev=%d)", term, startRev)
+				logrus.Infof("t4: versioned checkpoint restored (term=%d rev=%d)", term, startRev)
 			}
 		}
 	case cfg.BranchPoint != nil:
@@ -205,10 +205,10 @@ func Open(cfg Config) (*Node, error) {
 			bp := cfg.BranchPoint
 			t, rev, err := checkpoint.RestoreBranch(ctx, bp.SourceStore, nil, bp.CheckpointKey, pebbleDir)
 			if err != nil {
-				return nil, fmt.Errorf("strata: restore branch point: %w", err)
+				return nil, fmt.Errorf("t4: restore branch point: %w", err)
 			}
 			term, startRev = t, rev
-			logrus.Infof("strata: branch checkpoint restored (term=%d rev=%d)", term, startRev)
+			logrus.Infof("t4: branch checkpoint restored (term=%d rev=%d)", term, startRev)
 			// Record the ancestor's SSTs so the uploader does not re-upload
 			// them; they will be referenced via AncestorSSTFiles in the index.
 			if cfg.ObjectStore != nil {
@@ -225,10 +225,10 @@ func Open(cfg Config) (*Node, error) {
 		defer cancel()
 		manifest, err := checkpoint.ReadManifest(ctx, cfg.ObjectStore)
 		if err != nil {
-			return nil, fmt.Errorf("strata: read manifest: %w", err)
+			return nil, fmt.Errorf("t4: read manifest: %w", err)
 		}
 		if manifest != nil {
-			logrus.Infof("strata: manifest found (rev=%d)", manifest.Revision)
+			logrus.Infof("t4: manifest found (rev=%d)", manifest.Revision)
 			if _, err := os.Stat(pebbleDir); errors.Is(err, os.ErrNotExist) {
 				// Retry loop: the checkpoint referenced by the manifest may
 				// have been GC'd in the window between reading the manifest
@@ -240,21 +240,21 @@ func Open(cfg Config) (*Node, error) {
 					t, rev, rerr := checkpoint.Restore(ctx, cfg.ObjectStore, manifest.CheckpointKey, pebbleDir)
 					if rerr == nil {
 						term, startRev = t, rev
-						logrus.Infof("strata: checkpoint restored (term=%d rev=%d)", term, startRev)
+						logrus.Infof("t4: checkpoint restored (term=%d rev=%d)", term, startRev)
 						break
 					}
 					if !errors.Is(rerr, object.ErrNotFound) || attempt >= 4 {
-						return nil, fmt.Errorf("strata: restore checkpoint: %w", rerr)
+						return nil, fmt.Errorf("t4: restore checkpoint: %w", rerr)
 					}
 					// Checkpoint was GC'd; sleep briefly so the leader can
 					// write a new checkpoint and update the manifest before
 					// we retry. (With a 400 ms checkpoint interval, 500 ms
 					// gives a full interval of headroom.)
-					logrus.Warnf("strata: checkpoint %q not found, re-reading manifest (attempt %d/5)", manifest.CheckpointKey, attempt+1)
+					logrus.Warnf("t4: checkpoint %q not found, re-reading manifest (attempt %d/5)", manifest.CheckpointKey, attempt+1)
 					time.Sleep(500 * time.Millisecond)
 					manifest, err = checkpoint.ReadManifest(ctx, cfg.ObjectStore)
 					if err != nil {
-						return nil, fmt.Errorf("strata: read manifest: %w", err)
+						return nil, fmt.Errorf("t4: read manifest: %w", err)
 					}
 					if manifest == nil {
 						break // manifest disappeared; start fresh without checkpoint
@@ -276,7 +276,7 @@ func Open(cfg Config) (*Node, error) {
 
 	db, err := istore.Open(pebbleDir, pebbleOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("strata: open store: %w", err)
+		return nil, fmt.Errorf("t4: open store: %w", err)
 	}
 	if sstUp != nil {
 		if len(inheritedSSTs) > 0 {
@@ -285,7 +285,7 @@ func Open(cfg Config) (*Node, error) {
 		reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer reconcileCancel()
 		if err := sstUp.Reconcile(reconcileCtx); err != nil {
-			logrus.Warnf("strata: SST reconcile: %v", err)
+			logrus.Warnf("t4: SST reconcile: %v", err)
 		}
 	}
 	// Always derive startRev from pebble's actual revision, not the checkpoint
@@ -314,14 +314,14 @@ func Open(cfg Config) (*Node, error) {
 	w, err := wal.Open(walDir, term, startRev+1, opts...)
 	if err != nil {
 		db.Close()
-		return nil, fmt.Errorf("strata: open wal: %w", err)
+		return nil, fmt.Errorf("t4: open wal: %w", err)
 	}
 
 	// ── Replay local WAL ─────────────────────────────────────────────────────
 	if err := replayLocal(db, walDir, startRev); err != nil {
 		w.Close()
 		db.Close()
-		return nil, fmt.Errorf("strata: local WAL replay: %w", err)
+		return nil, fmt.Errorf("t4: local WAL replay: %w", err)
 	}
 	// Re-read pebble's revision: local WAL replay may have advanced it.
 	startRev = db.CurrentRevision()
@@ -334,7 +334,7 @@ func Open(cfg Config) (*Node, error) {
 		if err := replayPinned(ctx, db, cfg.RestorePoint, startRev); err != nil {
 			w.Close()
 			db.Close()
-			return nil, fmt.Errorf("strata: pinned WAL replay: %w", err)
+			return nil, fmt.Errorf("t4: pinned WAL replay: %w", err)
 		}
 	case cfg.BranchPoint != nil:
 		// Branch nodes use their own ObjectStore for WAL replay after bootstrap.
@@ -344,7 +344,7 @@ func Open(cfg Config) (*Node, error) {
 			if err := replayRemote(ctx, db, cfg.ObjectStore, startRev); err != nil {
 				w.Close()
 				db.Close()
-				return nil, fmt.Errorf("strata: branch WAL replay: %w", err)
+				return nil, fmt.Errorf("t4: branch WAL replay: %w", err)
 			}
 		}
 	case cfg.ObjectStore != nil:
@@ -384,9 +384,9 @@ func Open(cfg Config) (*Node, error) {
 				if merr != nil || freshManifest == nil || freshManifest.Revision <= startRevBeforeReplay {
 					w.Close()
 					db.Close()
-					return nil, fmt.Errorf("strata: remote WAL replay: %w", replayErr)
+					return nil, fmt.Errorf("t4: remote WAL replay: %w", replayErr)
 				}
-				logrus.Infof("strata: WAL replay error (%v), checkpoint advanced (%d→%d) — re-restoring to close GC gap",
+				logrus.Infof("t4: WAL replay error (%v), checkpoint advanced (%d→%d) — re-restoring to close GC gap",
 					replayErr, startRevBeforeReplay, freshManifest.Revision)
 			} else if merr != nil || freshManifest == nil || freshManifest.Revision <= db.CurrentRevision() {
 				// Replay succeeded and the DB is at or ahead of the latest
@@ -398,13 +398,13 @@ func Open(cfg Config) (*Node, error) {
 				break
 			} else {
 				// Replay succeeded but checkpoint advanced — silent GC holes possible.
-				logrus.Infof("strata: checkpoint advanced during WAL replay (%d→%d); re-restoring to close GC gap",
+				logrus.Infof("t4: checkpoint advanced during WAL replay (%d→%d); re-restoring to close GC gap",
 					startRevBeforeReplay, freshManifest.Revision)
 			}
 			db.Close()
 			if rerr := os.RemoveAll(pebbleDir); rerr != nil {
 				w.Close()
-				return nil, fmt.Errorf("strata: remove stale pebble dir: %w", rerr)
+				return nil, fmt.Errorf("t4: remove stale pebble dir: %w", rerr)
 			}
 			var newTerm uint64
 			var newRev int64
@@ -416,36 +416,36 @@ func Open(cfg Config) (*Node, error) {
 				}
 				if !errors.Is(err, object.ErrNotFound) || attempt >= 4 {
 					w.Close()
-					return nil, fmt.Errorf("strata: re-restore checkpoint: %w", err)
+					return nil, fmt.Errorf("t4: re-restore checkpoint: %w", err)
 				}
 				time.Sleep(500 * time.Millisecond)
 				manifest, err = checkpoint.ReadManifest(ctx, cfg.ObjectStore)
 				if err != nil || manifest == nil {
 					w.Close()
-					return nil, fmt.Errorf("strata: re-read manifest after GC: %w", err)
+					return nil, fmt.Errorf("t4: re-read manifest after GC: %w", err)
 				}
 			}
 			_ = newRev // term drives WAL open; startRev is read from Pebble below
 			freshDB, rerr := istore.Open(pebbleDir, pebbleOpts...)
 			if rerr != nil {
 				w.Close()
-				return nil, fmt.Errorf("strata: reopen store after GC-gap fix: %w", rerr)
+				return nil, fmt.Errorf("t4: reopen store after GC-gap fix: %w", rerr)
 			}
 			if sstUp != nil {
 				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer reconcileCancel()
 				if err := sstUp.Reconcile(reconcileCtx); err != nil {
-					logrus.Warnf("strata: SST reconcile after GC-gap fix: %v", err)
+					logrus.Warnf("t4: SST reconcile after GC-gap fix: %v", err)
 				}
 			}
 			w.Close()
 			freshW, rerr := wal.Open(walDir, newTerm, freshDB.CurrentRevision()+1, opts...)
 			if rerr != nil {
 				freshDB.Close()
-				return nil, fmt.Errorf("strata: reopen wal after GC-gap fix: %w", rerr)
+				return nil, fmt.Errorf("t4: reopen wal after GC-gap fix: %w", rerr)
 			}
 			db, w, term, startRev = freshDB, freshW, newTerm, freshDB.CurrentRevision()
-			logrus.Infof("strata: checkpoint refreshed to rev=%d (term=%d)", startRev, term)
+			logrus.Infof("t4: checkpoint refreshed to rev=%d (term=%d)", startRev, term)
 		}
 	}
 
@@ -543,9 +543,9 @@ func (n *Node) serveMetrics(ctx context.Context, addr string) {
 		defer cancel()
 		srv.Shutdown(shutCtx)
 	}()
-	logrus.Infof("strata: metrics listening on %s", addr)
+	logrus.Infof("t4: metrics listening on %s", addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logrus.Warnf("strata: metrics server: %v", err)
+		logrus.Warnf("t4: metrics server: %v", err)
 	}
 }
 
@@ -572,7 +572,7 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 
 	rec, won, err := lock.TryAcquire(ctx, n.term, n.db.Load().CurrentRevision())
 	if err != nil {
-		return fmt.Errorf("strata: election: %w", err)
+		return fmt.Errorf("t4: election: %w", err)
 	}
 
 	if won {
@@ -584,7 +584,7 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 	n.peerCli = cli
 	n.leaderCli.Store(cli)
 	metrics.ElectionsTotal.WithLabelValues("lost").Inc()
-	logrus.Infof("strata: following leader at %s (term=%d)", rec.LeaderAddr, rec.Term)
+	logrus.Infof("t4: following leader at %s (term=%d)", rec.LeaderAddr, rec.Term)
 	return nil
 }
 
@@ -613,14 +613,14 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		cpCtx, cpCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		if _, cpErr := n.restoreDBIfBehindCheckpoint(cpCtx); cpErr != nil {
 			cpCancel()
-			return fmt.Errorf("strata: leader checkpoint catch-up: %w", cpErr)
+			return fmt.Errorf("t4: leader checkpoint catch-up: %w", cpErr)
 		}
 		cpCancel()
 
 		reCtx, reCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		if err := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().CurrentRevision()); err != nil {
 			reCancel()
-			return fmt.Errorf("strata: becomeLeader replay remote WAL: %w", err)
+			return fmt.Errorf("t4: becomeLeader replay remote WAL: %w", err)
 		}
 		reCancel()
 	}
@@ -635,7 +635,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 	)
 	if err != nil {
-		return fmt.Errorf("strata: open WAL as leader: %w", err)
+		return fmt.Errorf("t4: open WAL as leader: %w", err)
 	}
 	w2.Start(bgCtx)
 
@@ -643,7 +643,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	lis, err := net.Listen("tcp", n.cfg.PeerListenAddr)
 	if err != nil {
 		w2.Close()
-		return fmt.Errorf("strata: peer listen %s: %w", n.cfg.PeerListenAddr, err)
+		return fmt.Errorf("t4: peer listen %s: %w", n.cfg.PeerListenAddr, err)
 	}
 	serverOpts := []grpc.ServerOption{grpc.ForceServerCodec(peer.Codec{})}
 	if n.cfg.PeerServerTLS != nil {
@@ -676,13 +676,13 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 
 	go func() {
 		if err := grpcSrv.Serve(lis); err != nil {
-			logrus.Warnf("strata: peer server: %v", err)
+			logrus.Warnf("t4: peer server: %v", err)
 		}
 	}()
 
 	n.updateMetrics()
 	metrics.ElectionsTotal.WithLabelValues("won").Inc()
-	logrus.Infof("strata: elected leader (term=%d, peer=%s)", rec.Term, n.cfg.PeerListenAddr)
+	logrus.Infof("t4: elected leader (term=%d, peer=%s)", rec.Term, n.cfg.PeerListenAddr)
 	go n.watchLoop(bgCtx, lock, rec.Term)
 	return nil
 }
@@ -768,11 +768,11 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		cancel()
 		if err != nil {
 			n.fenceMu.Unlock()
-			logrus.Warnf("strata: leader watch (%s): read lock: %v", reason, err)
+			logrus.Warnf("t4: leader watch (%s): read lock: %v", reason, err)
 			return true // transient S3 error; keep running
 		}
 		if rec == nil || rec.Term != term || rec.NodeID != n.cfg.NodeID {
-			logrus.Errorf("strata: leader watch (%s): lock superseded (current: %+v) — stepping down", reason, rec)
+			logrus.Errorf("t4: leader watch (%s): lock superseded (current: %+v) — stepping down", reason, rec)
 			n.cancelBg()
 			n.fenceMu.Unlock()
 			// Stop the peer gRPC server so followers immediately lose their
@@ -791,7 +791,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 			if errors.Is(err, object.ErrPreconditionFailed) {
 				// Another node wrote the lock between our Read and our Touch —
 				// we have been superseded.  Step down immediately.
-				logrus.Errorf("strata: leader watch (%s): touch precondition failed — lock taken, stepping down", reason)
+				logrus.Errorf("t4: leader watch (%s): touch precondition failed — lock taken, stepping down", reason)
 				n.cancelBg()
 				n.fenceMu.Unlock()
 				if grpcSrv := n.peerGRPC; grpcSrv != nil {
@@ -800,7 +800,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 				return false
 			}
 			if err != nil {
-				logrus.Warnf("strata: leader watch (%s): touch lock: %v", reason, err)
+				logrus.Warnf("t4: leader watch (%s): touch lock: %v", reason, err)
 			}
 		}
 		n.fenceMu.Unlock()
@@ -817,7 +817,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		case <-disconnectC:
 			// Immediate check + touch: catches TakeOver that already happened,
 			// and signals liveness to the disconnected follower.
-			logrus.Infof("strata: leader watch: follower disconnected — fencing writes and checking lock")
+			logrus.Infof("t4: leader watch: follower disconnected — fencing writes and checking lock")
 			if !fencedCheck("disconnect", true) {
 				return
 			}
@@ -835,7 +835,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 			// If followers have (re)connected, liveness touches are no longer
 			// necessary — stop polling and rely on the periodic ticker.
 			if n.peerSrv != nil && n.peerSrv.ConnectedFollowers() > 0 {
-				logrus.Debugf("strata: leader watch: followers connected — pausing liveness poll")
+				logrus.Debugf("t4: leader watch: followers connected — pausing liveness poll")
 				stopPolling()
 			}
 
@@ -905,7 +905,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 		if peer.IsResyncRequired(err) {
 			metrics.FollowerResyncsTotal.WithLabelValues("stream_gap").Inc()
 			if n.cfg.ObjectStore == nil {
-				logrus.Error("strata: follower resync required but no object store — restart node")
+				logrus.Error("t4: follower resync required but no object store — restart node")
 				n.cancelBg()
 				return
 			}
@@ -913,9 +913,9 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			// the leader's ring buffer no longer covers fromRev. Restore from
 			// the latest S3 checkpoint (if the follower's Pebble is behind it),
 			// then replay any remaining WAL entries from S3.
-			logrus.Warn("strata: follower resync required — restoring from checkpoint")
+			logrus.Warn("t4: follower resync required — restoring from checkpoint")
 			if cpErr := n.resyncFromCheckpoint(bgCtx); cpErr != nil {
-				logrus.Errorf("strata: follower in-place resync failed: %v — cancelling", cpErr)
+				logrus.Errorf("t4: follower in-place resync failed: %v — cancelling", cpErr)
 				n.cancelBg()
 				return
 			}
@@ -923,7 +923,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			rerr := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().CurrentRevision())
 			reCancel()
 			if rerr != nil {
-				logrus.Errorf("strata: follower S3 resync failed: %v — retrying", rerr)
+				logrus.Errorf("t4: follower S3 resync failed: %v — retrying", rerr)
 				select {
 				case <-time.After(2 * time.Second):
 				case <-bgCtx.Done():
@@ -936,16 +936,16 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				// not broadcast, so without this they would sleep until the
 				// next live Apply — causing unnecessary read latency.
 				n.db.Load().NotifyRevision()
-				logrus.Infof("strata: follower resync complete (now at rev=%d)", n.db.Load().CurrentRevision())
+				logrus.Infof("t4: follower resync complete (now at rev=%d)", n.db.Load().CurrentRevision())
 			}
 			continue
 		}
 
 		if peer.IsLeaderUnreachable(err) || peer.IsLeaderShutdown(err) {
 			if peer.IsLeaderShutdown(err) {
-				logrus.Info("strata: leader shut down gracefully — attempting immediate election takeover")
+				logrus.Info("t4: leader shut down gracefully — attempting immediate election takeover")
 			} else {
-				logrus.Warn("strata: leader unreachable — attempting election takeover")
+				logrus.Warn("t4: leader unreachable — attempting election takeover")
 			}
 			newCli, promoted := n.attemptPromotion(bgCtx, lock, peer.IsLeaderShutdown(err))
 			if promoted {
@@ -956,12 +956,12 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				cli = newCli
 				n.leaderCli.Store(newCli)
 				oldCli.Close()
-				logrus.Infof("strata: following new leader")
+				logrus.Infof("t4: following new leader")
 			}
 			continue
 		}
 
-		logrus.Warnf("strata: follow loop error (will retry): %v", err)
+		logrus.Warnf("t4: follow loop error (will retry): %v", err)
 		select {
 		case <-time.After(2 * time.Second):
 		case <-bgCtx.Done():
@@ -991,13 +991,13 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	// so its fresh LastSeenNano must not block election.
 	existing, err := lock.Read(ctx)
 	if err != nil {
-		logrus.Errorf("strata: takeover: read lock: %v", err)
+		logrus.Errorf("t4: takeover: read lock: %v", err)
 		return nil, false
 	}
 	if !graceful && existing != nil && existing.LastSeenNano > 0 {
 		age := time.Since(time.Unix(0, existing.LastSeenNano))
 		if age < peer.LeaderLivenessTTL {
-			logrus.Infof("strata: takeover: leader liveness is fresh (%v ago) — backing off to avoid split-brain", age.Round(time.Millisecond))
+			logrus.Infof("t4: takeover: leader liveness is fresh (%v ago) — backing off to avoid split-brain", age.Round(time.Millisecond))
 			// Back off from election, but do not keep retrying a stale endpoint.
 			// If the lock advertises a leader address, switch followLoop to it.
 			if existing.LeaderAddr != "" {
@@ -1013,7 +1013,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	// followLoop switches to following them — connecting will trigger an
 	// in-place resync that catches up this node's revision.
 	if existing != nil && existing.CommittedRev > n.db.Load().CurrentRevision() {
-		logrus.Infof("strata: takeover: node is behind leader committed rev (ours=%d, leader=%d) — following current leader to catch up",
+		logrus.Infof("t4: takeover: node is behind leader committed rev (ours=%d, leader=%d) — following current leader to catch up",
 			n.db.Load().CurrentRevision(), existing.CommittedRev)
 		if existing.LeaderAddr != "" {
 			return peer.NewClient(existing.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS), false
@@ -1023,13 +1023,13 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 
 	rec, won, err := lock.TakeOver(ctx, n.term, n.db.Load().CurrentRevision())
 	if err != nil {
-		logrus.Errorf("strata: takeover election error: %v", err)
+		logrus.Errorf("t4: takeover election error: %v", err)
 		return nil, false
 	}
 
 	if won {
 		if err := n.becomeLeader(bgCtx, lock, rec); err != nil {
-			logrus.Errorf("strata: promotion failed: %v", err)
+			logrus.Errorf("t4: promotion failed: %v", err)
 			return nil, false
 		}
 		// Start write-processing loops immediately so that client writes are
@@ -1051,7 +1051,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		if n.sstUploader != nil {
 			rCtx, rCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			if rErr := n.sstUploader.Reconcile(rCtx); rErr != nil {
-				logrus.Warnf("strata: promoted leader SST reconcile: %v", rErr)
+				logrus.Warnf("t4: promoted leader SST reconcile: %v", rErr)
 			}
 			rCancel()
 			n.sstUploader.Start(bgCtx)
@@ -1069,7 +1069,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	}
 
 	if rec != nil && rec.LeaderAddr != "" {
-		logrus.Infof("strata: lost election to %s (term=%d) — following", rec.NodeID, rec.Term)
+		logrus.Infof("t4: lost election to %s (term=%d) — following", rec.NodeID, rec.Term)
 		return peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS), false
 	}
 	return nil, false
@@ -1123,7 +1123,7 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		n.mu.Unlock()
 		return &peer.ForwardResponse{Revision: rev, Succeeded: true}, nil
 	}
-	return nil, fmt.Errorf("strata: unknown forward op %d", req.Op)
+	return nil, fmt.Errorf("t4: unknown forward op %d", req.Op)
 }
 
 // forwardWrite sends a write request to the leader and decodes the response.
@@ -1222,14 +1222,14 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 	}
 	resp, err := cli.ForwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardGetRevision})
 	if err != nil {
-		return fmt.Errorf("strata: read sync: %w", err)
+		return fmt.Errorf("t4: read sync: %w", err)
 	}
 	if err := n.WaitForRevision(ctx, resp.Revision); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return fmt.Errorf("strata: read sync: leader reported rev=%d but local node only reached rev=%d before wait ended: %w",
+			return fmt.Errorf("t4: read sync: leader reported rev=%d but local node only reached rev=%d before wait ended: %w",
 				resp.Revision, n.db.Load().CurrentRevision(), err)
 		}
-		return fmt.Errorf("strata: read sync: wait for local revision %d: %w", resp.Revision, err)
+		return fmt.Errorf("t4: read sync: wait for local revision %d: %w", resp.Revision, err)
 	}
 	return nil
 }
@@ -1332,7 +1332,7 @@ func (n *Node) Close() error {
 		n.readMu.Lock()
 		n.readMu.Unlock()
 		if werr := n.wal.Close(); werr != nil {
-			logrus.Errorf("strata: wal close: %v", werr)
+			logrus.Errorf("t4: wal close: %v", werr)
 			err = werr
 		}
 		// Intentionally do NOT delete the election lock on shutdown.
@@ -1663,7 +1663,7 @@ func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.T
 	cleanPending()
 	if err != nil {
 		metrics.WriteErrors.WithLabelValues(op).Inc()
-		return 0, fmt.Errorf("strata: commit: %w", err)
+		return 0, fmt.Errorf("t4: commit: %w", err)
 	}
 	metrics.WritesTotal.WithLabelValues(op).Inc()
 	metrics.WriteDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
@@ -1996,7 +1996,7 @@ func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Sto
 			continue // already uploaded
 		}
 		if err := up(ctx, path, objKey); err != nil {
-			logrus.Warnf("strata: pre-leader upload %q → %q: %v", path, objKey, err)
+			logrus.Warnf("t4: pre-leader upload %q → %q: %v", path, objKey, err)
 		}
 	}
 }
@@ -2036,30 +2036,30 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 	}
 	if err := n.wal.SealAndFlush(rev + 1); err != nil {
 		n.fenceMu.Unlock()
-		logrus.Errorf("strata: startup checkpoint seal WAL: %v", err)
+		logrus.Errorf("t4: startup checkpoint seal WAL: %v", err)
 		return
 	}
 	if err := n.db.Load().Flush(); err != nil {
 		n.fenceMu.Unlock()
-		logrus.Errorf("strata: startup checkpoint flush pebble: %v", err)
+		logrus.Errorf("t4: startup checkpoint flush pebble: %v", err)
 		return
 	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
 		if err := checkpoint.WriteWithRegistry(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
 			n.fenceMu.Unlock()
-			logrus.Errorf("strata: startup checkpoint rev=%d: %v", rev, err)
+			logrus.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
 			return
 		}
 	} else if err := checkpoint.Write(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
 		n.fenceMu.Unlock()
-		logrus.Errorf("strata: startup checkpoint rev=%d: %v", rev, err)
+		logrus.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
 		return
 	}
 	n.fenceMu.Unlock()
 	atomic.StoreInt64(&n.entriesSinceCheckpoint, 0)
 	metrics.CheckpointsTotal.Inc()
-	logrus.Infof("strata: startup checkpoint written (rev=%d)", rev)
+	logrus.Infof("t4: startup checkpoint written (rev=%d)", rev)
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {
@@ -2074,30 +2074,30 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	}
 	if err := n.wal.SealAndFlush(rev + 1); err != nil {
 		n.fenceMu.Unlock()
-		logrus.Errorf("strata: checkpoint seal WAL: %v", err)
+		logrus.Errorf("t4: checkpoint seal WAL: %v", err)
 		return
 	}
 	if err := n.db.Load().Flush(); err != nil {
 		n.fenceMu.Unlock()
-		logrus.Errorf("strata: checkpoint flush pebble: %v", err)
+		logrus.Errorf("t4: checkpoint flush pebble: %v", err)
 		return
 	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
 		if err := checkpoint.WriteWithRegistry(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
 			n.fenceMu.Unlock()
-			logrus.Errorf("strata: write checkpoint rev=%d: %v", rev, err)
+			logrus.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 			return
 		}
 	} else if err := checkpoint.Write(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
 		n.fenceMu.Unlock()
-		logrus.Errorf("strata: write checkpoint rev=%d: %v", rev, err)
+		logrus.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 		return
 	}
 	n.fenceMu.Unlock()
 	atomic.StoreInt64(&n.entriesSinceCheckpoint, 0)
 	metrics.CheckpointsTotal.Inc()
-	logrus.Infof("strata: checkpoint written (rev=%d)", rev)
+	logrus.Infof("t4: checkpoint written (rev=%d)", rev)
 
 	// GC WAL segments from S3 that are fully covered by this checkpoint AND
 	// that all connected followers have applied. Using min(leaderRev,
@@ -2113,10 +2113,10 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	}
 	deleted, gcErr := wal.GCSegments(gcCtx, n.cfg.ObjectStore, gcRev)
 	if gcErr != nil {
-		logrus.Warnf("strata: wal gc: %v", gcErr)
+		logrus.Warnf("t4: wal gc: %v", gcErr)
 	} else if deleted > 0 {
 		metrics.WALGCTotal.Add(float64(deleted))
-		logrus.Infof("strata: wal gc: deleted %d segments (covered by checkpoint rev=%d)", deleted, gcRev)
+		logrus.Infof("t4: wal gc: deleted %d segments (covered by checkpoint rev=%d)", deleted, gcRev)
 	}
 
 	// GC old checkpoint archives from S3, keeping the 2 most recent so that
@@ -2130,9 +2130,9 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	// checkpoint's index, so they are never mistakenly treated as orphans.
 	cpDeleted, orphanSSTs, cpGCErr := checkpoint.GCCheckpoints(gcCtx, n.cfg.ObjectStore, 2)
 	if cpGCErr != nil {
-		logrus.Warnf("strata: checkpoint gc: %v", cpGCErr)
+		logrus.Warnf("t4: checkpoint gc: %v", cpGCErr)
 	} else if cpDeleted > 0 {
-		logrus.Infof("strata: checkpoint gc: deleted %d old checkpoint(s)", cpDeleted)
+		logrus.Infof("t4: checkpoint gc: deleted %d old checkpoint(s)", cpDeleted)
 	}
 
 	// Only run SST GC when old checkpoints were actually deleted and there are
@@ -2141,9 +2141,9 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	if cpDeleted > 0 && len(orphanSSTs) > 0 {
 		sstDeleted, sstGCErr := checkpoint.GCOrphanSSTs(gcCtx, n.cfg.ObjectStore, orphanSSTs)
 		if sstGCErr != nil {
-			logrus.Warnf("strata: sst gc: %v", sstGCErr)
+			logrus.Warnf("t4: sst gc: %v", sstGCErr)
 		} else if sstDeleted > 0 {
-			logrus.Infof("strata: sst gc: deleted %d orphan sst(s)", sstDeleted)
+			logrus.Infof("t4: sst gc: deleted %d orphan sst(s)", sstDeleted)
 		}
 	}
 }
@@ -2209,7 +2209,7 @@ func replayLocal(db *istore.Store, walDir string, afterRev int64) error {
 		entries, readErr := sr.ReadAll()
 		closer()
 		if readErr != nil {
-			logrus.Warnf("strata: partial local segment %q: %v", path, readErr)
+			logrus.Warnf("t4: partial local segment %q: %v", path, readErr)
 		}
 		var applicable []wal.Entry
 		for _, e := range entries {
@@ -2242,7 +2242,7 @@ func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, after
 		entries, readErr := sr.ReadAll()
 		rc.Close()
 		if readErr != nil {
-			logrus.Warnf("strata: partial pinned segment %q: %v", seg.Key, readErr)
+			logrus.Warnf("t4: partial pinned segment %q: %v", seg.Key, readErr)
 		}
 		var applicable []wal.Entry
 		for _, e := range entries {
@@ -2279,7 +2279,7 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	if manifest == nil || manifest.Revision <= n.db.Load().CurrentRevision() {
 		return false, nil // already at or above checkpoint
 	}
-	logrus.Infof("strata: node at rev=%d is behind checkpoint rev=%d — restoring in place",
+	logrus.Infof("t4: node at rev=%d is behind checkpoint rev=%d — restoring in place",
 		n.db.Load().CurrentRevision(), manifest.Revision)
 
 	pebbleDir := filepath.Join(n.cfg.DataDir, "db")
@@ -2300,7 +2300,7 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 		}
 		// Checkpoint was GC'd between manifest read and restore — re-read
 		// the manifest so we target whatever the leader most recently wrote.
-		logrus.Warnf("strata: checkpoint %q not found during restore, re-reading manifest (attempt %d/5)",
+		logrus.Warnf("t4: checkpoint %q not found during restore, re-reading manifest (attempt %d/5)",
 			manifest.CheckpointKey, attempt+1)
 		time.Sleep(500 * time.Millisecond)
 		manifest, err = checkpoint.ReadManifest(ctx, n.cfg.ObjectStore)
@@ -2381,7 +2381,7 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 	newRev := n.db.Load().CurrentRevision()
 	n.wal.Close()
 	if rerr := os.RemoveAll(walDir); rerr != nil {
-		logrus.Warnf("strata: remove old wal dir during resync: %v", rerr)
+		logrus.Warnf("t4: remove old wal dir during resync: %v", rerr)
 	}
 	newWal, rerr := wal.Open(walDir, n.term, newRev+1,
 		wal.WithSegmentMaxSize(n.cfg.SegmentMaxSize),
@@ -2397,7 +2397,7 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 	n.nextRev = newRev
 	n.mu.Unlock()
 
-	logrus.Infof("strata: follower in-place resync complete (rev=%d term=%d)", newRev, n.term)
+	logrus.Infof("t4: follower in-place resync complete (rev=%d term=%d)", newRev, n.term)
 	return nil
 }
 
@@ -2437,7 +2437,7 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 		entries, readErr := sr.ReadAll()
 		rc.Close()
 		if readErr != nil {
-			logrus.Warnf("strata: partial remote segment %q: %v", key, readErr)
+			logrus.Warnf("t4: partial remote segment %q: %v", key, readErr)
 		}
 		for _, e := range entries {
 			if e.Revision <= afterRev {

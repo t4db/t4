@@ -13,11 +13,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/strata-db/strata"
+	"github.com/t4db/t4"
 )
 
 const (
-	internalPrefix = "\x00strata/"
+	internalPrefix = "\x00t4/"
 	leasePrefix    = internalPrefix + "lease/"
 )
 
@@ -67,7 +67,7 @@ func ttlRemaining(rec *leaseRecord, now time.Time) int64 {
 	return secs
 }
 
-func decodeLease(kv *strata.KeyValue) (*leaseRecord, error) {
+func decodeLease(kv *t4.KeyValue) (*leaseRecord, error) {
 	if kv == nil {
 		return nil, nil
 	}
@@ -83,7 +83,7 @@ func (s *Server) getLease(ctx context.Context, id int64, linearizable bool) (*le
 		return nil, err
 	}
 	var (
-		kv  *strata.KeyValue
+		kv  *t4.KeyValue
 		err error
 	)
 	if linearizable {
@@ -125,7 +125,7 @@ func (s *Server) deleteLeaseRecord(ctx context.Context, id int64) error {
 
 func (s *Server) listLeases(ctx context.Context, linearizable bool) ([]*leaseRecord, error) {
 	var (
-		kvs []*strata.KeyValue
+		kvs []*t4.KeyValue
 		err error
 	)
 	if linearizable {
@@ -161,8 +161,8 @@ func newLeaseID() (int64, error) {
 	return id, nil
 }
 
-func userKeyValues(kvs []*strata.KeyValue) []*strata.KeyValue {
-	out := make([]*strata.KeyValue, 0, len(kvs))
+func userKeyValues(kvs []*t4.KeyValue) []*t4.KeyValue {
+	out := make([]*t4.KeyValue, 0, len(kvs))
 	for _, kv := range kvs {
 		if kv != nil && !isInternalKey(kv.Key) {
 			out = append(out, kv)
@@ -171,16 +171,16 @@ func userKeyValues(kvs []*strata.KeyValue) []*strata.KeyValue {
 	return out
 }
 
-func userEvent(e strata.Event) (strata.Event, bool) {
+func userEvent(e t4.Event) (t4.Event, bool) {
 	if e.KV == nil || isInternalKey(e.KV.Key) {
-		return strata.Event{}, false
+		return t4.Event{}, false
 	}
 	return e, true
 }
 
 func (s *Server) collectLeaseKeys(ctx context.Context, leaseID int64, linearizable bool) ([]string, error) {
 	var (
-		kvs []*strata.KeyValue
+		kvs []*t4.KeyValue
 		err error
 	)
 	if linearizable {
@@ -240,7 +240,7 @@ func (s *Server) leaseLoop() {
 		leases, err := s.listLeases(ctx, false)
 		if err != nil {
 			cancel()
-			if err == strata.ErrClosed {
+			if err == t4.ErrClosed {
 				return
 			}
 			continue

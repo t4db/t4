@@ -1,4 +1,4 @@
-# ── Stage 1: build the strata binary ─────────────────────────────────────────
+# ── Stage 1: build the t4 binary ─────────────────────────────────────────
 FROM golang:1.25-bookworm AS builder
 
 WORKDIR /src
@@ -6,7 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /strata ./cmd/strata
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /t4 ./cmd/t4
 
 # ── Stage 2: minimal runtime node ────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -32,7 +32,7 @@ RUN sed -i 's|#\?PermitRootLogin.*|PermitRootLogin yes|' /etc/ssh/sshd_config \
 COPY jepsen/node/authorized_keys /root/.ssh/authorized_keys
 RUN chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys
 
-COPY --from=builder /strata /usr/local/bin/strata
+COPY --from=builder /t4 /usr/local/bin/t4
 
 EXPOSE 22 2379 3380
 

@@ -4,7 +4,7 @@ NODES      := n1,n2,n3,n4,n5
 TIME_LIMIT := 120
 WORKLOAD   := register
 # 'kill' tests crash-recovery correctness (WAL + S3 checkpoint replay).
-# 'partition-halves' would require quorum consensus to pass — Strata uses a
+# 'partition-halves' would require quorum consensus to pass — T4 uses a
 # last-writer-wins S3 lock which is not safe under network partitions (AP, not CP).
 NEMESIS    := kill
 

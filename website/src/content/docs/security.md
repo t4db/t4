@@ -1,16 +1,16 @@
 ---
 title: Security
-description: Securing Strata — TLS setup, mTLS between peers, client authentication, and RBAC.
+description: Securing T4 — TLS setup, mTLS between peers, client authentication, and RBAC.
 ---
 
 ## Overview
 
-Strata has two independently configurable TLS surfaces:
+T4 has two independently configurable TLS surfaces:
 
 | Surface | Flag prefix | What it protects |
 |---|---|---|
-| **Client TLS** | `--client-tls-*` | etcd gRPC port (3379) — traffic between your application and Strata |
-| **Peer mTLS** | `--peer-tls-*` | WAL replication port (3380) — traffic between Strata nodes |
+| **Client TLS** | `--client-tls-*` | etcd gRPC port (3379) — traffic between your application and T4 |
+| **Peer mTLS** | `--peer-tls-*` | WAL replication port (3380) — traffic between T4 nodes |
 
 Both use standard PEM-encoded certificates. You can enable either or both independently.
 
@@ -24,12 +24,12 @@ For development, use `openssl` to create a self-signed CA and certificates:
 # CA key and certificate
 openssl genrsa -out ca.key 4096
 openssl req -new -x509 -days 3650 -key ca.key -out ca.crt \
-  -subj "/CN=strata-ca"
+  -subj "/CN=t4-ca"
 
 # Server key and CSR
 openssl genrsa -out server.key 4096
 openssl req -new -key server.key -out server.csr \
-  -subj "/CN=strata-server"
+  -subj "/CN=t4-server"
 
 # Sign with CA, include SANs
 openssl x509 -req -days 3650 -in server.csr -CA ca.crt -CAkey ca.key \
@@ -50,18 +50,18 @@ For mTLS (peer-to-peer), generate a second cert for each node, or use a single s
 Clients connect with TLS but aren't required to present a certificate. Use this when your clients support TLS but not mTLS.
 
 ```bash
-strata run \
-  --data-dir /var/lib/strata \
+t4 run \
+  --data-dir /var/lib/t4 \
   --listen 0.0.0.0:3379 \
-  --client-tls-cert /etc/strata/tls/server.crt \
-  --client-tls-key  /etc/strata/tls/server.key
+  --client-tls-cert /etc/t4/tls/server.crt \
+  --client-tls-key  /etc/t4/tls/server.key
 ```
 
 Clients:
 
 ```bash
-etcdctl --endpoints=https://strata:3379 \
-        --cacert /etc/strata/tls/ca.crt \
+etcdctl --endpoints=https://t4:3379 \
+        --cacert /etc/t4/tls/ca.crt \
         put /hello world
 ```
 
@@ -69,10 +69,10 @@ Go client:
 
 ```go
 tlsCfg, err := tlsconfig.ClientConfig(tlsconfig.Options{
-    CAFile: "/etc/strata/tls/ca.crt",
+    CAFile: "/etc/t4/tls/ca.crt",
 })
 cli, err := clientv3.New(clientv3.Config{
-    Endpoints: []string{"https://strata:3379"},
+    Endpoints: []string{"https://t4:3379"},
     TLS:       tlsCfg,
 })
 ```
@@ -82,12 +82,12 @@ cli, err := clientv3.New(clientv3.Config{
 Add `--client-tls-ca` to require clients to present a certificate signed by the given CA:
 
 ```bash
-strata run \
-  --data-dir /var/lib/strata \
+t4 run \
+  --data-dir /var/lib/t4 \
   --listen 0.0.0.0:3379 \
-  --client-tls-cert /etc/strata/tls/server.crt \
-  --client-tls-key  /etc/strata/tls/server.key \
-  --client-tls-ca   /etc/strata/tls/ca.crt
+  --client-tls-cert /etc/t4/tls/server.crt \
+  --client-tls-key  /etc/t4/tls/server.key \
+  --client-tls-ca   /etc/t4/tls/ca.crt
 ```
 
 Generate a client certificate:
@@ -102,16 +102,16 @@ openssl x509 -req -days 365 -in client.csr -CA ca.crt -CAkey ca.key \
 Connect with client cert:
 
 ```bash
-etcdctl --endpoints=https://strata:3379 \
-        --cacert  /etc/strata/tls/ca.crt \
-        --cert    /etc/strata/tls/client.crt \
-        --key     /etc/strata/tls/client.key \
+etcdctl --endpoints=https://t4:3379 \
+        --cacert  /etc/t4/tls/ca.crt \
+        --cert    /etc/t4/tls/client.crt \
+        --key     /etc/t4/tls/client.key \
         put /hello world
 ```
 
 ### Embedded library
 
-Pass `grpc.DialOption` credentials to the etcd client if you're using the etcd-compatible interface, or configure TLS on the gRPC connection directly. For the embedded `*strata.Node`, TLS applies only to the peer port — client reads go directly in-process without any network.
+Pass `grpc.DialOption` credentials to the etcd client if you're using the etcd-compatible interface, or configure TLS on the gRPC connection directly. For the embedded `*t4.Node`, TLS applies only to the peer port — client reads go directly in-process without any network.
 
 ---
 
@@ -120,13 +120,13 @@ Pass `grpc.DialOption` credentials to the etcd client if you're using the etcd-c
 Peer mTLS encrypts and authenticates WAL replication streams between nodes. All nodes must use the same CA.
 
 ```bash
-strata run \
-  --data-dir       /var/lib/strata \
+t4 run \
+  --data-dir       /var/lib/t4 \
   --peer-listen    0.0.0.0:3380 \
   --advertise-peer node-a.internal:3380 \
-  --peer-tls-ca    /etc/strata/tls/ca.crt \
-  --peer-tls-cert  /etc/strata/tls/node.crt \
-  --peer-tls-key   /etc/strata/tls/node.key
+  --peer-tls-ca    /etc/t4/tls/ca.crt \
+  --peer-tls-cert  /etc/t4/tls/node.crt \
+  --peer-tls-key   /etc/t4/tls/node.key
 ```
 
 The same cert/key pair can be used on all nodes if the cert includes all peer DNS names in its SANs:
@@ -147,7 +147,7 @@ import "google.golang.org/grpc/credentials"
 serverCreds, err := credentials.NewServerTLSFromFile(certFile, keyFile)
 clientCreds, err := credentials.NewClientTLSFromFile(caFile, "")
 
-node, err := strata.Open(strata.Config{
+node, err := t4.Open(t4.Config{
     PeerServerTLS: serverCreds,
     PeerClientTLS: clientCreds,
 })
@@ -171,7 +171,7 @@ clientTLS := &tls.Config{
     RootCAs:      pool,
 }
 
-node, err := strata.Open(strata.Config{
+node, err := t4.Open(t4.Config{
     PeerServerTLS: credentials.NewTLS(serverTLS),
     PeerClientTLS: credentials.NewTLS(clientTLS),
 })
@@ -187,46 +187,46 @@ Generate peer certificates automatically with cert-manager:
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
-  name: strata-ca-issuer
+  name: t4-ca-issuer
 spec:
   selfSigned: {}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: strata-ca
+  name: t4-ca
   namespace: default
 spec:
   isCA: true
-  secretName: strata-ca-secret
-  commonName: strata-ca
+  secretName: t4-ca-secret
+  commonName: t4-ca
   issuerRef:
-    name: strata-ca-issuer
+    name: t4-ca-issuer
     kind: ClusterIssuer
 ---
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
-  name: strata-issuer
+  name: t4-issuer
   namespace: default
 spec:
   ca:
-    secretName: strata-ca-secret
+    secretName: t4-ca-secret
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: strata-peer-tls
+  name: t4-peer-tls
   namespace: default
 spec:
-  secretName: strata-peer-tls
+  secretName: t4-peer-tls
   issuerRef:
-    name: strata-issuer
+    name: t4-issuer
   dnsNames:
-    - strata-0.strata-headless.default.svc.cluster.local
-    - strata-1.strata-headless.default.svc.cluster.local
-    - strata-2.strata-headless.default.svc.cluster.local
-    - strata-headless.default.svc.cluster.local
+    - t4-0.t4-headless.default.svc.cluster.local
+    - t4-1.t4-headless.default.svc.cluster.local
+    - t4-2.t4-headless.default.svc.cluster.local
+    - t4-headless.default.svc.cluster.local
   usages:
     - server auth
     - client auth
@@ -237,16 +237,16 @@ spec:
 Then pass the secret to the Helm chart:
 
 ```bash
-helm install strata oci://ghcr.io/strata-db/charts/strata \
+helm install t4 oci://ghcr.io/t4db/charts/t4 \
   --set tls.peer.enabled=true \
-  --set tls.peer.secretName=strata-peer-tls
+  --set tls.peer.secretName=t4-peer-tls
 ```
 
 ---
 
 ## Authentication and RBAC
 
-Strata implements the etcd v3 Auth API: username/password auth with bearer tokens and role-based access control.
+T4 implements the etcd v3 Auth API: username/password auth with bearer tokens and role-based access control.
 
 ### Enable auth
 
@@ -300,14 +300,14 @@ The `root` role bypasses all permission checks.
 Bearer tokens expire after `--token-ttl` seconds (default 300). The etcd Go client handles token refresh automatically when `--user` is provided.
 
 ```bash
-strata run ... --auth-enabled --token-ttl 3600
+t4 run ... --auth-enabled --token-ttl 3600
 ```
 
 ---
 
 ## S3 bucket security
 
-S3 is used for WAL segments, checkpoints, and the leader lock. The IAM policy for Strata's S3 access needs:
+S3 is used for WAL segments, checkpoints, and the leader lock. The IAM policy for T4's S3 access needs:
 
 ```json
 {
@@ -324,14 +324,14 @@ S3 is used for WAL segments, checkpoints, and the leader lock. The IAM policy fo
       ],
       "Resource": [
         "arn:aws:s3:::my-bucket",
-        "arn:aws:s3:::my-bucket/strata/*"
+        "arn:aws:s3:::my-bucket/t4/*"
       ]
     }
   ]
 }
 ```
 
-For leader election, Strata uses conditional PUTs (`If-None-Match`, `If-Match`). These are standard S3 operations and don't require additional permissions.
+For leader election, T4 uses conditional PUTs (`If-None-Match`, `If-Match`). These are standard S3 operations and don't require additional permissions.
 
 **Recommendations:**
 - Use IRSA / Workload Identity — no static credentials in environment variables or Secrets

@@ -1,5 +1,5 @@
 // Package object provides a small interface for object storage operations
-// used by Strata (WAL archive, checkpoints, manifest).
+// used by T4 (WAL archive, checkpoints, manifest).
 package object
 
 import (

@@ -1,10 +1,10 @@
 {
-  "title": "Strata Overview",
-  "uid": "strata-overview",
-  "description": "Cluster health, write performance, replication lag, WAL/checkpoint activity, and S3 object store metrics for a Strata node or cluster.",
+  "title": "T4 Overview",
+  "uid": "t4-overview",
+  "description": "Cluster health, write performance, replication lag, WAL/checkpoint activity, and S3 object store metrics for a T4 node or cluster.",
   "schemaVersion": 38,
   "version": 1,
-  "tags": ["strata"],
+  "tags": ["t4"],
   "timezone": "browser",
   "graphTooltip": 1,
   "editable": true,
@@ -41,11 +41,11 @@
       {
         "current": {},
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "definition": "label_values(strata_current_revision, job)",
+        "definition": "label_values(t4_current_revision, job)",
         "hide": 0,
         "includeAll": false,
         "name": "job",
-        "query": "label_values(strata_current_revision, job)",
+        "query": "label_values(t4_current_revision, job)",
         "refresh": 2,
         "sort": 1,
         "type": "query",
@@ -54,13 +54,13 @@
       {
         "current": {},
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "definition": "label_values(strata_current_revision{job=\"$job\"}, instance)",
+        "definition": "label_values(t4_current_revision{job=\"$job\"}, instance)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
         "multi": true,
         "name": "instance",
-        "query": "label_values(strata_current_revision{job=\"$job\"}, instance)",
+        "query": "label_values(t4_current_revision{job=\"$job\"}, instance)",
         "refresh": 2,
         "sort": 1,
         "type": "query",
@@ -85,7 +85,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum(strata_role{job=\"$job\", instance=~\"$instance\", role=\"leader\"})",
+          "expr": "sum(t4_role{job=\"$job\", instance=~\"$instance\", role=\"leader\"})",
           "legendFormat": "leaders",
           "refId": "A"
         }
@@ -126,7 +126,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "max(strata_current_revision{job=\"$job\", instance=~\"$instance\"})",
+          "expr": "max(t4_current_revision{job=\"$job\", instance=~\"$instance\"})",
           "legendFormat": "revision",
           "refId": "A"
         }
@@ -154,7 +154,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum by (role) (strata_role{job=\"$job\", instance=~\"$instance\", role!=\"\"})",
+          "expr": "sum by (role) (t4_role{job=\"$job\", instance=~\"$instance\", role!=\"\"})",
           "legendFormat": "{{role}}",
           "refId": "A"
         }
@@ -186,7 +186,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "max(strata_follower_lag_revisions{job=\"$job\", instance=~\"$instance\"}) or vector(0)",
+          "expr": "max(t4_follower_lag_revisions{job=\"$job\", instance=~\"$instance\"}) or vector(0)",
           "legendFormat": "max lag",
           "refId": "A"
         }
@@ -222,7 +222,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "increase(strata_elections_total{job=\"$job\", instance=~\"$instance\", outcome=\"won\"}[1h])",
+          "expr": "increase(t4_elections_total{job=\"$job\", instance=~\"$instance\", outcome=\"won\"}[1h])",
           "legendFormat": "won",
           "refId": "A"
         }
@@ -258,7 +258,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "increase(strata_follower_resyncs_total{job=\"$job\", instance=~\"$instance\"}[1h])",
+          "expr": "increase(t4_follower_resyncs_total{job=\"$job\", instance=~\"$instance\"}[1h])",
           "legendFormat": "resyncs",
           "refId": "A"
         }
@@ -301,7 +301,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -327,7 +327,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_write_errors_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n/ (\n  sum by (op) (rate(strata_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n  + sum by (op) (rate(strata_write_errors_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n)",
+          "expr": "sum by (op) (rate(t4_write_errors_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n/ (\n  sum by (op) (rate(t4_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n  + sum by (op) (rate(t4_write_errors_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n)",
           "legendFormat": "error rate ({{op}})",
           "refId": "A"
         }
@@ -366,17 +366,17 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -413,7 +413,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "strata_follower_lag_revisions{job=\"$job\", instance=~\"$instance\"}",
+          "expr": "t4_follower_lag_revisions{job=\"$job\", instance=~\"$instance\"}",
           "legendFormat": "{{follower_id}}",
           "refId": "A"
         }
@@ -448,7 +448,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_forwarded_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_forwarded_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "forwarded ({{op}})",
           "refId": "A"
         }
@@ -474,17 +474,17 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -517,7 +517,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum(rate(strata_wal_uploads_total{job=\"$job\", instance=~\"$instance\"}[2m])) * 60",
+          "expr": "sum(rate(t4_wal_uploads_total{job=\"$job\", instance=~\"$instance\"}[2m])) * 60",
           "legendFormat": "uploads/min",
           "refId": "A"
         }
@@ -543,7 +543,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum(rate(strata_wal_upload_errors_total{job=\"$job\", instance=~\"$instance\"}[2m])) * 60",
+          "expr": "sum(rate(t4_wal_upload_errors_total{job=\"$job\", instance=~\"$instance\"}[2m])) * 60",
           "legendFormat": "errors/min",
           "refId": "A"
         }
@@ -570,17 +570,17 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -606,7 +606,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum(rate(strata_checkpoints_total{job=\"$job\", instance=~\"$instance\"}[5m])) * 3600",
+          "expr": "sum(rate(t4_checkpoints_total{job=\"$job\", instance=~\"$instance\"}[5m])) * 3600",
           "legendFormat": "checkpoints/hr",
           "refId": "A"
         }
@@ -639,7 +639,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_object_store_ops_total{job=\"$job\", instance=~\"$instance\", result=\"success\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", instance=~\"$instance\", result=\"success\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -665,7 +665,7 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_object_store_ops_total{job=\"$job\", instance=~\"$instance\", result=\"error\"}[2m]))\n/ sum by (op) (rate(strata_object_store_ops_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", instance=~\"$instance\", result=\"error\"}[2m]))\n/ sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -703,17 +703,17 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }

@@ -8,7 +8,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // GCSegments deletes WAL segments from object storage whose entire revision

@@ -7,14 +7,14 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/strata-db/strata"
+	"github.com/t4db/t4"
 )
 
-func benchNode(b *testing.B) (*strata.Node, *clientv3.Client) {
+func benchNode(b *testing.B) (*t4.Node, *clientv3.Client) {
 	b.Helper()
-	node, err := strata.Open(strata.Config{DataDir: b.TempDir()})
+	node, err := t4.Open(t4.Config{DataDir: b.TempDir()})
 	if err != nil {
-		b.Fatalf("strata.Open: %v", err)
+		b.Fatalf("t4.Open: %v", err)
 	}
 	b.Cleanup(func() { node.Close() })
 	endpoint := startEtcdServer(b, node)

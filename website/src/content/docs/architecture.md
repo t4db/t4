@@ -141,7 +141,7 @@ There is no heartbeat, no TTL, and no ZooKeeper-style session. The only S3 write
 
 ### CAP properties
 
-Strata is an **AP** system (Available + Partition-tolerant) that provides strong durability guarantees in cluster mode:
+T4 is an **AP** system (Available + Partition-tolerant) that provides strong durability guarantees in cluster mode:
 
 - **No network partition**: reads are linearizable (followers use the ReadIndex pattern — they sync to the leader's revision before serving). Writes are always routed to the leader.
 - **Under network partition**: when a follower is fully isolated (can't reach leader or other followers), it will eventually TakeOver once `LastSeenNano` goes stale. The old leader detects supersession either via its next conditional liveness touch (which fails with `ErrPreconditionFailed` the instant a new leader writes the lock) or within one poll interval (≤ 2 s). **The split-brain window is effectively zero**: the conditional touch means A cannot refresh its liveness after B wins — A's next touch attempt is rejected and triggers immediate stepdown.
@@ -158,7 +158,7 @@ Followers connect to the leader's gRPC peer address and open a **bidirectional**
 
 **Catch-up on connect:** when a follower connects, it sends its current revision. The leader replays from that revision using its in-memory ring buffer (`PeerBufferSize` entries, default 10 000). If the follower is too far behind (ring buffer miss), the leader returns `ErrResyncRequired` and the follower restores the latest S3 checkpoint then replays remaining WAL entries from S3.
 
-A full resync can be triggered by three conditions, each tracked in the `strata_follower_resyncs_total` metric:
+A full resync can be triggered by three conditions, each tracked in the `t4_follower_resyncs_total` metric:
 
 | `reason` label | When it fires |
 |---|---|
@@ -172,11 +172,11 @@ A full resync can be triggered by three conditions, each tracked in the `strata_
 
 ## etcd v3 adapter
 
-The `etcd/` package wraps `*strata.Node` with the etcd v3 gRPC server interfaces (`KVServer`, `WatchServer`, `LeaseServer`, `ClusterServer`, `MaintenanceServer`). The standalone binary registers this adapter and serves on the configured `--listen` address.
+The `etcd/` package wraps `*t4.Node` with the etcd v3 gRPC server interfaces (`KVServer`, `WatchServer`, `LeaseServer`, `ClusterServer`, `MaintenanceServer`). The standalone binary registers this adapter and serves on the configured `--listen` address.
 
 Mapping summary:
 
-| etcd operation | Strata call |
+| etcd operation | T4 call |
 |---|---|
 | `Range` (single key) | `node.Get` |
 | `Range` (prefix) | `node.List` filtered by `RangeEnd` |
@@ -197,7 +197,7 @@ Branching lets you fork a database at a checkpoint without copying SST files in 
 ### How it works
 
 1. **Register** — `Fork(ctx, sourceStore, branchID)` reads the latest (or a specified) checkpoint manifest from the source store and writes a `branches/<id>` registry entry to the source store. This entry records the checkpoint key being forked from.
-2. **Start** — Open a new strata node with `BranchPoint{SourceStore, CheckpointKey}`. On first boot, `RestoreBranch` downloads SSTs from the source store and Pebble metadata from the source checkpoint. The branch's own store prefix starts empty.
+2. **Start** — Open a new t4 node with `BranchPoint{SourceStore, CheckpointKey}`. On first boot, `RestoreBranch` downloads SSTs from the source store and Pebble metadata from the source checkpoint. The branch's own store prefix starts empty.
 3. **Diverge** — New SSTs produced by the branch are uploaded to the branch's own prefix. The checkpoint index for the branch records `SSTFiles` (its own SSTs) and `AncestorSSTFiles` (SSTs inherited from the source). Ancestor SSTs are never re-uploaded.
 4. **GC coordination** — The source's GC phase reads the branch registry before deleting anything. `GCCheckpoints` keeps the pinned checkpoint directory (manifest + index) intact even if it falls outside the keep-N window. `GCOrphanSSTs` keeps all SST files referenced by any live branch. Both source checkpoint objects and SSTs are preserved for as long as the branch entry exists.
 5. **Unfork** — `Unfork(ctx, sourceStore, branchID)` removes the registry entry. The next source GC cycle can reclaim SSTs that are no longer referenced by any live checkpoint or branch.

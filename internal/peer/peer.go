@@ -17,7 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/strata-db/strata/internal/wal"
+	"github.com/t4db/t4/internal/wal"
 )
 
 // ── Sentinel errors ───────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ func IsLeaderShutdown(err error) bool {
 //	[revision  : int64  ]  8 bytes
 type Codec struct{}
 
-func (Codec) Name() string { return "strata-bin" }
+func (Codec) Name() string { return "t4-bin" }
 
 func (Codec) Marshal(v interface{}) ([]byte, error) {
 	switch m := v.(type) {

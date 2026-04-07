@@ -10,9 +10,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/strata-db/strata"
-	strataetcd "github.com/strata-db/strata/etcd"
-	"github.com/strata-db/strata/etcd/auth"
+	"github.com/t4db/t4"
+	t4etcd "github.com/t4db/t4/etcd"
+	"github.com/t4db/t4/etcd/auth"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -26,17 +26,17 @@ func (t tokenCreds) GetRequestMetadata(_ context.Context, _ ...string) (map[stri
 }
 func (tokenCreds) RequireTransportSecurity() bool { return false }
 
-func newNode(t *testing.T) *strata.Node {
+func newNode(t *testing.T) *t4.Node {
 	t.Helper()
-	node, err := strata.Open(strata.Config{DataDir: t.TempDir()})
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("strata.Open: %v", err)
+		t.Fatalf("t4.Open: %v", err)
 	}
 	t.Cleanup(func() { node.Close() })
 	return node
 }
 
-func newStore(t *testing.T, node *strata.Node) *auth.Store {
+func newStore(t *testing.T, node *t4.Node) *auth.Store {
 	t.Helper()
 	s, err := auth.NewStore(node)
 	if err != nil {
@@ -47,15 +47,15 @@ func newStore(t *testing.T, node *strata.Node) *auth.Store {
 
 // startServer spins up a gRPC server with auth enabled and returns the listen
 // address.
-func startServer(t *testing.T, node *strata.Node, store *auth.Store, tokens *auth.TokenStore) string {
+func startServer(t *testing.T, node *t4.Node, store *auth.Store, tokens *auth.TokenStore) string {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	opts := strataetcd.NewServerOptions(store, tokens)
+	opts := t4etcd.NewServerOptions(store, tokens)
 	srv := grpc.NewServer(opts...)
-	strataetcd.New(node, store, tokens).Register(srv)
+	t4etcd.New(node, store, tokens).Register(srv)
 	go srv.Serve(lis) //nolint:errcheck
 	t.Cleanup(srv.Stop)
 	return lis.Addr().String()

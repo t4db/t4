@@ -1,6 +1,6 @@
 # Kubernetes Deployment
 
-This guide covers running Strata on Kubernetes — both single-node and multi-node clusters — using raw manifests or the Helm chart.
+This guide covers running T4 on Kubernetes — both single-node and multi-node clusters — using raw manifests or the Helm chart.
 
 ---
 
@@ -16,25 +16,25 @@ This guide covers running Strata on Kubernetes — both single-node and multi-no
 
 ```bash
 # Single node (no S3 — local PVC only)
-helm install strata oci://ghcr.io/strata-db/charts/strata
+helm install t4 oci://ghcr.io/t4db/charts/t4
 
 # Single node with built-in MinIO (easy S3 for dev/CI)
-helm install strata oci://ghcr.io/strata-db/charts/strata \
+helm install t4 oci://ghcr.io/t4db/charts/t4 \
   --set minio.enabled=true
 
 # Single node with AWS S3
-helm install strata oci://ghcr.io/strata-db/charts/strata \
+helm install t4 oci://ghcr.io/t4db/charts/t4 \
   --set s3.bucket=my-bucket \
   --set s3.region=us-east-1
 
 # Three-node cluster
-helm install strata oci://ghcr.io/strata-db/charts/strata \
+helm install t4 oci://ghcr.io/t4db/charts/t4 \
   --set replicaCount=3 \
   --set s3.bucket=my-bucket \
   --set s3.region=us-east-1
 ```
 
-See the [full Kubernetes deployment guide](https://strata-db.github.io/strata/deployment/kubernetes/) for Helm values, TLS, IRSA, Envoy proxy, and MinIO configuration.
+See the [full Kubernetes deployment guide](https://t4db.github.io/t4/deployment/kubernetes/) for Helm values, TLS, IRSA, Envoy proxy, and MinIO configuration.
 
 ---
 
@@ -52,21 +52,21 @@ A single-node setup needs:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: strata
+  name: t4
 spec:
-  serviceName: strata-headless
+  serviceName: t4-headless
   replicas: 1
   selector:
     matchLabels:
-      app: strata
+      app: t4
   template:
     metadata:
       labels:
-        app: strata
+        app: t4
     spec:
       containers:
-        - name: strata
-          image: ghcr.io/strata-db/strata:latest
+        - name: t4
+          image: ghcr.io/t4db/t4:latest
           args:
             - run
             - --data-dir=/data
@@ -79,22 +79,22 @@ spec:
             - name: S3_BUCKET
               valueFrom:
                 configMapKeyRef:
-                  name: strata-config
+                  name: t4-config
                   key: s3_bucket
             - name: S3_PREFIX
               valueFrom:
                 configMapKeyRef:
-                  name: strata-config
+                  name: t4-config
                   key: s3_prefix
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: strata-s3-credentials
+                  name: t4-s3-credentials
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: strata-s3-credentials
+                  name: t4-s3-credentials
                   key: AWS_SECRET_ACCESS_KEY
           ports:
             - name: etcd
@@ -134,10 +134,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: strata
+  name: t4
 spec:
   selector:
-    app: strata
+    app: t4
   ports:
     - name: etcd
       port: 3379
@@ -150,7 +150,7 @@ spec:
 
 A 3-node cluster requires:
 1. A `StatefulSet` with `replicas: 3`.
-2. A **headless** `Service` for peer-to-peer gRPC (stable DNS names: `strata-0.strata-headless`, etc.).
+2. A **headless** `Service` for peer-to-peer gRPC (stable DNS names: `t4-0.t4-headless`, etc.).
 3. A regular `Service` for client access.
 4. Each pod configured with `--peer-listen` and `--advertise-peer` using its own stable DNS name.
 
@@ -158,18 +158,18 @@ A 3-node cluster requires:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: strata
+  name: t4
 spec:
-  serviceName: strata-headless
+  serviceName: t4-headless
   replicas: 3
   podManagementPolicy: Parallel   # start all pods at once; they self-elect
   selector:
     matchLabels:
-      app: strata
+      app: t4
   template:
     metadata:
       labels:
-        app: strata
+        app: t4
     spec:
       affinity:
         podAntiAffinity:
@@ -179,17 +179,17 @@ spec:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
                   matchLabels:
-                    app: strata
+                    app: t4
       containers:
-        - name: strata
-          image: ghcr.io/strata-db/strata:latest
+        - name: t4
+          image: ghcr.io/t4db/t4:latest
           args:
             - run
             - --data-dir=/data
             - --listen=0.0.0.0:3379
             - --peer-listen=0.0.0.0:3380
-            # POD_NAME is injected below; stable DNS: <pod>.strata-headless.<ns>.svc.cluster.local
-            - --advertise-peer=$(POD_NAME).strata-headless.$(NAMESPACE).svc.cluster.local:3380
+            # POD_NAME is injected below; stable DNS: <pod>.t4-headless.<ns>.svc.cluster.local
+            - --advertise-peer=$(POD_NAME).t4-headless.$(NAMESPACE).svc.cluster.local:3380
             - --node-id=$(POD_NAME)
             - --s3-bucket=$(S3_BUCKET)
             - --s3-prefix=$(S3_PREFIX)
@@ -206,22 +206,22 @@ spec:
             - name: S3_BUCKET
               valueFrom:
                 configMapKeyRef:
-                  name: strata-config
+                  name: t4-config
                   key: s3_bucket
             - name: S3_PREFIX
               valueFrom:
                 configMapKeyRef:
-                  name: strata-config
+                  name: t4-config
                   key: s3_prefix
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: strata-s3-credentials
+                  name: t4-s3-credentials
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: strata-s3-credentials
+                  name: t4-s3-credentials
                   key: AWS_SECRET_ACCESS_KEY
           ports:
             - name: etcd
@@ -265,11 +265,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: strata-headless
+  name: t4-headless
 spec:
   clusterIP: None
   selector:
-    app: strata
+    app: t4
   ports:
     - name: peer
       port: 3380
@@ -279,10 +279,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: strata
+  name: t4
 spec:
   selector:
-    app: strata
+    app: t4
   ports:
     - name: etcd
       port: 3379
@@ -293,7 +293,7 @@ spec:
 
 ## IAM / S3 permissions
 
-Strata needs the following S3 permissions on the bucket:
+T4 needs the following S3 permissions on the bucket:
 
 ```json
 {
@@ -306,7 +306,7 @@ Strata needs the following S3 permissions on the bucket:
   ],
   "Resource": [
     "arn:aws:s3:::my-bucket",
-    "arn:aws:s3:::my-bucket/strata/*"
+    "arn:aws:s3:::my-bucket/t4/*"
   ]
 }
 ```
@@ -317,12 +317,12 @@ Strata needs the following S3 permissions on the bucket:
 
 ## Ephemeral pods (no PVC)
 
-If you run pods on ephemeral storage (e.g. spot instances), Strata recovers automatically from S3 on every start. Set `WALSyncUpload=true` (the default for single-node mode) to ensure each acknowledged write is on S3 before returning. In cluster mode, WAL uploads are always async; quorum ACK provides the durability guarantee.
+If you run pods on ephemeral storage (e.g. spot instances), T4 recovers automatically from S3 on every start. Set `WALSyncUpload=true` (the default for single-node mode) to ensure each acknowledged write is on S3 before returning. In cluster mode, WAL uploads are always async; quorum ACK provides the durability guarantee.
 
 ```yaml
 args:
   - run
-  - --data-dir=/tmp/strata   # ephemeral, lost on pod restart
+  - --data-dir=/tmp/t4   # ephemeral, lost on pod restart
   - --wal-sync-upload=true   # only matters for single-node; ignored by cluster leader
 ```
 
@@ -346,7 +346,7 @@ Configure probes with a longer `initialDelaySeconds` on multi-node deployments t
 
 The StatefulSet controller replaces pods one at a time (`updateStrategy: RollingUpdate`). With 3 replicas, quorum (2 nodes) is maintained throughout.
 
-1. Strata detects when its pod is being replaced (graceful termination signal).
+1. T4 detects when its pod is being replaced (graceful termination signal).
 2. If the replaced pod is the leader, it broadcasts a shutdown signal to followers before exiting, triggering immediate re-election (~12 ms failover).
 3. The new pod starts, restores state from S3 or PVC, and joins the cluster.
 
@@ -362,12 +362,12 @@ Expose a `ServiceMonitor` if using the Prometheus Operator:
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: strata
+  name: t4
   namespace: monitoring
 spec:
   selector:
     matchLabels:
-      app: strata
+      app: t4
   endpoints:
     - port: metrics
       interval: 30s

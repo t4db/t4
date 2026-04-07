@@ -1,6 +1,6 @@
 ---
 title: Recipes
-description: Common patterns for using Strata — distributed locks, service discovery, config management, and leader election.
+description: Common patterns for using T4 — distributed locks, service discovery, config management, and leader election.
 ---
 
 ## Distributed lock
@@ -10,10 +10,10 @@ Use `Create` + `Delete` for a simple distributed lock. `Create` fails with `ErrK
 ```go
 const lockKey = "/locks/my-resource"
 
-func acquireLock(ctx context.Context, node *strata.Node, ttl time.Duration) (release func(), err error) {
+func acquireLock(ctx context.Context, node *t4.Node, ttl time.Duration) (release func(), err error) {
     rev, err := node.Create(ctx, lockKey, []byte("locked"), 0)
     if err != nil {
-        if errors.Is(err, strata.ErrKeyExists) {
+        if errors.Is(err, t4.ErrKeyExists) {
             return nil, fmt.Errorf("lock already held")
         }
         return nil, err
@@ -38,13 +38,13 @@ defer release()
 ### Lock with retry
 
 ```go
-func acquireLockWithRetry(ctx context.Context, node *strata.Node, retryInterval time.Duration) (func(), error) {
+func acquireLockWithRetry(ctx context.Context, node *t4.Node, retryInterval time.Duration) (func(), error) {
     for {
         release, err := acquireLock(ctx, node, 0)
         if err == nil {
             return release, nil
         }
-        if !errors.Is(err, strata.ErrKeyExists) {
+        if !errors.Is(err, t4.ErrKeyExists) {
             return nil, err
         }
         select {
@@ -61,13 +61,13 @@ func acquireLockWithRetry(ctx context.Context, node *strata.Node, retryInterval 
 Instead of polling, watch the lock key and retry only when it is released:
 
 ```go
-func acquireLockWatching(ctx context.Context, node *strata.Node) (func(), error) {
+func acquireLockWatching(ctx context.Context, node *t4.Node) (func(), error) {
     for {
         release, err := acquireLock(ctx, node, 0)
         if err == nil {
             return release, nil
         }
-        if !errors.Is(err, strata.ErrKeyExists) {
+        if !errors.Is(err, t4.ErrKeyExists) {
             return nil, err
         }
 
@@ -77,7 +77,7 @@ func acquireLockWatching(ctx context.Context, node *strata.Node) (func(), error)
             return nil, err
         }
         for e := range events {
-            if e.Type == strata.EventDelete {
+            if e.Type == t4.EventDelete {
                 break
             }
         }
@@ -99,13 +99,13 @@ Store service endpoints under a common prefix. Each service writes its own key; 
 ```go
 const servicePrefix = "/services/my-api/"
 
-func register(ctx context.Context, node *strata.Node, instanceID, addr string) error {
+func register(ctx context.Context, node *t4.Node, instanceID, addr string) error {
     key := servicePrefix + instanceID
     _, err := node.Put(ctx, key, []byte(addr), 0)
     return err
 }
 
-func deregister(ctx context.Context, node *strata.Node, instanceID string) error {
+func deregister(ctx context.Context, node *t4.Node, instanceID string) error {
     _, err := node.Delete(ctx, servicePrefix+instanceID)
     return err
 }
@@ -114,7 +114,7 @@ func deregister(ctx context.Context, node *strata.Node, instanceID string) error
 ### Discover
 
 ```go
-func discover(node *strata.Node) ([]string, error) {
+func discover(node *t4.Node) ([]string, error) {
     kvs, err := node.List(servicePrefix)
     if err != nil {
         return nil, err
@@ -130,7 +130,7 @@ func discover(node *strata.Node) ([]string, error) {
 ### Watch for changes
 
 ```go
-func watchRegistry(ctx context.Context, node *strata.Node, onChange func([]string)) error {
+func watchRegistry(ctx context.Context, node *t4.Node, onChange func([]string)) error {
     events, err := node.Watch(ctx, servicePrefix, 0)
     if err != nil {
         return err
@@ -150,7 +150,7 @@ func watchRegistry(ctx context.Context, node *strata.Node, onChange func([]strin
 
 ## Configuration management
 
-Strata is a natural fit for dynamic configuration — store config values as keys, watch for changes, and update in-process without a restart.
+T4 is a natural fit for dynamic configuration — store config values as keys, watch for changes, and update in-process without a restart.
 
 ### Write config
 
@@ -160,7 +160,7 @@ type AppConfig struct {
     MaxConns int    `json:"max_conns"`
 }
 
-func writeConfig(ctx context.Context, node *strata.Node, cfg AppConfig) error {
+func writeConfig(ctx context.Context, node *t4.Node, cfg AppConfig) error {
     b, err := json.Marshal(cfg)
     if err != nil {
         return err
@@ -173,7 +173,7 @@ func writeConfig(ctx context.Context, node *strata.Node, cfg AppConfig) error {
 ### Read config
 
 ```go
-func readConfig(node *strata.Node) (*AppConfig, error) {
+func readConfig(node *t4.Node) (*AppConfig, error) {
     kv, err := node.Get("/config/app")
     if err != nil {
         return nil, err
@@ -189,10 +189,10 @@ func readConfig(node *strata.Node) (*AppConfig, error) {
 ### Hot-reload on change
 
 ```go
-func watchConfig(ctx context.Context, node *strata.Node, apply func(AppConfig)) {
+func watchConfig(ctx context.Context, node *t4.Node, apply func(AppConfig)) {
     events, _ := node.Watch(ctx, "/config/app", 0)
     for e := range events {
-        if e.Type != strata.EventPut {
+        if e.Type != t4.EventPut {
             continue
         }
         var cfg AppConfig
@@ -216,7 +216,7 @@ go watchConfig(ctx, node, func(cfg AppConfig) {
 Use `Update` to increment a counter atomically. `Update` is a compare-and-swap on the key's modification revision — it succeeds only if the revision you read is still current.
 
 ```go
-func increment(ctx context.Context, node *strata.Node, key string) (int64, error) {
+func increment(ctx context.Context, node *t4.Node, key string) (int64, error) {
     for {
         kv, err := node.Get(key)
         if err != nil {
@@ -247,13 +247,13 @@ func increment(ctx context.Context, node *strata.Node, key string) (int64, error
 
 ## Leader election in your application
 
-Use Strata's `Create` + `Watch` to implement leader election for your own application on top of Strata.
+Use T4's `Create` + `Watch` to implement leader election for your own application on top of T4.
 
 ```go
 const electionKey = "/election/my-service"
 
 type Election struct {
-    node     *strata.Node
+    node     *t4.Node
     id       string
     isLeader atomic.Bool
 }
@@ -270,7 +270,7 @@ func (e *Election) Run(ctx context.Context) error {
             e.isLeader.Store(false)
             continue
         }
-        if !errors.Is(err, strata.ErrKeyExists) {
+        if !errors.Is(err, t4.ErrKeyExists) {
             return err
         }
 
@@ -281,7 +281,7 @@ func (e *Election) Run(ctx context.Context) error {
             return err
         }
         for event := range events {
-            if event.Type == strata.EventDelete {
+            if event.Type == t4.EventDelete {
                 break // Leader stepped down — try to acquire.
             }
         }
@@ -328,10 +328,10 @@ kv, err := node.LinearizableGet(ctx, "/data/key")
 
 ## History compaction
 
-Strata keeps the full revision history until you compact. Compact periodically to bound storage growth:
+T4 keeps the full revision history until you compact. Compact periodically to bound storage growth:
 
 ```go
-func compactPeriodically(ctx context.Context, node *strata.Node, interval time.Duration) {
+func compactPeriodically(ctx context.Context, node *t4.Node, interval time.Duration) {
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
     for {

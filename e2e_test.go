@@ -1,4 +1,4 @@
-package strata_test
+package t4_test
 
 import (
 	"bytes"
@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strata-db/strata"
-	"github.com/strata-db/strata/internal/checkpoint"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4"
+	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // snapshotStore wraps MemStore, recording a version ID for every Put so a
@@ -80,7 +80,7 @@ func freeAddrImpl(t testing.TB) string {
 }
 
 // waitForLeaderNode polls until one of the nodes reports IsLeader.
-func waitForLeaderNode(t *testing.T, nodes []*strata.Node, timeout time.Duration) *strata.Node {
+func waitForLeaderNode(t *testing.T, nodes []*t4.Node, timeout time.Duration) *t4.Node {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -99,7 +99,7 @@ func waitForLeaderNode(t *testing.T, nodes []*strata.Node, timeout time.Duration
 
 // TestE2EOffline verifies basic CRUD on a single node with no object store.
 func TestE2EOffline(t *testing.T) {
-	n, err := strata.Open(strata.Config{DataDir: t.TempDir()})
+	n, err := t4.Open(t4.Config{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestE2EOffline(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	_, err = n.Create(ctx, "/e2e/new", []byte("dup"), 0)
-	if err != strata.ErrKeyExists {
+	if err != t4.ErrKeyExists {
 		t.Errorf("second Create: want ErrKeyExists, got %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestE2ESingleNodeS3(t *testing.T) {
 
 	// First run: write data, then close.
 	func() {
-		n, err := strata.Open(strata.Config{
+		n, err := t4.Open(t4.Config{
 			DataDir:            dir,
 			ObjectStore:        store,
 			CheckpointInterval: 24 * time.Hour, // disable auto-checkpoint
@@ -199,7 +199,7 @@ func TestE2ESingleNodeS3(t *testing.T) {
 	}()
 
 	// Second run: reopen and verify all keys survived.
-	n, err := strata.Open(strata.Config{DataDir: dir, ObjectStore: store})
+	n, err := t4.Open(t4.Config{DataDir: dir, ObjectStore: store})
 	if err != nil {
 		t.Fatalf("second open: %v", err)
 	}
@@ -233,11 +233,11 @@ func TestE2EThreeNode(t *testing.T) {
 	store := object.NewMem()
 	const count = 3
 
-	nodes := make([]*strata.Node, count)
+	nodes := make([]*t4.Node, count)
 
 	for i := 0; i < count; i++ {
 		peerAddr := freeAddrImpl(t)
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            t.TempDir(),
 			ObjectStore:        store,
 			NodeID:             fmt.Sprintf("node-%d", i),
@@ -287,7 +287,7 @@ func TestE2EThreeNode(t *testing.T) {
 	}
 
 	// ── write forwarding ──────────────────────────────────────────────────────
-	var follower *strata.Node
+	var follower *t4.Node
 	followerIdx := -1
 	for i, node := range nodes {
 		if node != leader {
@@ -315,7 +315,7 @@ func TestE2EThreeNode(t *testing.T) {
 	t.Logf("closing leader node-%d to trigger failover", leaderIdx)
 	leader.Close()
 
-	survivors := make([]*strata.Node, 0, count-1)
+	survivors := make([]*t4.Node, 0, count-1)
 	for _, nd := range nodes {
 		if nd != leader {
 			survivors = append(survivors, nd)
@@ -355,7 +355,7 @@ func TestRestorePoint(t *testing.T) {
 	ctx := context.Background()
 
 	// Node A: write 5 keys, wait for checkpoint and WAL segment upload.
-	nodeA, err := strata.Open(strata.Config{
+	nodeA, err := t4.Open(t4.Config{
 		DataDir:            dirA,
 		ObjectStore:        store,
 		SegmentMaxAge:      20 * time.Millisecond,
@@ -390,15 +390,15 @@ func TestRestorePoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List wal: %v", err)
 	}
-	walSegs := make([]strata.PinnedObject, 0, len(walKeys))
+	walSegs := make([]t4.PinnedObject, 0, len(walKeys))
 	for _, k := range walKeys {
 		if ver := store.versionOf(k); ver != "" {
-			walSegs = append(walSegs, strata.PinnedObject{Key: k, VersionID: ver})
+			walSegs = append(walSegs, t4.PinnedObject{Key: k, VersionID: ver})
 		}
 	}
-	rp := &strata.RestorePoint{
+	rp := &t4.RestorePoint{
 		Store:             store,
-		CheckpointArchive: strata.PinnedObject{Key: manifest.CheckpointKey, VersionID: store.versionOf(manifest.CheckpointKey)},
+		CheckpointArchive: t4.PinnedObject{Key: manifest.CheckpointKey, VersionID: store.versionOf(manifest.CheckpointKey)},
 		WALSegments:       walSegs,
 	}
 
@@ -414,7 +414,7 @@ func TestRestorePoint(t *testing.T) {
 	// It uses a separate ObjectStore for its own future writes so it doesn't
 	// interfere with node A's prefix.
 	dirB := t.TempDir()
-	nodeB, err := strata.Open(strata.Config{
+	nodeB, err := t4.Open(t4.Config{
 		DataDir:      dirB,
 		ObjectStore:  object.NewMem(),
 		RestorePoint: rp,

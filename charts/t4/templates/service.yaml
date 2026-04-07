@@ -1,0 +1,25 @@
+# Client-facing ClusterIP service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "t4.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "t4.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "t4.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .Values.service.port }}
+      targetPort: client
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP

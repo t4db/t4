@@ -11,24 +11,24 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/strata-db/strata"
-	strataetcd "github.com/strata-db/strata/etcd"
-	"github.com/strata-db/strata/etcd/auth"
+	"github.com/t4db/t4"
+	t4etcd "github.com/t4db/t4/etcd"
+	"github.com/t4db/t4/etcd/auth"
 )
 
 // ── benchmark helpers ─────────────────────────────────────────────────────────
 
-func newBenchNode(b *testing.B) *strata.Node {
+func newBenchNode(b *testing.B) *t4.Node {
 	b.Helper()
-	node, err := strata.Open(strata.Config{DataDir: b.TempDir()})
+	node, err := t4.Open(t4.Config{DataDir: b.TempDir()})
 	if err != nil {
-		b.Fatalf("strata.Open: %v", err)
+		b.Fatalf("t4.Open: %v", err)
 	}
 	b.Cleanup(func() { node.Close() })
 	return node
 }
 
-func newBenchStore(b *testing.B, node *strata.Node) *auth.Store {
+func newBenchStore(b *testing.B, node *t4.Node) *auth.Store {
 	b.Helper()
 	s, err := auth.NewStore(node)
 	if err != nil {
@@ -39,29 +39,29 @@ func newBenchStore(b *testing.B, node *strata.Node) *auth.Store {
 
 // startBenchServer spins up a gRPC server with auth enabled and returns the
 // listen address. Uses *testing.B cleanup for teardown.
-func startBenchServer(b *testing.B, node *strata.Node, store *auth.Store, tokens *auth.TokenStore) string {
+func startBenchServer(b *testing.B, node *t4.Node, store *auth.Store, tokens *auth.TokenStore) string {
 	b.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		b.Fatalf("listen: %v", err)
 	}
-	opts := strataetcd.NewServerOptions(store, tokens)
+	opts := t4etcd.NewServerOptions(store, tokens)
 	srv := grpc.NewServer(opts...)
-	strataetcd.New(node, store, tokens).Register(srv)
+	t4etcd.New(node, store, tokens).Register(srv)
 	go srv.Serve(lis) //nolint:errcheck
 	b.Cleanup(srv.Stop)
 	return lis.Addr().String()
 }
 
 // startBenchServerNoAuth spins up a gRPC server with no auth interceptors.
-func startBenchServerNoAuth(b *testing.B, node *strata.Node) string {
+func startBenchServerNoAuth(b *testing.B, node *t4.Node) string {
 	b.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		b.Fatalf("listen: %v", err)
 	}
 	srv := grpc.NewServer()
-	strataetcd.New(node, nil, nil).Register(srv)
+	t4etcd.New(node, nil, nil).Register(srv)
 	go srv.Serve(lis) //nolint:errcheck
 	b.Cleanup(srv.Stop)
 	return lis.Addr().String()

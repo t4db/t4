@@ -1,6 +1,6 @@
 ---
 title: Docker Compose
-description: Run Strata with Docker Compose — single node, MinIO-backed, and 3-node cluster examples.
+description: Run T4 with Docker Compose — single node, MinIO-backed, and 3-node cluster examples.
 ---
 
 ## Single node, local only
@@ -10,16 +10,16 @@ The simplest setup — no S3, data on a named volume.
 ```yaml
 # compose.yml
 services:
-  strata:
-    image: ghcr.io/strata-db/strata:latest
-    command: run --data-dir /var/lib/strata --listen 0.0.0.0:3379
+  t4:
+    image: ghcr.io/t4db/t4:latest
+    command: run --data-dir /var/lib/t4 --listen 0.0.0.0:3379
     ports:
       - "3379:3379"
     volumes:
-      - strata-data:/var/lib/strata
+      - t4-data:/var/lib/t4
 
 volumes:
-  strata-data:
+  t4-data:
 ```
 
 ```bash
@@ -58,16 +58,16 @@ services:
     entrypoint: >
       /bin/sh -c "
         mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb --ignore-existing local/strata
+        mc mb --ignore-existing local/t4
       "
 
-  strata:
-    image: ghcr.io/strata-db/strata:latest
+  t4:
+    image: ghcr.io/t4db/t4:latest
     command: >
       run
-      --data-dir /var/lib/strata
+      --data-dir /var/lib/t4
       --listen 0.0.0.0:3379
-      --s3-bucket strata
+      --s3-bucket t4
       --s3-prefix data/
       --s3-endpoint http://minio:9000
     environment:
@@ -77,14 +77,14 @@ services:
     ports:
       - "3379:3379"
     volumes:
-      - strata-data:/var/lib/strata
+      - t4-data:/var/lib/t4
     depends_on:
       minio-init:
         condition: service_completed_successfully
 
 volumes:
   minio-data:
-  strata-data:
+  t4-data:
 ```
 
 ---
@@ -93,8 +93,8 @@ volumes:
 
 ```yaml
 # compose.yml
-x-strata-common: &strata-common
-  image: ghcr.io/strata-db/strata:latest
+x-t4-common: &t4-common
+  image: ghcr.io/t4db/t4:latest
   environment:
     AWS_ACCESS_KEY_ID: minioadmin
     AWS_SECRET_ACCESS_KEY: minioadmin
@@ -125,68 +125,68 @@ services:
     entrypoint: >
       /bin/sh -c "
         mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb --ignore-existing local/strata
+        mc mb --ignore-existing local/t4
       "
 
-  strata-0:
-    <<: *strata-common
+  t4-0:
+    <<: *t4-common
     command: >
       run
-      --data-dir /var/lib/strata
+      --data-dir /var/lib/t4
       --listen 0.0.0.0:3379
-      --s3-bucket strata
+      --s3-bucket t4
       --s3-prefix cluster/
       --s3-endpoint http://minio:9000
-      --node-id strata-0
+      --node-id t4-0
       --peer-listen 0.0.0.0:3380
-      --advertise-peer strata-0:3380
+      --advertise-peer t4-0:3380
       --metrics-addr 0.0.0.0:9090
     ports:
       - "3379:3379"
     volumes:
-      - strata-0-data:/var/lib/strata
+      - t4-0-data:/var/lib/t4
 
-  strata-1:
-    <<: *strata-common
+  t4-1:
+    <<: *t4-common
     command: >
       run
-      --data-dir /var/lib/strata
+      --data-dir /var/lib/t4
       --listen 0.0.0.0:3379
-      --s3-bucket strata
+      --s3-bucket t4
       --s3-prefix cluster/
       --s3-endpoint http://minio:9000
-      --node-id strata-1
+      --node-id t4-1
       --peer-listen 0.0.0.0:3380
-      --advertise-peer strata-1:3380
+      --advertise-peer t4-1:3380
       --metrics-addr 0.0.0.0:9090
     ports:
       - "3380:3379"
     volumes:
-      - strata-1-data:/var/lib/strata
+      - t4-1-data:/var/lib/t4
 
-  strata-2:
-    <<: *strata-common
+  t4-2:
+    <<: *t4-common
     command: >
       run
-      --data-dir /var/lib/strata
+      --data-dir /var/lib/t4
       --listen 0.0.0.0:3379
-      --s3-bucket strata
+      --s3-bucket t4
       --s3-prefix cluster/
       --s3-endpoint http://minio:9000
-      --node-id strata-2
+      --node-id t4-2
       --peer-listen 0.0.0.0:3380
-      --advertise-peer strata-2:3380
+      --advertise-peer t4-2:3380
       --metrics-addr 0.0.0.0:9090
     ports:
       - "3381:3379"
     volumes:
-      - strata-2-data:/var/lib/strata
+      - t4-2-data:/var/lib/t4
 
 volumes:
   minio-data:
-  strata-0-data:
-  strata-1-data:
-  strata-2-data:
+  t4-0-data:
+  t4-1-data:
+  t4-2-data:
 ```
 
 ```bash
@@ -203,32 +203,32 @@ etcdctl --endpoints=localhost:3381 get /hello
 ## Build the image locally
 
 ```bash
-git clone https://github.com/strata-db/strata
-cd strata
-docker build -t strata:local .
+git clone https://github.com/t4db/t4
+cd t4
+docker build -t t4:local .
 ```
 
 The Dockerfile produces a minimal distroless image (~10 MB):
 
 ```dockerfile
 FROM golang:1.25-bookworm AS builder
-# ... builds /strata binary with CGO_ENABLED=0
+# ... builds /t4 binary with CGO_ENABLED=0
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=builder /strata /strata
+COPY --from=builder /t4 /t4
 EXPOSE 3379 3380 9090
-ENTRYPOINT ["/strata"]
+ENTRYPOINT ["/t4"]
 CMD ["run"]
 ```
 
-To use your local build, replace `image: ghcr.io/strata-db/strata:latest` with `image: strata:local` in the Compose files above.
+To use your local build, replace `image: ghcr.io/t4db/t4:latest` with `image: t4:local` in the Compose files above.
 
 ---
 
 ## Health checks
 
 ```yaml
-strata:
+t4:
   # ...
   healthcheck:
     test: ["CMD-SHELL", "wget -qO- http://localhost:9090/healthz || exit 1"]

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/strata-db/strata/internal/checkpoint"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/pkg/object"
 )
 
 func TestRegisterUnregisterBranch(t *testing.T) {

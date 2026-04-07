@@ -9,8 +9,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/strata-db/strata"
-	"github.com/strata-db/strata/internal/metrics"
+	"github.com/t4db/t4"
+	"github.com/t4db/t4/internal/metrics"
 )
 
 const (
@@ -25,16 +25,16 @@ const (
 	bcryptCost = bcrypt.DefaultCost
 )
 
-// node is the subset of strata.Node used by Store.
+// node is the subset of t4.Node used by Store.
 type node interface {
 	Put(ctx context.Context, key string, value []byte, lease int64) (int64, error)
-	Get(key string) (*strata.KeyValue, error)
-	List(prefix string) ([]*strata.KeyValue, error)
+	Get(key string) (*t4.KeyValue, error)
+	List(prefix string) ([]*t4.KeyValue, error)
 	Delete(ctx context.Context, key string) (int64, error)
 }
 
 // Store persists auth state (users, roles, enabled flag) in Pebble via a
-// strata Node.  All writes flow through the WAL, so followers stay in sync
+// t4 Node.  All writes flow through the WAL, so followers stay in sync
 // and S3 checkpoints include auth data.
 //
 // Users and roles are also kept in an in-memory map under mu so that

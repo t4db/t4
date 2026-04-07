@@ -1,9 +1,9 @@
 version: "3.8"
 
-# Shared node definition — 5 DB nodes running strata.
+# Shared node definition — 5 DB nodes running t4.
 x-node: &node
   build:
-    context: ..                        # strata repo root (Go source lives here)
+    context: ..                        # t4 repo root (Go source lives here)
     dockerfile: jepsen/node/Dockerfile
   cap_add: [NET_ADMIN, NET_RAW, SYS_PTRACE]
   networks: [jepsen]

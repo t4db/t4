@@ -1,5 +1,5 @@
-# Builds the strata server binary.
-# Run: docker build -t strata .
+# Builds the t4 server binary.
+# Run: docker build -t t4 .
 FROM golang:1.25-bookworm AS builder
 
 WORKDIR /src
@@ -10,8 +10,8 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
       -ldflags="-s -w" \
-      -o /strata \
-      ./cmd/strata
+      -o /t4 \
+      ./cmd/t4
 
 # ── Runtime image ─────────────────────────────────────────────────────────────
 # Alpine is used instead of distroless because the Helm chart builds the
@@ -27,9 +27,9 @@ RUN apk add --no-cache ca-certificates \
 
 USER nonroot
 
-COPY --from=builder /strata /strata
+COPY --from=builder /t4 /t4
 
 EXPOSE 3379 3380 9090
 
-ENTRYPOINT ["/strata"]
+ENTRYPOINT ["/t4"]
 CMD ["run"]

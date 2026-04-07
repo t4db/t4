@@ -1,0 +1,16 @@
+apiVersion: v2
+name: t4
+description: S3-backed distributed key-value store with an etcd-compatible API
+type: application
+version: 0.2.3
+appVersion: "0.12.2"
+keywords:
+  - etcd
+  - kv
+  - kine
+  - distributed
+home: https://github.com/t4db/t4
+sources:
+  - https://github.com/t4db/t4
+maintainers:
+  - name: t4 maintainers

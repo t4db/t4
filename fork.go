@@ -1,11 +1,11 @@
-package strata
+package t4
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/strata-db/strata/internal/checkpoint"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // Fork registers a new branch in sourceStore under branchID, pinning the

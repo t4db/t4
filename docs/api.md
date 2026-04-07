@@ -172,13 +172,13 @@ type RestorePoint struct {
 Set `Config.RestorePoint` to activate:
 
 ```go
-node, err := strata.Open(strata.Config{
-    DataDir:      "/var/lib/strata-branch",
+node, err := t4.Open(t4.Config{
+    DataDir:      "/var/lib/t4-branch",
     ObjectStore:  branchStore,
-    RestorePoint: &strata.RestorePoint{
+    RestorePoint: &t4.RestorePoint{
         Store:             sourceStore,
-        CheckpointArchive: strata.PinnedObject{Key: "...", VersionID: "..."},
-        WALSegments: []strata.PinnedObject{
+        CheckpointArchive: t4.PinnedObject{Key: "...", VersionID: "..."},
+        WALSegments: []t4.PinnedObject{
             {Key: "wal/000042.seg", VersionID: "..."},
         },
     },
@@ -236,13 +236,13 @@ Set `Config.BranchPoint` and `Config.AncestorStore` when starting a branch node 
 sourceStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "prod/"})
 branchStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "branch-a/"})
 
-cpKey, err := strata.Fork(ctx, sourceStore, "branch-a")
+cpKey, err := t4.Fork(ctx, sourceStore, "branch-a")
 
-node, err := strata.Open(strata.Config{
-    DataDir:       "/var/lib/strata-branch-a",
+node, err := t4.Open(t4.Config{
+    DataDir:       "/var/lib/t4-branch-a",
     ObjectStore:   branchStore,
     AncestorStore: sourceStore,
-    BranchPoint: &strata.BranchPoint{
+    BranchPoint: &t4.BranchPoint{
         SourceStore:   sourceStore,
         CheckpointKey: cpKey,
     },
@@ -254,7 +254,7 @@ On first boot the node downloads the SSTs and Pebble metadata from `sourceStore`
 When the branch is no longer needed:
 
 ```go
-if err := strata.Unfork(ctx, sourceStore, "branch-a"); err != nil {
+if err := t4.Unfork(ctx, sourceStore, "branch-a"); err != nil {
     log.Fatal(err)
 }
 ```

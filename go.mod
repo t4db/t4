@@ -1,4 +1,4 @@
-module github.com/strata-db/strata
+module github.com/t4db/t4
 
 go 1.25.1
 

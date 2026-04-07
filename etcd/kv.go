@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/strata-db/strata"
+	"github.com/t4db/t4"
 )
 
 // Range implements KVServer.Range (Get / List).
@@ -19,7 +19,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 
 	// A read is linearizable when the client requests it AND the server is not
 	// configured to force serializable reads.
-	linearizable := !r.Serializable && s.node.ReadConsistency() != strata.ReadConsistencySerializable
+	linearizable := !r.Serializable && s.node.ReadConsistency() != t4.ReadConsistencySerializable
 
 	// Single-key lookup.
 	if rangeEnd == "" {
@@ -28,7 +28,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		}
 		if r.CountOnly {
 			var (
-				kv  *strata.KeyValue
+				kv  *t4.KeyValue
 				err error
 			)
 			if linearizable {
@@ -46,7 +46,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			return &etcdserverpb.RangeResponse{Header: s.header(), Count: count}, nil
 		}
 		var (
-			kv  *strata.KeyValue
+			kv  *t4.KeyValue
 			err error
 		)
 		if linearizable {
@@ -74,7 +74,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 
 	if r.CountOnly {
 		var (
-			all []*strata.KeyValue
+			all []*t4.KeyValue
 			err error
 		)
 		if linearizable {
@@ -97,7 +97,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	}
 
 	var (
-		all []*strata.KeyValue
+		all []*t4.KeyValue
 		err error
 	)
 	if linearizable {
@@ -227,7 +227,7 @@ func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserv
 		}
 		rev, err := s.node.Create(ctx, string(putOp.Key), putOp.Value, putOp.Lease)
 		if err != nil {
-			if errors.Is(err, strata.ErrKeyExists) {
+			if errors.Is(err, t4.ErrKeyExists) {
 				ops, _ := s.execOps(ctx, r.Failure)
 				return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: false, Responses: ops}, nil
 			}

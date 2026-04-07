@@ -4,7 +4,7 @@
  *
  * Identical to the built-in Hero component, with one addition: any
  * action link that starts with "/" is prefixed with BASE_URL so that
- * buttons work correctly on GitHub Pages (base = /strata/) and on a
+ * buttons work correctly on GitHub Pages (base = /t4/) and on a
  * custom domain (base = /) without hardcoding either.
  *
  * We cannot `import Default from '@astrojs/starlight/components/Hero.astro'`
@@ -21,7 +21,7 @@ const { title = data.title, tagline, image, actions = [] } = data.hero || {};
 
 // Prefix absolute internal links with the configured base path so they
 // resolve correctly regardless of where the site is hosted.
-const base = import.meta.env.BASE_URL.replace(/\/$/, ''); // e.g. "/strata" or ""
+const base = import.meta.env.BASE_URL.replace(/\/$/, ''); // e.g. "/t4" or ""
 const patchedActions = actions.map((action) => ({
   ...action,
   link: action.link.startsWith('/') ? base + action.link : action.link,

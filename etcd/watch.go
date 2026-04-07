@@ -8,7 +8,7 @@ import (
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 
-	"github.com/strata-db/strata"
+	"github.com/t4db/t4"
 )
 
 // Watch implements WatchServer.Watch (bidirectional streaming).
@@ -85,7 +85,7 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 
 			go func(watchID int64, startRev int64) {
 				events, err := s.node.Watch(wctx, string(cr.Key), startRev)
-				if errors.Is(err, strata.ErrCompacted) {
+				if errors.Is(err, t4.ErrCompacted) {
 					// Remove the watch first, but do not cancel wctx before sending
 					// the compacted response: that races the select below and can
 					// drop the required canceled notification.

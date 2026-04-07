@@ -1,4 +1,4 @@
-// Package auth implements etcd-compatible authentication and RBAC for Strata.
+// Package auth implements etcd-compatible authentication and RBAC for T4.
 package auth
 
 import "go.etcd.io/etcd/api/v3/authpb"

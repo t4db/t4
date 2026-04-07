@@ -1,4 +1,4 @@
-package strata_test
+package t4_test
 
 import (
 	"context"
@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strata-db/strata"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4"
+	"github.com/t4db/t4/pkg/object"
 )
 
-func openBenchNode(b *testing.B) *strata.Node {
+func openBenchNode(b *testing.B) *t4.Node {
 	b.Helper()
-	n, err := strata.Open(strata.Config{DataDir: b.TempDir()})
+	n, err := t4.Open(t4.Config{DataDir: b.TempDir()})
 	if err != nil {
 		b.Fatalf("Open: %v", err)
 	}
@@ -275,15 +275,15 @@ func BenchmarkGetLinearizableLeader(b *testing.B) {
 
 // openBenchCluster starts a 3-node cluster using an in-memory object store and
 // returns the leader node. All nodes are registered for cleanup.
-func openBenchCluster(b *testing.B) *strata.Node {
+func openBenchCluster(b *testing.B) *t4.Node {
 	b.Helper()
 	store := object.NewMem()
 	ctx := context.Background()
 
-	var nodes [3]*strata.Node
+	var nodes [3]*t4.Node
 	for i := 0; i < 3; i++ {
 		addr := freeBenchAddr(b)
-		n, err := strata.Open(strata.Config{
+		n, err := t4.Open(t4.Config{
 			DataDir:           b.TempDir(),
 			ObjectStore:       store,
 			NodeID:            fmt.Sprintf("bench-%d", i),
@@ -299,7 +299,7 @@ func openBenchCluster(b *testing.B) *strata.Node {
 
 	// Wait for a leader and all followers to be connected.
 	deadline := time.Now().Add(15 * time.Second)
-	var leader *strata.Node
+	var leader *t4.Node
 	for time.Now().Before(deadline) {
 		for _, n := range nodes {
 			if n.IsLeader() {
@@ -365,7 +365,7 @@ func BenchmarkGetLinearizableFollower(b *testing.B) {
 	ctx := context.Background()
 
 	leaderAddr := freeBenchAddr(b)
-	leader, err := strata.Open(strata.Config{
+	leader, err := t4.Open(t4.Config{
 		DataDir:        b.TempDir(),
 		ObjectStore:    store,
 		NodeID:         "bench-leader",
@@ -376,7 +376,7 @@ func BenchmarkGetLinearizableFollower(b *testing.B) {
 	}
 	b.Cleanup(func() { leader.Close() })
 
-	follower, err := strata.Open(strata.Config{
+	follower, err := t4.Open(t4.Config{
 		DataDir:        b.TempDir(),
 		ObjectStore:    store,
 		NodeID:         "bench-follower",
@@ -512,7 +512,7 @@ func BenchmarkWatchScaled(b *testing.B) {
 			b.Cleanup(cancel)
 
 			// Open n watchers on the same prefix so every write fans out to all.
-			channels := make([]<-chan strata.Event, n)
+			channels := make([]<-chan t4.Event, n)
 			for i := 0; i < n; i++ {
 				ch, err := node.Watch(ctx, "/bench/watchscaled/", 0)
 				if err != nil {
@@ -543,7 +543,7 @@ func BenchmarkWatchScaled(b *testing.B) {
 func BenchmarkDatasetSize(b *testing.B) {
 	for _, size := range []int{10_000, 100_000} {
 		size := size
-		populate := func(b *testing.B, node *strata.Node) {
+		populate := func(b *testing.B, node *t4.Node) {
 			b.Helper()
 			ctx := context.Background()
 			const workers = 192

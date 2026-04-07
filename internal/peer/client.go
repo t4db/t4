@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/strata-db/strata/internal/wal"
+	"github.com/t4db/t4/internal/wal"
 )
 
 // FollowerRetryInterval is the backoff between consecutive stream reconnect

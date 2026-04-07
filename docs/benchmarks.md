@@ -1,6 +1,6 @@
-# Benchmark Results: Strata vs etcd
+# Benchmark Results: T4 vs etcd
 
-Head-to-head comparison of a single Strata node against a single etcd node, both running in Docker containers on the
+Head-to-head comparison of a single T4 node against a single etcd node, both running in Docker containers on the
 same host machine.
 
 ## Environment
@@ -10,16 +10,16 @@ same host machine.
 | **Date**             | 2026-04-02                                                           |
 | **Host**             | Apple Silicon Mac (12 vCPUs, 14 GB RAM assigned to Docker)           |
 | **Docker**           | VirtioFS-backed volumes, Linux VM via macOS Virtualization.framework |
-| **Strata**           | local-WAL mode (no S3), Pebble storage, group-commit write pipeline  |
+| **T4**           | local-WAL mode (no S3), Pebble storage, group-commit write pipeline  |
 | **etcd**             | v3.6.4, bbolt storage, 100 ms batch interval (default)               |
-| **Client**           | `stratabench` — etcd v3 Go client, one TCP connection per worker     |
+| **Client**           | `t4bench` — etcd v3 Go client, one TCP connection per worker     |
 | **Ops**              | 5,000 total per workload                                             |
 | **Parallel workers** | 16 (for `par-*` and `mixed` workloads)                               |
 | **Key size**         | 64 bytes                                                             |
 | **Value size**       | 256 bytes                                                            |
 
 > **Note:** All numbers reflect Docker-on-macOS performance. Every `fsync` crosses the macOS → hypervisor → Linux VM
-> boundary, adding 0.2–2 ms of overhead compared to native Linux. Relative comparisons between Strata and etcd are
+> boundary, adding 0.2–2 ms of overhead compared to native Linux. Relative comparisons between T4 and etcd are
 > meaningful; absolute numbers are not representative of production Linux performance.
 
 ---
@@ -28,7 +28,7 @@ same host machine.
 
 ### Single node — no S3 (`single` scenario)
 
-| Workload                        | Strata ops/s | etcd ops/s | Ratio | Strata p50 | etcd p50 |
+| Workload                        | T4 ops/s | etcd ops/s | Ratio | T4 p50 | etcd p50 |
 |---------------------------------|--------------|------------|-------|------------|----------|
 | `seq-put`                       | 800          | 3,272      | 0.24× | 842 µs     | 287 µs   |
 | `par-put` (16 workers)          | 3,116        | 10,018     | 0.31× | 3,079 µs   | 1,574 µs |
@@ -42,7 +42,7 @@ same host machine.
 How `par-put` throughput scales as the number of concurrent clients increases (3,000 ops each, one TCP connection per
 worker):
 
-| Clients | Strata ops/s | etcd ops/s | Ratio     |
+| Clients | T4 ops/s | etcd ops/s | Ratio     |
 |---------|--------------|------------|-----------|
 | 1       | 1,238        | 1,520      | 0.81×     |
 | 2       | 1,415        | 2,224      | 0.64×     |
@@ -52,7 +52,7 @@ worker):
 | 32      | 9,716        | 8,683      | **1.12×** |
 | 64      | 13,739       | 11,040     | **1.24×** |
 
-Strata pulls ahead at 8+ concurrent writers and is **24% faster at 64 writers**.
+T4 pulls ahead at 8+ concurrent writers and is **24% faster at 64 writers**.
 
 ---
 
@@ -63,7 +63,7 @@ Strata pulls ahead at 8+ concurrent writers and is **24% faster at 64 writers**.
 `par-get` throughput is within 2% (18,931 vs 19,252 ops/s). Both systems serve reads from an in-memory page cache (
 Pebble block cache vs bbolt page cache) with no disk I/O on the hot path. The tiny gap is noise.
 
-`seq-get` is slightly slower on Strata (4,353 vs 5,227) because each read goes through the Strata linearizability
+`seq-get` is slightly slower on T4 (4,353 vs 5,227) because each read goes through the T4 linearizability
 layer (ReadIndex check) even on a single-node deployment.
 
 ### Write performance: depends heavily on concurrency
@@ -72,26 +72,26 @@ The write story is nuanced:
 
 **Low concurrency (1–2 writers): etcd wins by ~2×.**
 etcd uses a fixed 100 ms batch window in its raft pipeline. Even with a single serial client, proposals that arrive
-during that window are flushed together in one fsync. With Strata's reactive group-commit, a single serial writer finds
+during that window are flushed together in one fsync. With T4's reactive group-commit, a single serial writer finds
 an empty queue and gets exactly one op per fsync — the full cost every time (~800 µs on this host).
 
 **4 writers: essentially tied** (3,085 vs 3,198 ops/s).
 
-**8+ writers: Strata is faster**, reaching 24% higher throughput at 64 writers (13,739 vs 11,040 ops/s).
+**8+ writers: T4 is faster**, reaching 24% higher throughput at 64 writers (13,739 vs 11,040 ops/s).
 
-The mechanism: Strata's commit loop drains the `writeC` queue and fsyncs whatever is there in one shot, then immediately
+The mechanism: T4's commit loop drains the `writeC` queue and fsyncs whatever is there in one shot, then immediately
 loops. As the number of concurrent writers grows, the queue is always non-empty when the loop wakes, so every fsync
-amortises more ops. At 64 writers the queue effectively never drains, and Strata is doing continuous back-to-back fsyncs
+amortises more ops. At 64 writers the queue effectively never drains, and T4 is doing continuous back-to-back fsyncs
 at maximum batch depth.
 
 etcd's fixed 100 ms window caps the system at ~10 flush cycles per second, regardless of how many ops are waiting. That
 ceiling hurts under high concurrency: even with 64 writers filling the proposal queue, etcd can only commit every 100 ms
-while Strata commits as fast as the disk allows.
+while T4 commits as fast as the disk allows.
 
-**Would adding a time-based batch interval to Strata close the low-concurrency gap?**
+**Would adding a time-based batch interval to T4 close the low-concurrency gap?**
 
 It would close the seq-put gap but destroy the high-concurrency advantage. A 100 ms timer caps throughput at 10
-flushes/s regardless of load — exactly what limits etcd at 64+ writers. Strata's reactive design is intentionally
+flushes/s regardless of load — exactly what limits etcd at 64+ writers. T4's reactive design is intentionally
 unbounded: it's optimal at high concurrency and only costs throughput (not correctness) at low concurrency. Applications
 that care about single-writer throughput should issue writes in larger batches at the client layer.
 
@@ -110,13 +110,13 @@ raw fsync pipeline efficiency:
 - **etcd** uses a raft "ready" loop that can batch multiple proposals into one WAL write even for a single serial
   client (heartbeat entries, internal metadata, and proposals can all coalesce). bbolt appends sequentially to a single
   file.
-- **Strata** uses a reactive commit loop: it blocks until a write arrives, fsyncs the batch, then loops. With one
+- **T4** uses a reactive commit loop: it blocks until a write arrives, fsyncs the batch, then loops. With one
   sequential client there is always exactly one write in the batch. Each op pays the full fsync cost independently.
 
-Adding a time-based batch interval to Strata would **not** close this gap for sequential clients: with one writer
+Adding a time-based batch interval to T4 would **not** close this gap for sequential clients: with one writer
 waiting for the previous ACK before sending the next, the window would still only ever hold one write. The interval only
 helps when multiple concurrent clients would otherwise miss each other between reactive flushes — but at sufficient
-concurrency, Strata's reactive approach already batches optimally (and outperforms etcd at 8+ writers).
+concurrency, T4's reactive approach already batches optimally (and outperforms etcd at 8+ writers).
 
 The correct fix is **WAL fsync pipelining**: accept and begin the next batch while the previous batch's fsync is in
 flight, the same way etcd's raft ready loop does. This would close the single-writer gap without adding artificial
@@ -130,7 +130,7 @@ Here the systems diverge in design:
 two nodes have persisted — the leader's own fsync may still be in progress. This is correct by raft: if the leader
 crashes before its own fsync, the two followers still have the entry.
 
-**Strata** is more conservative: the leader fsyncs to its own WAL *first*, then broadcasts to followers, then waits for
+**T4** is more conservative: the leader fsyncs to its own WAL *first*, then broadcasts to followers, then waits for
 a follower ACK, then responds to the client. Sequential pipeline:
 
 ```
@@ -143,22 +143,22 @@ etcd's pipeline:
 leader WAL write ∥ follower send → quorum ack → client ack
 ```
 
-**Both are equally correct by raft.** Strata's approach is more conservative than raft requires and is the root cause of
-the cluster write latency gap. Making Strata broadcast to followers concurrently with the leader's fsync (as etcd does)
+**Both are equally correct by raft.** T4's approach is more conservative than raft requires and is the root cause of
+the cluster write latency gap. Making T4 broadcast to followers concurrently with the leader's fsync (as etcd does)
 would bring cluster write latency close to single-node latency with no loss of correctness or durability. This is a
 known future optimization.
 
-Strata's watch latency (p50 702 µs) reflects the write path: a Put that triggers a watch event must first fsync to the
+T4's watch latency (p50 702 µs) reflects the write path: a Put that triggers a watch event must first fsync to the
 WAL, then notify the watcher. etcd benefits from the same 100 ms batch amortisation that helps its write throughput.
 
 ### 3-node cluster (`cluster` scenario)
 
-Strata nodes use the default `--wal-sync-upload=true` config, but **the leader always reopens the WAL with async uploads
+T4 nodes use the default `--wal-sync-upload=true` config, but **the leader always reopens the WAL with async uploads
 ** (`becomeLeader` hardcodes this — quorum commit already guarantees durability). etcd uses its normal raft pipeline
 with no external storage. Both systems are on an equal footing for write durability: a quorum-committed write survives
 the loss of any minority of nodes.
 
-| Workload               | Strata ops/s | etcd ops/s | Ratio     | Strata p50 | etcd p50 | Strata p999 | etcd p999  |
+| Workload               | T4 ops/s | etcd ops/s | Ratio     | T4 p50 | etcd p50 | T4 p999 | etcd p999  |
 |------------------------|--------------|------------|-----------|------------|----------|-------------|------------|
 | `seq-put`              | 756          | 1,562      | 0.48×     | 1,270 µs   | 489 µs   | 4,606 µs    | 15,979 µs  |
 | `par-put` (16 workers) | 1,009        | 6,523      | 0.15×     | 26,485 µs  | 4,052 µs | 744,587 µs  | 520,660 µs |
@@ -167,20 +167,20 @@ the loss of any minority of nodes.
 | `mixed` (16 workers)   | 1,780        | 15,587     | 0.11×     | 14,011 µs  | 2,943 µs | 567,557 µs  | 13,965 µs  |
 | `watch`                | 580          | 1,811      | 0.32×     | 1,120 µs   | 511 µs   | 32,045 µs   | 3,825 µs   |
 
-**Read performance is equal or better:** `seq-get` is 46% faster on Strata; `par-get` is within 3% — both are
+**Read performance is equal or better:** `seq-get` is 46% faster on T4; `par-get` is within 3% — both are
 effectively noise.
 
-**Write performance gap is explained by Strata's sequential pipeline.** The leader fsyncs first, then broadcasts to
+**Write performance gap is explained by T4's sequential pipeline.** The leader fsyncs first, then broadcasts to
 followers — more conservative than raft requires. See "Write pipeline architecture and durability guarantees" above.
 This is a known optimization opportunity: broadcasting concurrently with the leader fsync (as etcd does) would close
 most of this gap.
 
-**Strata p999 write latency is better than etcd's** (`seq-put` p999: 4,606 µs vs 15,979 µs) — etcd's tail spikes come
+**T4 p999 write latency is better than etcd's** (`seq-put` p999: 4,606 µs vs 15,979 µs) — etcd's tail spikes come
 from raft leader elections and snapshot transfers.
 
 ### S3 durability overhead (not yet benchmarked)
 
-Strata's `--wal-sync-upload` mode (default for single-node) adds a MinIO/S3 round-trip to every WAL segment seal. This
+T4's `--wal-sync-upload` mode (default for single-node) adds a MinIO/S3 round-trip to every WAL segment seal. This
 is measured in the `single-s3` scenario (results pending). In return, every acknowledged write is durably stored in
 object storage even if the node is destroyed immediately after.
 
@@ -190,13 +190,13 @@ object storage even if the node is destroyed immediately after.
 
 | Use case                                         | Recommendation                                                                              |
 |--------------------------------------------------|---------------------------------------------------------------------------------------------|
-| Read-heavy workloads (caches, service discovery) | Strata equal or faster in both single and cluster                                           |
+| Read-heavy workloads (caches, service discovery) | T4 equal or faster in both single and cluster                                           |
 | Single-writer / low-concurrency writes           | etcd is ~2× faster due to time-based batching                                               |
-| 8+ concurrent writers, single node               | Strata is faster; gap grows to 24% at 64 writers                                            |
-| 3-node cluster, reads                            | Strata equal or faster (+46% seq-get)                                                       |
+| 8+ concurrent writers, single node               | T4 is faster; gap grows to 24% at 64 writers                                            |
+| 3-node cluster, reads                            | T4 equal or faster (+46% seq-get)                                                       |
 | 3-node cluster, writes                           | etcd faster due to concurrent pipeline (see analysis); fixable without correctness tradeoff |
-| Survive total cluster destruction                | Only Strata (`--wal-sync-upload=true`, single-node mode)                                    |
-| Embedded library in a Go binary                  | Only Strata                                                                                 |
+| Survive total cluster destruction                | Only T4 (`--wal-sync-upload=true`, single-node mode)                                    |
+| Embedded library in a Go binary                  | Only T4                                                                                 |
 
 ---
 
@@ -204,15 +204,15 @@ object storage even if the node is destroyed immediately after.
 
 ```bash
 # Build images once
-docker build -f bench/Dockerfile.strata -t strata-bench .
-docker build -f bench/Dockerfile        -t stratabench  .
+docker build -f bench/Dockerfile.t4 -t t4-bench .
+docker build -f bench/Dockerfile        -t t4bench  .
 
 # Start single-node stack
 docker compose -f bench/docker/single/docker-compose.yml --project-name bench-single up -d
 
 # Run a workload (from the host, targeting exposed ports)
-go run ./bench/cmd/stratabench --endpoints localhost:3379 --workload par-put --clients 16 --total 5000 --system strata
-go run ./bench/cmd/stratabench --endpoints localhost:2379 --workload par-put --clients 16 --total 5000 --system etcd
+go run ./bench/cmd/t4bench --endpoints localhost:3379 --workload par-put --clients 16 --total 5000 --system t4
+go run ./bench/cmd/t4bench --endpoints localhost:2379 --workload par-put --clients 16 --total 5000 --system etcd
 
 # Or use the orchestration script for all scenarios + JSONL output
 bash bench/run.sh

@@ -1,11 +1,11 @@
 {
-  "title": "Strata Overview",
-  "uid": "strata-overview",
-  "description": "Cluster health, write performance, replication lag, WAL/checkpoint activity, and S3 object store metrics for a Strata node or cluster.",
+  "title": "T4 Overview",
+  "uid": "t4-overview",
+  "description": "Cluster health, write performance, replication lag, WAL/checkpoint activity, and S3 object store metrics for a T4 node or cluster.",
   "schemaVersion": 38,
   "version": 1,
   "tags": [
-    "strata"
+    "t4"
   ],
   "timezone": "browser",
   "graphTooltip": 1,
@@ -52,11 +52,11 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(strata_current_revision, job)",
+        "definition": "label_values(t4_current_revision, job)",
         "hide": 0,
         "includeAll": false,
         "name": "job",
-        "query": "label_values(strata_current_revision, job)",
+        "query": "label_values(t4_current_revision, job)",
         "refresh": 2,
         "sort": 1,
         "type": "query",
@@ -68,11 +68,11 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(strata_current_revision{job=\"$job\"}, app_kubernetes_io_instance)",
+        "definition": "label_values(t4_current_revision{job=\"$job\"}, app_kubernetes_io_instance)",
         "hide": 0,
         "includeAll": false,
         "name": "cluster",
-        "query": "label_values(strata_current_revision{job=\"$job\"}, app_kubernetes_io_instance)",
+        "query": "label_values(t4_current_revision{job=\"$job\"}, app_kubernetes_io_instance)",
         "refresh": 2,
         "sort": 1,
         "type": "query",
@@ -84,13 +84,13 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(strata_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\"}, instance)",
+        "definition": "label_values(t4_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\"}, instance)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
         "multi": true,
         "name": "instance",
-        "query": "label_values(strata_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\"}, instance)",
+        "query": "label_values(t4_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\"}, instance)",
         "refresh": 2,
         "sort": 1,
         "type": "query",
@@ -128,7 +128,7 @@
       },
       "targets": [
         {
-          "expr": "sum(strata_role{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", role=\"leader\"})",
+          "expr": "sum(t4_role{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", role=\"leader\"})",
           "legendFormat": "leaders",
           "refId": "A"
         }
@@ -221,7 +221,7 @@
       },
       "targets": [
         {
-          "expr": "max(strata_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
+          "expr": "max(t4_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
           "legendFormat": "revision",
           "refId": "A"
         }
@@ -266,7 +266,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (role) (strata_role{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", role!=\"\"})",
+          "expr": "sum by (role) (t4_role{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", role!=\"\"})",
           "legendFormat": "{{role}}",
           "refId": "A"
         }
@@ -319,7 +319,7 @@
       },
       "targets": [
         {
-          "expr": "max(strata_follower_lag_revisions{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}) or vector(0)",
+          "expr": "max(t4_follower_lag_revisions{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}) or vector(0)",
           "legendFormat": "max lag",
           "refId": "A"
         }
@@ -380,7 +380,7 @@
       },
       "targets": [
         {
-          "expr": "increase(strata_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"won\"}[1h])",
+          "expr": "increase(t4_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"won\"}[1h])",
           "legendFormat": "won",
           "refId": "A"
         }
@@ -441,7 +441,7 @@
       },
       "targets": [
         {
-          "expr": "increase(strata_follower_resyncs_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[1h])",
+          "expr": "increase(t4_follower_resyncs_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[1h])",
           "legendFormat": "resyncs",
           "refId": "A"
         }
@@ -505,7 +505,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(strata_compact_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
+          "expr": "max(t4_compact_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
           "refId": "A"
         }
       ],
@@ -547,7 +547,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(increase(strata_wal_gc_segments_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[1h]))",
+          "expr": "sum(increase(t4_wal_gc_segments_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[1h]))",
           "refId": "A"
         }
       ],
@@ -589,7 +589,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(increase(strata_auth_attempts_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=~\"fail|locked\"}[1h]))",
+          "expr": "sum(increase(t4_auth_attempts_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=~\"fail|locked\"}[1h]))",
           "refId": "A"
         }
       ],
@@ -640,7 +640,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -689,7 +689,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_write_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n/ (\n  sum by (op) (rate(strata_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n  + sum by (op) (rate(strata_write_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n)",
+          "expr": "sum by (op) (rate(t4_write_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n/ (\n  sum by (op) (rate(t4_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n  + sum by (op) (rate(t4_write_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n)",
           "legendFormat": "error rate ({{op}})",
           "refId": "A"
         }
@@ -756,17 +756,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -844,7 +844,7 @@
       },
       "targets": [
         {
-          "expr": "strata_follower_lag_revisions{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}",
+          "expr": "t4_follower_lag_revisions{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}",
           "legendFormat": "{{follower_id}}",
           "refId": "A"
         }
@@ -911,7 +911,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_forwarded_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_forwarded_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "forwarded ({{op}})",
           "refId": "A"
         }
@@ -960,17 +960,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -1022,7 +1022,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(strata_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"won\"}[5m])",
+          "expr": "increase(t4_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"won\"}[5m])",
           "legendFormat": "won",
           "refId": "A"
         },
@@ -1031,7 +1031,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(strata_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"lost\"}[5m])",
+          "expr": "increase(t4_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"lost\"}[5m])",
           "legendFormat": "lost",
           "refId": "B"
         }
@@ -1072,7 +1072,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(strata_follower_resyncs_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[5m])",
+          "expr": "increase(t4_follower_resyncs_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[5m])",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -1122,7 +1122,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(strata_wal_uploads_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])) * 60",
+          "expr": "sum(rate(t4_wal_uploads_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])) * 60",
           "legendFormat": "uploads/min",
           "refId": "A"
         }
@@ -1170,7 +1170,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(strata_wal_upload_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])) * 60",
+          "expr": "sum(rate(t4_wal_upload_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])) * 60",
           "legendFormat": "errors/min",
           "refId": "A"
         }
@@ -1219,17 +1219,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -1278,7 +1278,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(strata_checkpoints_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[5m])) * 3600",
+          "expr": "sum(rate(t4_checkpoints_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[5m])) * 3600",
           "legendFormat": "checkpoints/hr",
           "refId": "A"
         }
@@ -1338,7 +1338,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=\"success\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=\"success\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -1387,7 +1387,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=\"error\"}[2m]))\n/ sum by (op) (rate(strata_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=\"error\"}[2m]))\n/ sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -1453,17 +1453,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }

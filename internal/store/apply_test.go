@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/strata-db/strata/internal/wal"
+	"github.com/t4db/t4/internal/wal"
 )
 
 // ── Compaction fixes ─────────────────────────────────────────────────────────

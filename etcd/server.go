@@ -1,4 +1,4 @@
-// Package etcd exposes a strata Node as an etcd v3 gRPC server.
+// Package etcd exposes a t4 Node as an etcd v3 gRPC server.
 //
 // Register wires the KV, Watch, Lease, Cluster, Maintenance, and Auth services
 // onto a *grpc.Server. Any etcd v3 client — etcdctl, go.etcd.io/etcd/client/v3,
@@ -21,13 +21,13 @@ import (
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 
-	"github.com/strata-db/strata"
-	"github.com/strata-db/strata/etcd/auth"
+	"github.com/t4db/t4"
+	"github.com/t4db/t4/etcd/auth"
 )
 
-// Server implements the etcd v3 gRPC protocol on top of a strata Node.
+// Server implements the etcd v3 gRPC protocol on top of a t4 Node.
 type Server struct {
-	node          *strata.Node
+	node          *t4.Node
 	authStore     *auth.Store
 	tokens        *auth.TokenStore
 	leaseLoopOnce sync.Once
@@ -36,7 +36,7 @@ type Server struct {
 // New returns a Server backed by node. When authStore and tokens are non-nil,
 // the Auth gRPC service is registered and RBAC is enforced on all KV/Watch
 // calls.
-func New(node *strata.Node, authStore *auth.Store, tokens *auth.TokenStore) *Server {
+func New(node *t4.Node, authStore *auth.Store, tokens *auth.TokenStore) *Server {
 	s := &Server{node: node, authStore: authStore, tokens: tokens}
 	s.maybeStartLeaseLoop()
 	return s
@@ -86,8 +86,8 @@ func (s *Server) header() *etcdserverpb.ResponseHeader {
 	}
 }
 
-// kvToProto converts a strata KeyValue to the etcd wire format.
-func kvToProto(kv *strata.KeyValue) *mvccpb.KeyValue {
+// kvToProto converts a t4 KeyValue to the etcd wire format.
+func kvToProto(kv *t4.KeyValue) *mvccpb.KeyValue {
 	return &mvccpb.KeyValue{
 		Key:            []byte(kv.Key),
 		Value:          kv.Value,
@@ -98,10 +98,10 @@ func kvToProto(kv *strata.KeyValue) *mvccpb.KeyValue {
 	}
 }
 
-// eventToProto converts a strata watch Event to the etcd mvccpb format.
-func eventToProto(e strata.Event) *mvccpb.Event {
+// eventToProto converts a t4 watch Event to the etcd mvccpb format.
+func eventToProto(e t4.Event) *mvccpb.Event {
 	ev := &mvccpb.Event{Kv: kvToProto(e.KV)}
-	if e.Type == strata.EventDelete {
+	if e.Type == t4.EventDelete {
 		ev.Type = mvccpb.DELETE
 	} else {
 		ev.Type = mvccpb.PUT
@@ -133,7 +133,7 @@ func (s *Server) MemberList(_ context.Context, _ *etcdserverpb.MemberListRequest
 		Header: s.header(),
 		Members: []*etcdserverpb.Member{{
 			ID:   1,
-			Name: "strata",
+			Name: "t4",
 		}},
 	}, nil
 }

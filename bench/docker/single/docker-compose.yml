@@ -1,21 +1,21 @@
-# single — one Strata node (no S3) vs one etcd node.
+# single — one T4 node (no S3) vs one etcd node.
 #
-# Strata runs in local-WAL-only mode: fastest possible configuration but
+# T4 runs in local-WAL-only mode: fastest possible configuration but
 # without remote durability. Compare with single-s3/ for a fair apples-to-
 # apples comparison against etcd's fsync-per-write model.
 #
-# Ports exposed on the host (for local stratabench invocations):
-#   strata  → localhost:3379
+# Ports exposed on the host (for local t4bench invocations):
+#   t4  → localhost:3379
 #   etcd    → localhost:2379
 #
 # Images must be pre-built before running:
-#   docker build -f bench/Dockerfile.strata -t strata-bench .
-#   docker build -f bench/Dockerfile        -t stratabench  .
+#   docker build -f bench/Dockerfile.t4 -t t4-bench .
+#   docker build -f bench/Dockerfile        -t t4bench  .
 
 services:
 
-  strata:
-    image: strata-bench
+  t4:
+    image: t4-bench
     command:
       - run
       - --listen=0.0.0.0:2379
@@ -30,7 +30,7 @@ services:
           cpus: '2'
           memory: 4G
     volumes:
-      - strata-data:/data
+      - t4-data:/data
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
       interval: 5s
@@ -68,9 +68,9 @@ services:
     networks: [bench]
 
   # bench profile: run with
-  #   docker compose --profile bench run --rm bench stratabench [flags]
+  #   docker compose --profile bench run --rm bench t4bench [flags]
   bench:
-    image: stratabench
+    image: t4bench
     profiles: [bench]
     networks: [bench]
 
@@ -78,5 +78,5 @@ networks:
   bench:
 
 volumes:
-  strata-data:
+  t4-data:
   etcd-data:

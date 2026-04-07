@@ -1,6 +1,6 @@
-package strata
+package t4
 
-import "github.com/strata-db/strata/pkg/object"
+import "github.com/t4db/t4/pkg/object"
 
 // PinnedObject identifies a specific version of an object in object storage.
 type PinnedObject struct {

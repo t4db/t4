@@ -1,4 +1,4 @@
-package strata_test
+package t4_test
 
 import (
 	"context"
@@ -7,18 +7,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strata-db/strata"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // checkConsistency verifies that every node in the slice can read all expected
 // keys with the expected values.  It blocks until each node has applied at
 // least minRev or the context expires.
-func checkConsistency(t *testing.T, ctx context.Context, nodes []*strata.Node, prefix string, want map[string]string, minRev int64) {
+func checkConsistency(t *testing.T, ctx context.Context, nodes []*t4.Node, prefix string, want map[string]string, minRev int64) {
 	t.Helper()
 	for i, n := range nodes {
 		if err := n.WaitForRevision(ctx, minRev); err != nil {
-			if errors.Is(err, strata.ErrClosed) {
+			if errors.Is(err, t4.ErrClosed) {
 				// Node was removed during chaos — skip it.
 				continue
 			}
@@ -33,7 +33,7 @@ func checkConsistency(t *testing.T, ctx context.Context, nodes []*strata.Node, p
 		}
 		for key, wantVal := range want {
 			kv, err := n.Get(key)
-			if errors.Is(err, strata.ErrClosed) {
+			if errors.Is(err, t4.ErrClosed) {
 				break // node closed mid-check; skip remaining keys for this node
 			}
 			if err != nil {
@@ -50,7 +50,7 @@ func checkConsistency(t *testing.T, ctx context.Context, nodes []*strata.Node, p
 			}
 		}
 		kvs, err := n.List(prefix)
-		if errors.Is(err, strata.ErrClosed) {
+		if errors.Is(err, t4.ErrClosed) {
 			continue
 		}
 		if err != nil {
@@ -68,10 +68,10 @@ func checkConsistency(t *testing.T, ctx context.Context, nodes []*strata.Node, p
 
 // openClusterNode starts a new cluster node sharing the given object store.
 // The caller is responsible for calling Close.
-func openClusterNode(t testing.TB, store object.Store, id string) *strata.Node {
+func openClusterNode(t testing.TB, store object.Store, id string) *t4.Node {
 	t.Helper()
 	peerAddr := freeAddrImpl(t)
-	n, err := strata.Open(strata.Config{
+	n, err := t4.Open(t4.Config{
 		DataDir:            t.TempDir(),
 		ObjectStore:        store,
 		NodeID:             id,
@@ -112,7 +112,7 @@ func TestScaleDownUpConsistency(t *testing.T) {
 
 	// ── Phase 1: 3-node cluster ───────────────────────────────────────────────
 
-	nodes := make([]*strata.Node, 3)
+	nodes := make([]*t4.Node, 3)
 	for i := 0; i < 3; i++ {
 		nodes[i] = openClusterNode(t, store, fmt.Sprintf("node-%d", i))
 	}
@@ -204,7 +204,7 @@ func TestScaleDownUpConsistency(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 
 	// Verify single-node consistency.
-	checkConsistency(t, ctx, []*strata.Node{leader}, prefix, want, lastRev)
+	checkConsistency(t, ctx, []*t4.Node{leader}, prefix, want, lastRev)
 
 	// ── Phase 4: scale up 1→3 ────────────────────────────────────────────────
 	//
@@ -218,17 +218,17 @@ func TestScaleDownUpConsistency(t *testing.T) {
 	defer rep2.Close()
 
 	t.Log("phase-4: checking consistency across leader + 2 replacement nodes")
-	checkConsistency(t, ctx, []*strata.Node{leader, rep1, rep2}, prefix, want, lastRev)
+	checkConsistency(t, ctx, []*t4.Node{leader, rep1, rep2}, prefix, want, lastRev)
 
 	// ── Phase 5: write via replacement, verify on leader ─────────────────────
 	//
 	// Write through a follower (forwarding) and verify the leader receives it.
 
-	activeLeader := waitForLeaderNode(t, []*strata.Node{leader, rep1, rep2}, 15*time.Second)
-	t.Logf("phase-5 leader: %s", nodeID([]*strata.Node{leader, rep1, rep2}, activeLeader))
+	activeLeader := waitForLeaderNode(t, []*t4.Node{leader, rep1, rep2}, 15*time.Second)
+	t.Logf("phase-5 leader: %s", nodeID([]*t4.Node{leader, rep1, rep2}, activeLeader))
 
-	var aFollower *strata.Node
-	for _, n := range []*strata.Node{leader, rep1, rep2} {
+	var aFollower *t4.Node
+	for _, n := range []*t4.Node{leader, rep1, rep2} {
 		if n != activeLeader {
 			aFollower = n
 			break
@@ -243,11 +243,11 @@ func TestScaleDownUpConsistency(t *testing.T) {
 	want[fwdKey] = "fwd"
 
 	t.Log("phase-5: checking consistency across all 3 nodes after forwarded write")
-	checkConsistency(t, ctx, []*strata.Node{leader, rep1, rep2}, prefix, want, fwdRev)
+	checkConsistency(t, ctx, []*t4.Node{leader, rep1, rep2}, prefix, want, fwdRev)
 }
 
 // nodeID returns a human-readable label for node n within the slice.
-func nodeID(nodes []*strata.Node, n *strata.Node) string {
+func nodeID(nodes []*t4.Node, n *t4.Node) string {
 	for i, nd := range nodes {
 		if nd == n {
 			return fmt.Sprintf("node-%d", i)
@@ -265,7 +265,7 @@ func TestCompactionThenScaleUp(t *testing.T) {
 	defer cancel()
 
 	// Single node with S3.
-	n, err := strata.Open(strata.Config{
+	n, err := t4.Open(t4.Config{
 		DataDir:            t.TempDir(),
 		ObjectStore:        store,
 		CheckpointInterval: 300 * time.Millisecond,
@@ -313,7 +313,7 @@ func TestCompactionThenScaleUp(t *testing.T) {
 	}
 
 	// New node with a fresh data directory; must reconstruct from S3.
-	n2, err := strata.Open(strata.Config{
+	n2, err := t4.Open(t4.Config{
 		DataDir:     t.TempDir(),
 		ObjectStore: store,
 	})
@@ -322,5 +322,5 @@ func TestCompactionThenScaleUp(t *testing.T) {
 	}
 	defer n2.Close()
 
-	checkConsistency(t, ctx, []*strata.Node{n2}, prefix, want, lastRev)
+	checkConsistency(t, ctx, []*t4.Node{n2}, prefix, want, lastRev)
 }

@@ -17,7 +17,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/sirupsen/logrus"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // FormatVersion constants for checkpoint objects.
@@ -152,7 +152,7 @@ func WriteManifest(ctx context.Context, store object.Store, m *Manifest) error {
 // LIST request, keeping the per-checkpoint S3 cost to O(1) GETs regardless of
 // how many SST files have accumulated in the bucket.
 func Write(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision int64, lastWALKey string, ancestorStore object.Store) error {
-	tmpDir, err := os.MkdirTemp("", "strata-checkpoint-*")
+	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
 	if err != nil {
 		return fmt.Errorf("checkpoint: mktemp: %w", err)
 	}
@@ -230,7 +230,7 @@ func Write(ctx context.Context, db *pebble.DB, store object.Store, term uint64, 
 // inheritedRegistry maps Pebble SST filename → s3 key in the ancestor store
 // (for branch nodes); these are recorded as AncestorSSTFiles.
 func WriteWithRegistry(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision int64, lastWALKey string, localRegistry, inheritedRegistry map[string]string) error {
-	tmpDir, err := os.MkdirTemp("", "strata-checkpoint-*")
+	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
 	if err != nil {
 		return fmt.Errorf("checkpoint: mktemp: %w", err)
 	}

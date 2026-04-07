@@ -15,7 +15,7 @@ import (
 	"github.com/johannesboyne/gofakes3"
 	"github.com/johannesboyne/gofakes3/backend/s3mem"
 
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/pkg/object"
 )
 
 const testBucket = "test-bucket"

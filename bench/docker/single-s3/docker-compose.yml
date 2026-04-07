@@ -1,17 +1,17 @@
-# single-s3 — one Strata node (WAL sync-upload to MinIO) vs one etcd node.
+# single-s3 — one T4 node (WAL sync-upload to MinIO) vs one etcd node.
 #
-# Strata uploads every WAL segment to MinIO before ACKing writes
+# T4 uploads every WAL segment to MinIO before ACKing writes
 # (--wal-sync-upload=true), providing comparable remote durability to etcd's
 # fsync-per-write model. Use this scenario for fair throughput/latency
 # comparisons when durability is a requirement.
 #
 # Ports exposed on the host:
-#   strata  → localhost:3379
+#   t4  → localhost:3379
 #   etcd    → localhost:2379
 #
 # Images must be pre-built before running:
-#   docker build -f bench/Dockerfile.strata -t strata-bench .
-#   docker build -f bench/Dockerfile        -t stratabench  .
+#   docker build -f bench/Dockerfile.t4 -t t4-bench .
+#   docker build -f bench/Dockerfile        -t t4bench  .
 
 services:
 
@@ -42,8 +42,8 @@ services:
       "
     networks: [bench]
 
-  strata:
-    image: strata-bench
+  t4:
+    image: t4-bench
     depends_on:
       minio-init:
         condition: service_completed_successfully
@@ -69,7 +69,7 @@ services:
     ports:
       - "3379:2379"
     volumes:
-      - strata-data:/data
+      - t4-data:/data
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
       interval: 5s
@@ -107,7 +107,7 @@ services:
     networks: [bench]
 
   bench:
-    image: stratabench
+    image: t4bench
     profiles: [bench]
     networks: [bench]
 
@@ -115,6 +115,6 @@ networks:
   bench:
 
 volumes:
-  strata-data:
+  t4-data:
   etcd-data:
   minio-data:

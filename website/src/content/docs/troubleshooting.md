@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting
-description: Common Strata errors, diagnostics, and fixes — WAL issues, S3 problems, election failures, and performance.
+description: Common T4 errors, diagnostics, and fixes — WAL issues, S3 problems, election failures, and performance.
 ---
 
 ## Diagnosing a node
@@ -15,23 +15,23 @@ curl http://localhost:9090/readyz    # 200 = ready to serve reads
 ### Inspect Prometheus metrics
 
 ```bash
-curl -s http://localhost:9090/metrics | grep strata_
+curl -s http://localhost:9090/metrics | grep t4_
 ```
 
 Key metrics to check:
 
 | Metric | What it means |
 |---|---|
-| `strata_role{role="leader"}` | 1 if this node is the leader |
-| `strata_current_revision` | Highest applied revision |
-| `strata_wal_upload_errors_total` | Failed S3 WAL uploads (should be 0) |
-| `strata_elections_total{outcome="won"}` | How many elections this node has won |
-| `strata_write_errors_total` | Write errors by operation type |
+| `t4_role{role="leader"}` | 1 if this node is the leader |
+| `t4_current_revision` | Highest applied revision |
+| `t4_wal_upload_errors_total` | Failed S3 WAL uploads (should be 0) |
+| `t4_elections_total{outcome="won"}` | How many elections this node has won |
+| `t4_write_errors_total` | Write errors by operation type |
 
 ### Enable debug logging
 
 ```bash
-strata run ... --log-level debug
+t4 run ... --log-level debug
 ```
 
 Trace-level logging prints every WAL entry, follower ACK, and S3 operation — useful for diagnosing election or replication issues but very verbose in production.
@@ -51,7 +51,7 @@ The node can't reach S3 on startup.
 - Network connectivity from the node to S3
 
 ```bash
-aws s3 ls s3://my-bucket/strata/manifest/
+aws s3 ls s3://my-bucket/t4/manifest/
 ```
 
 ### `data directory not empty but no local manifest`
@@ -61,8 +61,8 @@ You pointed a new node at a data directory that contains a partial or corrupted 
 **Fix:** either clear the data directory and let the node restore from S3, or investigate what's in it:
 
 ```bash
-ls -la /var/lib/strata/
-rm -rf /var/lib/strata/  # wipe and restore from S3 on next start
+ls -la /var/lib/t4/
+rm -rf /var/lib/t4/  # wipe and restore from S3 on next start
 ```
 
 ### Node starts but never becomes ready (`/readyz` returns 503)
@@ -113,14 +113,14 @@ The leader waits for follower ACKs before returning. High inter-node RTT or a sl
 **Check:**
 ```bash
 # Follower applied revision vs leader current revision
-curl -s http://leader:9090/metrics | grep strata_current_revision
-curl -s http://follower:9090/metrics | grep strata_current_revision
+curl -s http://leader:9090/metrics | grep t4_current_revision
+curl -s http://follower:9090/metrics | grep t4_current_revision
 ```
 
 A large gap means the follower is behind. Check:
 - Network RTT between nodes
 - Follower disk throughput (WAL fsync)
-- `strata_wal_upload_errors_total` on followers
+- `t4_wal_upload_errors_total` on followers
 
 ---
 
@@ -128,7 +128,7 @@ A large gap means the follower is behind. Check:
 
 ### Leader keeps changing (frequent elections)
 
-Symptom: `strata_elections_total` counter is incrementing rapidly.
+Symptom: `t4_elections_total` counter is incrementing rapidly.
 
 **Causes:**
 - `LeaderLivenessTTL` is too short relative to `FollowerRetryInterval`
@@ -137,7 +137,7 @@ Symptom: `strata_elections_total` counter is incrementing rapidly.
 
 **Check:**
 ```bash
-curl -s http://any-node:9090/metrics | grep strata_elections_total
+curl -s http://any-node:9090/metrics | grep t4_elections_total
 ```
 
 **Fix:**
@@ -159,11 +159,11 @@ failed to connect to peer: dial tcp node-a:3380: connection refused
 
 ### Split-brain suspected
 
-Strata prevents split-brain via conditional S3 PUT. If you suspect two nodes both believe they are the leader:
+T4 prevents split-brain via conditional S3 PUT. If you suspect two nodes both believe they are the leader:
 
 ```bash
 # Read the current leader lock from S3
-aws s3 cp s3://my-bucket/strata/leader-lock - | jq .
+aws s3 cp s3://my-bucket/t4/leader-lock - | jq .
 ```
 
 The lock contains the current leader's address and `LastSeenNano`. Only one node can own the lock at a time — the one whose conditional PUT succeeded last.
@@ -178,7 +178,7 @@ S3 upload is failing. Writes will stall in single-node sync mode.
 
 **Check:**
 ```bash
-curl -s http://localhost:9090/metrics | grep strata_wal_upload_errors_total
+curl -s http://localhost:9090/metrics | grep t4_wal_upload_errors_total
 ```
 
 Common causes:
@@ -198,8 +198,8 @@ WAL segments accumulate on disk until they're uploaded to S3 and a checkpoint is
 
 **Check:**
 ```bash
-du -sh /var/lib/strata/wal/
-ls /var/lib/strata/wal/ | wc -l
+du -sh /var/lib/t4/wal/
+ls /var/lib/t4/wal/ | wc -l
 ```
 
 **Fix:** restore S3 connectivity. Once uploads resume, segments are deleted after the next checkpoint.
@@ -214,19 +214,19 @@ By default, follower reads use the `Linearizable` consistency mode — the follo
 
 **Check:**
 ```bash
-strata run ... --read-consistency linearizable
+t4 run ... --read-consistency linearizable
 ```
 
 Or in Go:
 ```go
-node, _ := strata.Open(strata.Config{
-    ReadConsistency: strata.ReadConsistencyLinearizable,
+node, _ := t4.Open(t4.Config{
+    ReadConsistency: t4.ReadConsistencyLinearizable,
 })
 ```
 
 ### Key was written but `Get` returns nil
 
-- The key may have been compacted. Check `strata_compact_revision` metric vs the revision of the write.
+- The key may have been compacted. Check `t4_compact_revision` metric vs the revision of the write.
 - If using a follower with `Serializable` consistency, the read may be behind the write.
 - If using `Watch`, the event may have already been processed before the `Get`.
 
@@ -242,7 +242,7 @@ If `WALSyncUpload=false` and the node crashed before the pending WAL segment was
 
 ### Low write throughput (single writer)
 
-Strata's reactive group-commit is optimized for concurrent writers. A single serial writer pays the full WAL fsync cost per write (~8 ms on NVMe).
+T4's reactive group-commit is optimized for concurrent writers. A single serial writer pays the full WAL fsync cost per write (~8 ms on NVMe).
 
 **Options:**
 - Batch writes at the application layer
@@ -257,16 +257,16 @@ Linearizable follower reads require a `ForwardGetRevision` RPC to the leader. La
 
 For workloads that tolerate slightly stale reads, switch to serializable:
 ```bash
-strata run ... --read-consistency serializable
+t4 run ... --read-consistency serializable
 ```
 
 ### Memory usage growing
 
-Strata buffers recent WAL entries in memory for follower catch-up (`PeerBufferSize`, default 10,000 entries). If entries are large, this can use significant memory.
+T4 buffers recent WAL entries in memory for follower catch-up (`PeerBufferSize`, default 10,000 entries). If entries are large, this can use significant memory.
 
 Reduce it:
 ```go
-node, _ := strata.Open(strata.Config{
+node, _ := t4.Open(t4.Config{
     PeerBufferSize: 1000,
 })
 ```

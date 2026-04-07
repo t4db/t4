@@ -12,22 +12,22 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/strata-db/strata"
-	strataetcd "github.com/strata-db/strata/etcd"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4"
+	t4etcd "github.com/t4db/t4/etcd"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 // startEtcdServer starts a gRPC server with the etcd adapter and returns its endpoint.
-func startEtcdServer(tb testing.TB, node *strata.Node) string {
+func startEtcdServer(tb testing.TB, node *t4.Node) string {
 	tb.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		tb.Fatalf("listen: %v", err)
 	}
 	srv := grpc.NewServer()
-	strataetcd.New(node, nil, nil).Register(srv)
+	t4etcd.New(node, nil, nil).Register(srv)
 	go srv.Serve(lis)
 	tb.Cleanup(srv.GracefulStop)
 	return lis.Addr().String()
@@ -63,7 +63,7 @@ func freeAddr(tb testing.TB) string {
 }
 
 // waitForLeader polls until one of the nodes reports IsLeader, then returns it.
-func waitForLeader(t *testing.T, nodes []*strata.Node, timeout time.Duration) *strata.Node {
+func waitForLeader(t *testing.T, nodes []*t4.Node, timeout time.Duration) *t4.Node {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -163,9 +163,9 @@ func basicCRUD(t *testing.T, cli *clientv3.Client) {
 
 // TestE2EOffline verifies a single-node deployment with no object store.
 func TestE2EOffline(t *testing.T) {
-	node, err := strata.Open(strata.Config{DataDir: t.TempDir()})
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("strata.Open: %v", err)
+		t.Fatalf("t4.Open: %v", err)
 	}
 	t.Cleanup(func() { node.Close() })
 
@@ -185,7 +185,7 @@ func TestE2ESingleNodeS3(t *testing.T) {
 
 	// First run: open, write data, close.
 	func() {
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            dir,
 			ObjectStore:        store,
 			CheckpointInterval: 24 * time.Hour, // disable auto-checkpoint
@@ -206,7 +206,7 @@ func TestE2ESingleNodeS3(t *testing.T) {
 	}()
 
 	// Second run: open same dir + same store, verify data survived.
-	node, err := strata.Open(strata.Config{
+	node, err := t4.Open(t4.Config{
 		DataDir:     dir,
 		ObjectStore: store,
 	})
@@ -239,12 +239,12 @@ func TestE2EThreeNode(t *testing.T) {
 	store := object.NewMem()
 	const n = 3
 
-	nodes := make([]*strata.Node, n)
+	nodes := make([]*t4.Node, n)
 	endpoints := make([]string, n)
 
 	for i := 0; i < n; i++ {
 		peerAddr := freeAddr(t)
-		node, err := strata.Open(strata.Config{
+		node, err := t4.Open(t4.Config{
 			DataDir:            t.TempDir(),
 			ObjectStore:        store,
 			NodeID:             fmt.Sprintf("node-%d", i),
@@ -331,7 +331,7 @@ func TestE2EThreeNode(t *testing.T) {
 	leader.Close()
 
 	// Only poll the surviving nodes; the closed node's role doesn't reset.
-	var survivors []*strata.Node
+	var survivors []*t4.Node
 	for _, n := range nodes {
 		if n != leader {
 			survivors = append(survivors, n)
@@ -365,13 +365,13 @@ func TestE2EThreeNode(t *testing.T) {
 
 // ── etcd-protocol benchmarks ──────────────────────────────────────────────────
 //
-// These measure the full stack: etcd v3 client → gRPC → strata etcd adapter →
+// These measure the full stack: etcd v3 client → gRPC → t4 etcd adapter →
 // Node → Pebble.  Numbers are directly comparable to etcd's own benchmarks run
 // with `benchmark --endpoints=... put` / `benchmark get`.
 
-func openBenchSingle(b *testing.B) (*strata.Node, *clientv3.Client) {
+func openBenchSingle(b *testing.B) (*t4.Node, *clientv3.Client) {
 	b.Helper()
-	node, err := strata.Open(strata.Config{DataDir: b.TempDir()})
+	node, err := t4.Open(t4.Config{DataDir: b.TempDir()})
 	if err != nil {
 		b.Fatalf("open: %v", err)
 	}

@@ -1,6 +1,6 @@
-# Strata vs etcd Benchmark
+# T4 vs etcd Benchmark
 
-A self-contained benchmark suite that compares Strata against etcd using the
+A self-contained benchmark suite that compares T4 against etcd using the
 **etcd v3 protocol** — the same wire format both systems speak, measured with
 the same Go client (`clientv3 v3.6.4`).
 
@@ -10,7 +10,7 @@ the same Go client (`clientv3 v3.6.4`).
 |------|---------|
 | Docker | 24+ |
 | Docker Compose plugin | v2.20+ |
-| Go | 1.22+ (only needed to run `stratabench` outside Docker) |
+| Go | 1.22+ (only needed to run `t4bench` outside Docker) |
 
 The benchmark builds everything from source — no pre-built binaries required.
 
@@ -59,13 +59,13 @@ Default: 50 000 ops per workload, 64-byte keys, 256-byte values.
 
 | Service | Image | Notes |
 |---------|-------|-------|
-| Strata | built from source | WAL on local disk only, no S3 |
+| T4 | built from source | WAL on local disk only, no S3 |
 | etcd | `bitnami/etcd:3.6` | single node, default config |
 
-**What it shows:** Raw throughput advantage of Strata's group-commit WAL when
+**What it shows:** Raw throughput advantage of T4's group-commit WAL when
 remote-durability is not required (e.g. ephemeral caches, dev environments).
 
-**Caveat:** Strata's WAL is local-only here. etcd fsyncs to local disk on
+**Caveat:** T4's WAL is local-only here. etcd fsyncs to local disk on
 every write. These are different durability guarantees — see `single-s3` for
 a fairer comparison.
 
@@ -75,27 +75,27 @@ a fairer comparison.
 
 | Service | Image | Notes |
 |---------|-------|-------|
-| Strata | built from source | `--wal-sync-upload=true`, MinIO as S3 |
+| T4 | built from source | `--wal-sync-upload=true`, MinIO as S3 |
 | etcd | `bitnami/etcd:3.6` | single node, default config |
 | MinIO | `minio/minio:latest` | local Docker, S3-compatible |
 
-**What it shows:** Strata with remote durability comparable to etcd's fsync
+**What it shows:** T4 with remote durability comparable to etcd's fsync
 model. Every WAL segment is uploaded to MinIO before the write ACK is returned.
 
 **Caveat:** MinIO runs on the same machine (Docker bridge), so network latency
-is ~sub-millisecond. In a real deployment Strata would upload to S3 over a
+is ~sub-millisecond. In a real deployment T4 would upload to S3 over a
 LAN/WAN, adding 1–20 ms per segment. etcd's fsync latency depends on the
 storage medium (NVMe: ~100 µs, cloud disk: 1–5 ms).
 
 ---
 
-### `cluster` — 3-node Strata vs 3-node etcd Raft
+### `cluster` — 3-node T4 vs 3-node etcd Raft
 
 | Service | Image | Notes |
 |---------|-------|-------|
-| strata{1,2,3} | built from source | WAL + leader election via MinIO |
+| t4{1,2,3} | built from source | WAL + leader election via MinIO |
 | etcd{1,2,3} | `bitnami/etcd:3.6` | standard Raft cluster |
-| MinIO | `minio/minio:latest` | shared S3 for Strata |
+| MinIO | `minio/minio:latest` | shared S3 for T4 |
 
 **What it shows:** End-to-end quorum write throughput and latency for a
 replicated cluster. The benchmark sends to all endpoints; `clientv3` routes
@@ -103,7 +103,7 @@ writes to the current leader automatically for both systems.
 
 **Replication model differences:**
 
-| | Strata | etcd |
+| | T4 | etcd |
 |-|--------|------|
 | Consensus | leader streams WAL; all followers ACK | Raft (quorum = 2/3) |
 | Leader election | S3 object lock | Raft election |
@@ -119,16 +119,16 @@ writes to the current leader automatically for both systems.
 ┌─ Scenario: single ──────────────────────────────────────────────────────────
 │  workload     system     ops/sec    p50 µs    p90 µs    p99 µs   p999 µs
 │ ─────────────────────────────────────────────────────────────────────────
-│  seq-put      strata      14 230       340       520     1 100     4 200
+│  seq-put      t4      14 230       340       520     1 100     4 200
 │               etcd        11 560       430       680     1 350     5 800
-│  par-put      strata      81 400        82       180       620     2 100
+│  par-put      t4      81 400        82       180       620     2 100
 │               etcd        38 200       180       390     1 100     4 700
-│  seq-get      strata      52 000        92       145       380     1 200
+│  seq-get      t4      52 000        92       145       380     1 200
 │               etcd        47 800       102       160       410     1 350
 ...
 ```
 
-- **`par-put` throughput ratio** is the headline number for Strata's
+- **`par-put` throughput ratio** is the headline number for T4's
   group-commit advantage: parallel writers share WAL fsyncs.
 - **`seq-put` difference** shows single-writer overhead (scheduling, gRPC
   framing) — expect <30 % difference.
@@ -137,51 +137,51 @@ writes to the current leader automatically for both systems.
 - High `p999` relative to `p99` is normal — occasional GC pauses or fsync
   outliers; both systems show this pattern.
 
-## Running `stratabench` Manually
+## Running `t4bench` Manually
 
 Build outside Docker (requires Go):
 
 ```bash
-go build -o stratabench ./bench/cmd/stratabench
+go build -o t4bench ./bench/cmd/t4bench
 ```
 
 Run against any etcd-compatible endpoint:
 
 ```bash
-./stratabench \
+./t4bench \
     --endpoints localhost:2379 \
     --workload par-put \
     --clients 16 \
     --total 100000
 
-./stratabench \
+./t4bench \
     --endpoints localhost:3379 \
     --workload par-put \
     --clients 16 \
     --total 100000 \
     --scenario single \
-    --system strata \
+    --system t4 \
     --output jsonl >> results/results.jsonl
 ```
 
 Print a comparison table from a collected JSONL file:
 
 ```bash
-./stratabench compare --results bench/results/results.jsonl
+./t4bench compare --results bench/results/results.jsonl
 ```
 
 ## File Layout
 
 ```
 bench/
-├── cmd/stratabench/main.go   — load generator (workloads + compare command)
+├── cmd/t4bench/main.go   — load generator (workloads + compare command)
 ├── docker/
-│   ├── single/               — 1 Strata + 1 etcd (no S3)
-│   ├── single-s3/            — 1 Strata + MinIO + 1 etcd
-│   └── cluster/              — 3-node Strata + MinIO + 3-node etcd
+│   ├── single/               — 1 T4 + 1 etcd (no S3)
+│   ├── single-s3/            — 1 T4 + MinIO + 1 etcd
+│   └── cluster/              — 3-node T4 + MinIO + 3-node etcd
 ├── results/                  — gitignored; written by run.sh
-├── Dockerfile                — builds stratabench image
-├── Dockerfile.strata         — builds strata-bench image
+├── Dockerfile                — builds t4bench image
+├── Dockerfile.t4         — builds t4-bench image
 ├── run.sh                    — full benchmark orchestration
 └── README.md                 — this file
 ```

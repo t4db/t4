@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strata-db/strata/internal/wal"
+	"github.com/t4db/t4/internal/wal"
 )
 
 // openMem opens an in-memory store and fails the test on error.

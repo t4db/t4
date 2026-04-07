@@ -5,11 +5,11 @@
 The simplest durable deployment. A single node writes WAL segments and checkpoints to S3. If the node is replaced or its disk is lost, it recovers automatically on the next start.
 
 ```bash
-strata run \
-  --data-dir  /var/lib/strata \
+t4 run \
+  --data-dir  /var/lib/t4 \
   --listen    0.0.0.0:3379  \
   --s3-bucket my-bucket     \
-  --s3-prefix strata/
+  --s3-prefix t4/
 ```
 
 AWS credentials are resolved from the standard chain: `AWS_*` environment variables, `~/.aws/credentials`, instance profile (EC2/ECS), workload identity (EKS).
@@ -17,11 +17,11 @@ AWS credentials are resolved from the standard chain: `AWS_*` environment variab
 ### MinIO or other S3-compatible stores
 
 ```bash
-strata run \
-  --data-dir    /var/lib/strata \
+t4 run \
+  --data-dir    /var/lib/t4 \
   --listen      0.0.0.0:3379   \
   --s3-bucket   my-bucket      \
-  --s3-prefix   strata/        \
+  --s3-prefix   t4/        \
   --s3-endpoint http://minio:9000
 ```
 
@@ -40,21 +40,21 @@ All nodes run the same command. At startup they race to acquire the S3 leader lo
 
 ```bash
 # Node A
-strata run \
-  --data-dir       /var/lib/strata     \
+t4 run \
+  --data-dir       /var/lib/t4     \
   --listen         0.0.0.0:3379        \
   --s3-bucket      my-bucket           \
-  --s3-prefix      strata/             \
+  --s3-prefix      t4/             \
   --node-id        node-a              \
   --peer-listen    0.0.0.0:3380        \
   --advertise-peer node-a.internal:3380
 
 # Node B
-strata run \
-  --data-dir       /var/lib/strata     \
+t4 run \
+  --data-dir       /var/lib/t4     \
   --listen         0.0.0.0:3379        \
   --s3-bucket      my-bucket           \
-  --s3-prefix      strata/             \
+  --s3-prefix      t4/             \
   --node-id        node-b              \
   --peer-listen    0.0.0.0:3380        \
   --advertise-peer node-b.internal:3380
@@ -94,11 +94,11 @@ Close the nodes you want to remove. The remaining nodes continue without any con
 Provide a shared CA and a per-node certificate/key pair (all PEM format):
 
 ```bash
-strata run \
+t4 run \
   ... \
-  --peer-tls-ca   /etc/strata/tls/ca.crt  \
-  --peer-tls-cert /etc/strata/tls/node.crt \
-  --peer-tls-key  /etc/strata/tls/node.key
+  --peer-tls-ca   /etc/t4/tls/ca.crt  \
+  --peer-tls-cert /etc/t4/tls/node.crt \
+  --peer-tls-key  /etc/t4/tls/node.key
 ```
 
 Both the leader's gRPC server and the follower's gRPC client use these files. The same CA must be used on all nodes. TLS 1.3 is required; mutual authentication is enforced.
@@ -110,7 +110,7 @@ Pass `credentials.TransportCredentials` directly:
 ```go
 serverCreds, clientCreds, err := buildTLS(caFile, certFile, keyFile)
 
-node, err := strata.Open(strata.Config{
+node, err := t4.Open(t4.Config{
     ...
     PeerServerTLS: serverCreds,
     PeerClientTLS: clientCreds,
@@ -126,17 +126,17 @@ By default the etcd gRPC port (3379) is plaintext. Enable TLS to encrypt traffic
 ### Server-only TLS (encryption, no client cert required)
 
 ```bash
-strata run \
+t4 run \
   ... \
-  --client-tls-cert /etc/strata/tls/server.crt \
-  --client-tls-key  /etc/strata/tls/server.key
+  --client-tls-cert /etc/t4/tls/server.crt \
+  --client-tls-key  /etc/t4/tls/server.key
 ```
 
 Clients connect with TLS but are not required to present a certificate. Use this when clients are etcd-compatible tools or libraries that support TLS but not mTLS.
 
 ```bash
 etcdctl --endpoints=https://localhost:3379 \
-        --cacert /etc/strata/tls/ca.crt \
+        --cacert /etc/t4/tls/ca.crt \
         put /hello world
 ```
 
@@ -145,18 +145,18 @@ etcdctl --endpoints=https://localhost:3379 \
 Add `--client-tls-ca` to require clients to present a certificate signed by the given CA:
 
 ```bash
-strata run \
+t4 run \
   ... \
-  --client-tls-cert /etc/strata/tls/server.crt \
-  --client-tls-key  /etc/strata/tls/server.key \
-  --client-tls-ca   /etc/strata/tls/ca.crt
+  --client-tls-cert /etc/t4/tls/server.crt \
+  --client-tls-key  /etc/t4/tls/server.key \
+  --client-tls-ca   /etc/t4/tls/ca.crt
 ```
 
 ```bash
 etcdctl --endpoints=https://localhost:3379 \
-        --cacert  /etc/strata/tls/ca.crt  \
-        --cert    /etc/strata/tls/client.crt \
-        --key     /etc/strata/tls/client.key \
+        --cacert  /etc/t4/tls/ca.crt  \
+        --cert    /etc/t4/tls/client.crt \
+        --key     /etc/t4/tls/client.key \
         put /hello world
 ```
 
@@ -166,12 +166,12 @@ Client TLS and peer mTLS are independent — each uses its own cert/key/CA and c
 
 ## Authentication and RBAC
 
-Strata implements the etcd v3 Auth API: username/password authentication with bearer tokens, and role-based access control scoped to key prefixes. Auth state (users, roles, enabled flag) is stored in Pebble and flows through the WAL, so it is replicated to followers and included in S3 checkpoints. Bearer tokens are persisted to Pebble and survive node restarts — clients do not need to re-authenticate after a restart.
+T4 implements the etcd v3 Auth API: username/password authentication with bearer tokens, and role-based access control scoped to key prefixes. Auth state (users, roles, enabled flag) is stored in Pebble and flows through the WAL, so it is replicated to followers and included in S3 checkpoints. Bearer tokens are persisted to Pebble and survive node restarts — clients do not need to re-authenticate after a restart.
 
 Enable auth with `--auth-enabled`:
 
 ```bash
-strata run \
+t4 run \
   ... \
   --auth-enabled \
   --token-ttl 300   # bearer token lifetime in seconds (default: 300)
@@ -290,12 +290,12 @@ Keys under the `\x00auth/` prefix are reserved for internal auth storage. Access
 
 ### Rate limiting
 
-To protect against brute-force attacks, Strata enforces a per-username rate limit on failed authentication attempts:
+To protect against brute-force attacks, T4 enforces a per-username rate limit on failed authentication attempts:
 
 - **5 consecutive failures** within a **5-minute window** triggers a **15-minute lockout** for that username.
 - Subsequent `Authenticate` calls during the lockout period return an error without checking the password.
 - The lockout state is in-memory only and resets on node restart (intentional: a restart is already a privileged operation).
-- All authentication outcomes are recorded in the `strata_auth_attempts_total` metric with a `result` label (`success`, `fail`, `locked`).
+- All authentication outcomes are recorded in the `t4_auth_attempts_total` metric with a `result` label (`success`, `fail`, `locked`).
 
 ### Disabling auth
 
@@ -327,7 +327,7 @@ etcdctl --user svc-account:pass get /secrets/key         # PermissionDenied
 ## Observability
 
 ```bash
-strata run --metrics-addr 0.0.0.0:9090 ...
+t4 run --metrics-addr 0.0.0.0:9090 ...
 ```
 
 ### Endpoints
@@ -340,16 +340,16 @@ strata run --metrics-addr 0.0.0.0:9090 ...
 
 ### Inspecting S3 storage state
 
-`strata status` reads directly from S3 (no running node required) and prints the current checkpoint, object counts, and any registered branch forks:
+`t4 status` reads directly from S3 (no running node required) and prints the current checkpoint, object counts, and any registered branch forks:
 
 ```bash
-strata status \
+t4 status \
   --s3-bucket my-bucket \
-  --s3-prefix strata/
+  --s3-prefix t4/
 ```
 
 ```
-S3 status  s3://my-bucket/strata/
+S3 status  s3://my-bucket/t4/
 
 Latest checkpoint
   key:       checkpoint/0000000001/00000000000000000100/manifest.json
@@ -375,7 +375,7 @@ To import it:
 1. In Grafana, go to **Dashboards → Import**.
 2. Upload `grafana-dashboard.json` or paste its contents.
 3. Select your Prometheus datasource when prompted.
-4. Set the **job** variable to match the scrape job name for your Strata instances (default: `strata`).
+4. Set the **job** variable to match the scrape job name for your T4 instances (default: `t4`).
 
 The dashboard contains five sections:
 
@@ -391,23 +391,23 @@ The dashboard contains five sections:
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `strata_writes_total` | counter | `op` | Completed write operations |
-| `strata_write_errors_total` | counter | `op` | Write operations that returned an error |
-| `strata_write_duration_seconds` | histogram | `op` | Write latency (WAL + apply) |
-| `strata_forwarded_writes_total` | counter | `op` | Writes forwarded from follower to leader |
-| `strata_forward_duration_seconds` | histogram | `op` | Forwarded write round-trip latency |
-| `strata_current_revision` | gauge | — | Latest applied revision |
-| `strata_compact_revision` | gauge | — | Compaction watermark |
-| `strata_role` | gauge | `role` | 1 for the active role (`leader`/`follower`/`single`) |
-| `strata_wal_uploads_total` | counter | — | WAL segments successfully uploaded |
-| `strata_wal_upload_errors_total` | counter | — | Failed WAL segment uploads |
-| `strata_wal_upload_duration_seconds` | histogram | — | WAL segment upload latency |
-| `strata_wal_gc_segments_total` | counter | — | WAL segments deleted from S3 after checkpointing |
-| `strata_checkpoints_total` | counter | — | Checkpoints written to S3 |
-| `strata_elections_total` | counter | `outcome` | Election attempts (`won`/`lost`) |
-| `strata_follower_resyncs_total` | counter | `reason` | Full resync events triggered on followers (`behind_leader_start` / `ring_buffer_miss` / `stream_gap`) |
-| `strata_follower_lag_revisions` | gauge | `follower_id` | Revisions the follower is behind the leader (0 = fully caught up); absent when no followers connected |
-| `strata_auth_attempts_total` | counter | `result` | Authentication attempts (`success` / `fail` / `locked`) |
+| `t4_writes_total` | counter | `op` | Completed write operations |
+| `t4_write_errors_total` | counter | `op` | Write operations that returned an error |
+| `t4_write_duration_seconds` | histogram | `op` | Write latency (WAL + apply) |
+| `t4_forwarded_writes_total` | counter | `op` | Writes forwarded from follower to leader |
+| `t4_forward_duration_seconds` | histogram | `op` | Forwarded write round-trip latency |
+| `t4_current_revision` | gauge | — | Latest applied revision |
+| `t4_compact_revision` | gauge | — | Compaction watermark |
+| `t4_role` | gauge | `role` | 1 for the active role (`leader`/`follower`/`single`) |
+| `t4_wal_uploads_total` | counter | — | WAL segments successfully uploaded |
+| `t4_wal_upload_errors_total` | counter | — | Failed WAL segment uploads |
+| `t4_wal_upload_duration_seconds` | histogram | — | WAL segment upload latency |
+| `t4_wal_gc_segments_total` | counter | — | WAL segments deleted from S3 after checkpointing |
+| `t4_checkpoints_total` | counter | — | Checkpoints written to S3 |
+| `t4_elections_total` | counter | `outcome` | Election attempts (`won`/`lost`) |
+| `t4_follower_resyncs_total` | counter | `reason` | Full resync events triggered on followers (`behind_leader_start` / `ring_buffer_miss` / `stream_gap`) |
+| `t4_follower_lag_revisions` | gauge | `follower_id` | Revisions the follower is behind the leader (0 = fully caught up); absent when no followers connected |
+| `t4_auth_attempts_total` | counter | `result` | Authentication attempts (`success` / `fail` / `locked`) |
 
 `op` label values: `put`, `create`, `update`, `delete`, `compact`.
 
@@ -415,8 +415,8 @@ The two object-store metrics cover all S3 operations (WAL upload, checkpoint wri
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `strata_object_store_ops_total` | counter | `op`, `result` | S3 operations by type and outcome (`success`/`error`) |
-| `strata_object_store_duration_seconds` | histogram | `op` | S3 operation latency |
+| `t4_object_store_ops_total` | counter | `op`, `result` | S3 operations by type and outcome (`success`/`error`) |
+| `t4_object_store_duration_seconds` | histogram | `op` | S3 operation latency |
 
 `op` label values for object store: `get`, `put`, `delete`, `delete_many`, `list`, `get_etag`, `put_if_absent`, `put_if_match`.
 
@@ -426,115 +426,115 @@ The rules below cover the most operationally significant failure modes. Tune thr
 
 ```yaml
 groups:
-  - name: strata
+  - name: t4
     rules:
 
       # ── Availability ────────────────────────────────────────────────────────
 
       # No leader in the cluster for > 30 s (election stalled or all nodes down).
-      - alert: StrataMissingLeader
-        expr: sum(strata_role{role="leader"}) == 0
+      - alert: T4MissingLeader
+        expr: sum(t4_role{role="leader"}) == 0
         for: 30s
         labels:
           severity: critical
         annotations:
-          summary: "No Strata leader elected"
+          summary: "No T4 leader elected"
           description: "No node reports role=leader. Check S3 connectivity and peer network."
 
       # More than one leader simultaneously (split-brain — should be impossible,
       # but worth alerting if it ever fires).
-      - alert: StrataSplitBrain
-        expr: sum(strata_role{role="leader"}) > 1
+      - alert: T4SplitBrain
+        expr: sum(t4_role{role="leader"}) > 1
         for: 0s
         labels:
           severity: critical
         annotations:
-          summary: "Multiple Strata leaders detected"
+          summary: "Multiple T4 leaders detected"
 
       # ── Write health ────────────────────────────────────────────────────────
 
       # Write error rate > 1 % over 5 m.
-      - alert: StrataHighWriteErrorRate
+      - alert: T4HighWriteErrorRate
         expr: |
-          rate(strata_write_errors_total[5m])
-          / (rate(strata_writes_total[5m]) + rate(strata_write_errors_total[5m]))
+          rate(t4_write_errors_total[5m])
+          / (rate(t4_writes_total[5m]) + rate(t4_write_errors_total[5m]))
           > 0.01
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Strata write error rate > 1%"
+          summary: "T4 write error rate > 1%"
           description: "{{ $value | humanizePercentage }} of writes are failing on {{ $labels.instance }}."
 
       # p99 write latency > 500 ms (tune for your SLA).
-      - alert: StrataHighWriteLatency
+      - alert: T4HighWriteLatency
         expr: |
           histogram_quantile(0.99,
-            rate(strata_write_duration_seconds_bucket[5m])
+            rate(t4_write_duration_seconds_bucket[5m])
           ) > 0.5
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Strata write p99 latency > 500 ms"
+          summary: "T4 write p99 latency > 500 ms"
 
       # ── WAL / S3 health ─────────────────────────────────────────────────────
 
       # WAL upload errors in the last 5 m.
-      - alert: StrataWALUploadErrors
-        expr: increase(strata_wal_upload_errors_total[5m]) > 0
+      - alert: T4WALUploadErrors
+        expr: increase(t4_wal_upload_errors_total[5m]) > 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Strata WAL upload errors"
+          summary: "T4 WAL upload errors"
           description: "WAL segments are failing to upload to S3. Data durability is degraded."
 
       # S3 error rate > 5 % over 5 m (any operation).
-      - alert: StrataS3ErrorRate
+      - alert: T4S3ErrorRate
         expr: |
-          rate(strata_object_store_ops_total{result="error"}[5m])
-          / rate(strata_object_store_ops_total[5m])
+          rate(t4_object_store_ops_total{result="error"}[5m])
+          / rate(t4_object_store_ops_total[5m])
           > 0.05
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Strata S3 error rate > 5%"
+          summary: "T4 S3 error rate > 5%"
           description: "{{ $value | humanizePercentage }} of S3 calls are failing on {{ $labels.instance }}."
 
       # S3 p95 latency > 5 s (slow S3 hurts WAL uploads and checkpoint restore).
-      - alert: StrataS3HighLatency
+      - alert: T4S3HighLatency
         expr: |
           histogram_quantile(0.95,
-            rate(strata_object_store_duration_seconds_bucket[5m])
+            rate(t4_object_store_duration_seconds_bucket[5m])
           ) > 5
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Strata S3 p95 latency > 5 s"
+          summary: "T4 S3 p95 latency > 5 s"
 
       # ── Replication health ──────────────────────────────────────────────────
 
       # Follower lag > 1000 revisions for > 1 m (follower falling behind).
-      - alert: StrataFollowerLagging
-        expr: strata_follower_lag_revisions > 1000
+      - alert: T4FollowerLagging
+        expr: t4_follower_lag_revisions > 1000
         for: 1m
         labels:
           severity: warning
         annotations:
-          summary: "Strata follower lagging"
+          summary: "T4 follower lagging"
           description: "Follower {{ $labels.follower_id }} is {{ $value }} revisions behind the leader."
 
       # Follower full resync triggered (ring buffer miss or stream gap).
-      - alert: StrataFollowerResync
-        expr: increase(strata_follower_resyncs_total[10m]) > 0
+      - alert: T4FollowerResync
+        expr: increase(t4_follower_resyncs_total[10m]) > 0
         for: 0s
         labels:
           severity: warning
         annotations:
-          summary: "Strata follower triggered a full resync"
+          summary: "T4 follower triggered a full resync"
           description: "Follower fell too far behind and is restoring from checkpoint (reason: {{ $labels.reason }})."
 ```
 
@@ -578,7 +578,7 @@ Write latency is dominated by WAL fsync and is independent of dataset size. Read
 | 10 K keys | ~5.5 ms | ~0.9 µs | all data in memtable / block cache |
 | 100 K keys | ~4.6 ms | ~8.9 µs | some SST reads from disk |
 
-Pebble itself handles datasets in the tens of GB on commodity NVMe. Strata adds no structural limit beyond Pebble's own.
+Pebble itself handles datasets in the tens of GB on commodity NVMe. T4 adds no structural limit beyond Pebble's own.
 
 ### Impact of real-world latency
 
@@ -610,7 +610,7 @@ In cluster mode S3 is disaster-recovery only (both nodes fail simultaneously). W
 
 ### Recovery procedure
 
-On startup, Strata always performs:
+On startup, T4 always performs:
 
 1. Read `manifest/latest` from S3 → get the latest checkpoint key and revision.
 2. If the local Pebble database is absent, restore the checkpoint from S3.
@@ -642,13 +642,13 @@ In single-node mode, each WAL segment is uploaded to S3 synchronously before the
 
 **After any S3 outage — what is safe**
 
-On startup, Strata replays local WAL segments (step 4) before reading from S3, so no write that was fsynced to local disk is lost even if the segment was never uploaded. In cluster mode with multiple survivors, any write that completed quorum ACK across nodes is never lost even if all S3 state is gone.
+On startup, T4 replays local WAL segments (step 4) before reading from S3, so no write that was fsynced to local disk is lost even if the segment was never uploaded. In cluster mode with multiple survivors, any write that completed quorum ACK across nodes is never lost even if all S3 state is gone.
 
 ---
 
 ### Network partitions (cluster mode)
 
-Strata uses S3 as the split-brain arbiter. The leader continuously refreshes a `LastSeenNano` timestamp in the S3 leader lock every `FollowerRetryInterval` (2 s) while followers are disconnected. A follower only promotes itself if it cannot reach the leader **and** the lock is older than `LeaderLivenessTTL` (6 s).
+T4 uses S3 as the split-brain arbiter. The leader continuously refreshes a `LastSeenNano` timestamp in the S3 leader lock every `FollowerRetryInterval` (2 s) while followers are disconnected. A follower only promotes itself if it cannot reach the leader **and** the lock is older than `LeaderLivenessTTL` (6 s).
 
 **Follower partitioned from leader, leader can still reach S3:**
 
@@ -676,14 +676,14 @@ While followers are disconnected, the leader's `WaitForFollowers` returns immedi
 
 ## Restore from checkpoint
 
-`strata restore` lets you inspect available checkpoints and download one to a local data directory so that `strata run` can boot from it.
+`t4 restore` lets you inspect available checkpoints and download one to a local data directory so that `t4 run` can boot from it.
 
 ### Listing checkpoints
 
 ```bash
-strata restore list \
+t4 restore list \
   --s3-bucket my-bucket \
-  --s3-prefix strata/
+  --s3-prefix t4/
 ```
 
 Output:
@@ -698,17 +698,17 @@ checkpoint/0000000001/00000000000000000100/manifest.json                        
 
 ```bash
 # Restore the latest checkpoint (default).
-strata restore checkpoint \
+t4 restore checkpoint \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
-  --data-dir /var/lib/strata-restored
+  --s3-prefix t4/ \
+  --data-dir /var/lib/t4-restored
 
 # Restore a specific earlier revision.
-strata restore checkpoint \
+t4 restore checkpoint \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --checkpoint checkpoint/0000000001/00000000000000000050/manifest.json \
-  --data-dir /var/lib/strata-restored
+  --data-dir /var/lib/t4-restored
 ```
 
 The command downloads all SST files and Pebble metadata to `<data-dir>/db/` and prints a summary:
@@ -718,10 +718,10 @@ Restored checkpoint
   key:       checkpoint/0000000001/00000000000000000050/manifest.json
   revision:  50
   term:      1
-  data-dir:  /var/lib/strata-restored
+  data-dir:  /var/lib/t4-restored
 
 Start the restored node:
-  strata run --data-dir /var/lib/strata-restored [--s3-bucket <new-bucket>] --listen 0.0.0.0:3379
+  t4 run --data-dir /var/lib/t4-restored [--s3-bucket <new-bucket>] --listen 0.0.0.0:3379
 ```
 
 ### Starting the restored node
@@ -730,17 +730,17 @@ After the download, run the node pointing at the prepared data directory:
 
 ```bash
 # Inspect the restored state without connecting to S3 (stays at the restored revision).
-strata run \
-  --data-dir /var/lib/strata-restored \
+t4 run \
+  --data-dir /var/lib/t4-restored \
   --listen   0.0.0.0:3379
 
 # Or write to a separate S3 prefix so the restored node has its own durable history.
 # The node opens the local Pebble database, then replays any WAL segments in
 # <new-prefix> that are newer than the restored revision.
-strata run \
-  --data-dir  /var/lib/strata-restored \
+t4 run \
+  --data-dir  /var/lib/t4-restored \
   --s3-bucket my-bucket \
-  --s3-prefix strata-restored/ \
+  --s3-prefix t4-restored/ \
   --listen    0.0.0.0:3379
 ```
 
@@ -750,26 +750,26 @@ strata run \
 
 ```bash
 # 1. Find the last good checkpoint.
-strata restore list --s3-bucket my-bucket --s3-prefix strata/
+t4 restore list --s3-bucket my-bucket --s3-prefix t4/
 
 # 2. Download it to a local directory.
-strata restore checkpoint \
-  --s3-bucket my-bucket --s3-prefix strata/ \
+t4 restore checkpoint \
+  --s3-bucket my-bucket --s3-prefix t4/ \
   --checkpoint checkpoint/0000000001/00000000000000000050/manifest.json \
-  --data-dir /var/lib/strata-pitr
+  --data-dir /var/lib/t4-pitr
 
 # 3. Start a verification node (no S3 → stays at rev 50).
-strata run --data-dir /var/lib/strata-pitr --listen 0.0.0.0:3380
+t4 run --data-dir /var/lib/t4-pitr --listen 0.0.0.0:3380
 
 # 4. Validate. If correct, promote by starting with a new S3 prefix.
-strata run \
-  --data-dir  /var/lib/strata-pitr \
+t4 run \
+  --data-dir  /var/lib/t4-pitr \
   --s3-bucket my-bucket \
-  --s3-prefix strata-recovered/ \
+  --s3-prefix t4-recovered/ \
   --listen    0.0.0.0:3379
 ```
 
-For zero-copy forking (no SST downloads) use `strata branch fork` instead — see [Branching](#branching).
+For zero-copy forking (no SST downloads) use `t4 branch fork` instead — see [Branching](#branching).
 
 ---
 
@@ -777,12 +777,12 @@ For zero-copy forking (no SST downloads) use `strata branch fork` instead — se
 
 ### Garbage collection
 
-Old checkpoints and WAL segments accumulate in S3 unless explicitly pruned. Run `strata gc` periodically (e.g. daily via cron) to reclaim storage:
+Old checkpoints and WAL segments accumulate in S3 unless explicitly pruned. Run `t4 gc` periodically (e.g. daily via cron) to reclaim storage:
 
 ```bash
-strata gc \
+t4 gc \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --keep 3
 ```
 
@@ -803,11 +803,11 @@ GC complete
 
 #### Branch safety
 
-Before deleting any checkpoint, `strata gc` reads all active branch registrations from the `branches/` prefix of the source store. Any checkpoint pinned by an active branch is skipped unconditionally — even if it falls outside the `--keep` window. The SSTs it references are also excluded from orphan deletion.
+Before deleting any checkpoint, `t4 gc` reads all active branch registrations from the `branches/` prefix of the source store. Any checkpoint pinned by an active branch is skipped unconditionally — even if it falls outside the `--keep` window. The SSTs it references are also excluded from orphan deletion.
 
 The invariant to maintain:
-- Call `strata branch fork` **before** running GC on the source — this writes the registry entry that protects the checkpoint.
-- Call `strata branch unfork` only after the branch node is fully decommissioned — after this, GC is free to reclaim the checkpoint and its SSTs.
+- Call `t4 branch fork` **before** running GC on the source — this writes the registry entry that protects the checkpoint.
+- Call `t4 branch unfork` only after the branch node is fully decommissioned — after this, GC is free to reclaim the checkpoint and its SSTs.
 
 #### Suggested retention policy
 
@@ -818,7 +818,7 @@ The invariant to maintain:
 | Multi-node cluster | 5–10 |
 | Long-lived branches | keep ≥ number of active branches + 3 |
 
-Use `strata status` to check current checkpoint and WAL segment counts before and after running GC.
+Use `t4 status` to check current checkpoint and WAL segment counts before and after running GC.
 
 ---
 
@@ -861,7 +861,7 @@ cluster state: [old, old, old]
 
 ```bash
 # Step 1 — Add node D (new binary, same S3 prefix).
-strata run --node-id node-d ... &
+t4 run --node-id node-d ... &
 
 # Step 2 — Gracefully shut down node A (old binary).
 #           A sends GoodBye; remaining followers elect a new leader from B/C/D.
@@ -881,7 +881,7 @@ A downgrade is safe as long as no checkpoint with `format_version > 1` has been 
 ```bash
 # Replace new nodes with old binary, one at a time — same procedure as upgrade.
 # Verify no format_version > 1 checkpoint exists first:
-strata restore list --s3-bucket my-bucket --s3-prefix strata/
+t4 restore list --s3-bucket my-bucket --s3-prefix t4/
 ```
 
 If a new format version was introduced (e.g., format_version=2), downgrade to the old binary requires restoring from the last format_version=1 checkpoint instead of the latest one.
@@ -902,21 +902,21 @@ Branches let you fork a database at any checkpoint with zero S3 data copies. SST
 ```bash
 # 1. Register the branch against the source store.
 #    Prints the checkpoint key — save it.
-strata branch fork \
+t4 branch fork \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --branch-id my-branch
 
 # Output: checkpoint/0000000001/00000000000000000100/manifest.json
 
 # 2. Start the branch node, pointing it at the source.
-strata run \
-  --data-dir              /var/lib/strata-branch \
+t4 run \
+  --data-dir              /var/lib/t4-branch \
   --listen                0.0.0.0:3379 \
   --s3-bucket             my-bucket \
-  --s3-prefix             strata-branch/ \
+  --s3-prefix             t4-branch/ \
   --branch-source-bucket  my-bucket \
-  --branch-source-prefix  strata/ \
+  --branch-source-prefix  t4/ \
   --branch-checkpoint     checkpoint/0000000001/00000000000000000100/manifest.json
 ```
 
@@ -925,24 +925,24 @@ On first boot the branch node downloads SSTs and Pebble metadata from the source
 ### Creating a branch (Go library)
 
 ```go
-import "github.com/strata-db/strata"
-import "github.com/strata-db/strata/pkg/object"
+import "github.com/t4db/t4"
+import "github.com/t4db/t4/pkg/object"
 
-sourceStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "strata/"})
-branchStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "strata-branch/"})
+sourceStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "t4/"})
+branchStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "t4-branch/"})
 
 // Register and get the checkpoint key.
-cpKey, err := strata.Fork(ctx, sourceStore, "my-branch")
+cpKey, err := t4.Fork(ctx, sourceStore, "my-branch")
 if err != nil {
     log.Fatal(err)
 }
 
 // Start the branch node.
-node, err := strata.Open(strata.Config{
-    DataDir:       "/var/lib/strata-branch",
+node, err := t4.Open(t4.Config{
+    DataDir:       "/var/lib/t4-branch",
     ObjectStore:   branchStore,
     AncestorStore: sourceStore,
-    BranchPoint: &strata.BranchPoint{
+    BranchPoint: &t4.BranchPoint{
         SourceStore:   sourceStore,
         CheckpointKey: cpKey,
     },
@@ -955,15 +955,15 @@ By default `Fork` uses the latest checkpoint. To fork from an earlier revision, 
 
 ```bash
 # CLI
-strata branch fork \
-  --s3-bucket my-bucket --s3-prefix strata/ \
+t4 branch fork \
+  --s3-bucket my-bucket --s3-prefix t4/ \
   --branch-id my-branch \
   --checkpoint checkpoint/0000000001/00000000000000000050/manifest.json
 ```
 
 ```go
 // Go — use the internal package directly for a specific key
-import "github.com/strata-db/strata/internal/checkpoint"
+import "github.com/t4db/t4/internal/checkpoint"
 
 cpKey := "checkpoint/0000000001/00000000000000000050/manifest.json"
 if err := checkpoint.RegisterBranch(ctx, sourceStore, "my-branch", cpKey); err != nil {
@@ -975,14 +975,14 @@ if err := checkpoint.RegisterBranch(ctx, sourceStore, "my-branch", cpKey); err !
 When the branch is no longer needed, unregister it so the source's GC can reclaim unused SSTs:
 
 ```bash
-strata branch unfork \
+t4 branch unfork \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --branch-id my-branch
 ```
 
 ```go
-if err := strata.Unfork(ctx, sourceStore, "my-branch"); err != nil {
+if err := t4.Unfork(ctx, sourceStore, "my-branch"); err != nil {
     log.Fatal(err)
 }
 ```

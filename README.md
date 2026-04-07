@@ -1,14 +1,14 @@
-# Strata
+# T4
 
-[![CI](https://github.com/strata-db/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/strata-db/strata/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/strata-db/strata.svg)](https://pkg.go.dev/github.com/strata-db/strata)
-[![Go Report Card](https://goreportcard.com/badge/github.com/strata-db/strata)](https://goreportcard.com/report/github.com/strata-db/strata)
+[![CI](https://github.com/t4db/t4/actions/workflows/ci.yml/badge.svg)](https://github.com/t4db/t4/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/t4db/t4.svg)](https://pkg.go.dev/github.com/t4db/t4)
+[![Go Report Card](https://goreportcard.com/badge/github.com/t4db/t4)](https://goreportcard.com/report/github.com/t4db/t4)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-strata--db.github.io-green)](https://strata-db.github.io/strata/)
+[![Docs](https://img.shields.io/badge/docs-t4--db.github.io-green)](https://t4db.github.io/t4/)
 
 An embeddable, S3-durable key-value store for Go.
 
-- **Embedded-first** — `strata.Open(cfg)` is the entire API. No sidecar, no daemon.
+- **Embedded-first** — `t4.Open(cfg)` is the entire API. No sidecar, no daemon.
 - **S3-durable** — WAL segments and periodic snapshots are uploaded to S3. A node that loses its disk recovers automatically.
 - **Multi-node** — Leader elected via an S3 lock. Followers stream the WAL in real time and forward writes transparently.
 - **etcd v3 compatible** — The standalone binary speaks the etcd v3 gRPC protocol. Any etcd client works against it unchanged.
@@ -19,10 +19,10 @@ An embeddable, S3-durable key-value store for Go.
 ## Embedded usage
 
 ```go
-import "github.com/strata-db/strata"
+import "github.com/t4db/t4"
 
-node, err := strata.Open(strata.Config{
-    DataDir: "/var/lib/myapp/strata",
+node, err := t4.Open(t4.Config{
+    DataDir: "/var/lib/myapp/t4",
 })
 defer node.Close()
 
@@ -43,14 +43,14 @@ for e := range events {
 import (
     awsconfig "github.com/aws/aws-sdk-go-v2/config"
     "github.com/aws/aws-sdk-go-v2/service/s3"
-    "github.com/strata-db/strata/pkg/object"
+    "github.com/t4db/t4/pkg/object"
 )
 
 awsCfg, _ := awsconfig.LoadDefaultConfig(ctx)
-store := object.NewS3Store(s3.NewFromConfig(awsCfg), "my-bucket", "strata/")
+store := object.NewS3Store(s3.NewFromConfig(awsCfg), "my-bucket", "t4/")
 
-node, err := strata.Open(strata.Config{
-    DataDir:     "/var/lib/myapp/strata",
+node, err := t4.Open(t4.Config{
+    DataDir:     "/var/lib/myapp/t4",
     ObjectStore: store,
 })
 ```
@@ -59,44 +59,44 @@ node, err := strata.Open(strata.Config{
 
 ## Standalone binary
 
-The `strata` binary exposes the etcd v3 gRPC protocol. Use `etcdctl`, the official Go client, or any other etcd v3 compatible tool.
+The `t4` binary exposes the etcd v3 gRPC protocol. Use `etcdctl`, the official Go client, or any other etcd v3 compatible tool.
 
 ```bash
-go install github.com/strata-db/strata/cmd/strata@latest
+go install github.com/t4db/t4/cmd/t4@latest
 
 # Single node, local only
-strata run --data-dir /var/lib/strata --listen 0.0.0.0:3379
+t4 run --data-dir /var/lib/t4 --listen 0.0.0.0:3379
 
 # Single node with S3
-strata run --data-dir /var/lib/strata --listen 0.0.0.0:3379 \
-           --s3-bucket my-bucket --s3-prefix strata/
+t4 run --data-dir /var/lib/t4 --listen 0.0.0.0:3379 \
+           --s3-bucket my-bucket --s3-prefix t4/
 
 # Verify
 etcdctl --endpoints=localhost:3379 put /hello world
 etcdctl --endpoints=localhost:3379 get /hello
 ```
 
-Multi-node and production setup: see [Operations](https://strata-db.github.io/strata/operations/).
+Multi-node and production setup: see [Operations](https://t4db.github.io/t4/operations/).
 
 ---
 
 ## Documentation
 
-Full documentation is available at **[strata-db.github.io/strata](https://strata-db.github.io/strata/)**.
+Full documentation is available at **[t4db.github.io/t4](https://t4db.github.io/t4/)**.
 
 | Document | Contents |
 |---|---|
-| [Getting Started](https://strata-db.github.io/strata/getting-started/) | Quickstart for standalone server and embedded Go library |
+| [Getting Started](https://t4db.github.io/t4/getting-started/) | Quickstart for standalone server and embedded Go library |
 | [API Reference](docs/api.md) | Full Go API — methods, types, errors, branching |
 | [Configuration](docs/configuration.md) | All config fields and CLI flags |
 | [Operations](docs/operations.md) | Multi-node clusters, S3, TLS, authentication, RBAC, observability |
 | [Backup and Restore](docs/backup-restore.md) | Checkpoints, point-in-time restore, branching, retention |
-| [Security](https://strata-db.github.io/strata/security/) | TLS, mTLS, client auth, RBAC setup |
-| [Recipes](https://strata-db.github.io/strata/recipes/) | Distributed locks, service discovery, common patterns |
-| [Kubernetes](https://strata-db.github.io/strata/deployment/kubernetes/) | Helm chart, StatefulSet deployment |
-| [Docker Compose](https://strata-db.github.io/strata/deployment/docker-compose/) | Local, MinIO-backed, and multi-node cluster examples |
+| [Security](https://t4db.github.io/t4/security/) | TLS, mTLS, client auth, RBAC setup |
+| [Recipes](https://t4db.github.io/t4/recipes/) | Distributed locks, service discovery, common patterns |
+| [Kubernetes](https://t4db.github.io/t4/deployment/kubernetes/) | Helm chart, StatefulSet deployment |
+| [Docker Compose](https://t4db.github.io/t4/deployment/docker-compose/) | Local, MinIO-backed, and multi-node cluster examples |
 | [Architecture](docs/architecture.md) | Internals — WAL, checkpoints, leader election, replication |
-| [Benchmarks](docs/benchmarks.md) | Strata vs etcd benchmark results and analysis |
-| [Migrating from etcd](https://strata-db.github.io/strata/etcd-migration/) | Compatibility table and migration steps |
-| [Troubleshooting](https://strata-db.github.io/strata/troubleshooting/) | Diagnostics, debug logging, and common fixes |
-| [FAQ](https://strata-db.github.io/strata/faq/) | Frequently asked questions |
+| [Benchmarks](docs/benchmarks.md) | T4 vs etcd benchmark results and analysis |
+| [Migrating from etcd](https://t4db.github.io/t4/etcd-migration/) | Compatibility table and migration steps |
+| [Troubleshooting](https://t4db.github.io/t4/troubleshooting/) | Diagnostics, debug logging, and common fixes |
+| [FAQ](https://t4db.github.io/t4/faq/) | Frequently asked questions |

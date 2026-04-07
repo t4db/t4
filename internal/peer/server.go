@@ -10,8 +10,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/strata-db/strata/internal/metrics"
-	"github.com/strata-db/strata/internal/wal"
+	"github.com/t4db/t4/internal/metrics"
+	"github.com/t4db/t4/internal/wal"
 )
 
 type WaitMode string

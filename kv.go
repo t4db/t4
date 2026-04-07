@@ -1,5 +1,5 @@
-// Package strata provides an embeddable, S3-durable key-value store.
-package strata
+// Package t4 provides an embeddable, S3-durable key-value store.
+package t4
 
 // KeyValue is a versioned key-value pair.
 type KeyValue struct {

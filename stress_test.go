@@ -1,7 +1,7 @@
-package strata_test
+package t4_test
 
 // TestLongRunningConsistency is a chaos-style stress test that exercises the
-// full lifecycle of a strata cluster:
+// full lifecycle of a t4 cluster:
 //
 //   - Continuous background writes (~10/sec) through any alive node (followers
 //     forward to the leader automatically).
@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strata-db/strata"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4"
+	"github.com/t4db/t4/pkg/object"
 )
 
 func TestLongRunningConsistency(t *testing.T) {
@@ -68,7 +68,7 @@ func TestLongRunningConsistency(t *testing.T) {
 	var writeSeq atomic.Int64
 
 	// ── Writer ────────────────────────────────────────────────────────────────
-	// Writes to a random alive node; strata forwards to the leader so any node
+	// Writes to a random alive node; t4 forwards to the leader so any node
 	// is a valid write target.  Errors during leader transitions are non-fatal.
 	go func() {
 		for time.Now().Before(testEnd) {
@@ -242,13 +242,13 @@ type stressHarness struct {
 	store object.Store
 
 	mu        sync.Mutex
-	nodes     []*strata.Node
+	nodes     []*t4.Node
 	counter   int
 	closingWg sync.WaitGroup // tracks async Close goroutines from removeRandom
 }
 
 // addNode opens a fresh node and adds it to the pool.
-func (h *stressHarness) addNode() *strata.Node {
+func (h *stressHarness) addNode() *t4.Node {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.counter++
@@ -291,17 +291,17 @@ func (h *stressHarness) nodeCount() int {
 }
 
 // aliveNodes returns a point-in-time snapshot of the current node pool.
-func (h *stressHarness) aliveNodes() []*strata.Node {
+func (h *stressHarness) aliveNodes() []*t4.Node {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make([]*strata.Node, len(h.nodes))
+	out := make([]*t4.Node, len(h.nodes))
 	copy(out, h.nodes)
 	return out
 }
 
-// pickNode returns a random alive node.  Strata forwards writes from followers
+// pickNode returns a random alive node.  T4 forwards writes from followers
 // to the leader, so any node is a valid write target.
-func (h *stressHarness) pickNode() *strata.Node {
+func (h *stressHarness) pickNode() *t4.Node {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.nodes) == 0 {
@@ -312,7 +312,7 @@ func (h *stressHarness) pickNode() *strata.Node {
 
 // findLeader returns the node that currently believes itself to be leader,
 // or nil if no leader is elected at the moment.
-func (h *stressHarness) findLeader() *strata.Node {
+func (h *stressHarness) findLeader() *t4.Node {
 	for _, n := range h.aliveNodes() {
 		if n.IsLeader() {
 			return n
@@ -324,7 +324,7 @@ func (h *stressHarness) findLeader() *strata.Node {
 // closeAll shuts down every node left in the pool.
 func (h *stressHarness) closeAll() {
 	h.mu.Lock()
-	nodes := make([]*strata.Node, len(h.nodes))
+	nodes := make([]*t4.Node, len(h.nodes))
 	copy(nodes, h.nodes)
 	h.nodes = nil
 	h.mu.Unlock()

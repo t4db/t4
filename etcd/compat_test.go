@@ -1,7 +1,7 @@
 package etcd_test
 
 // compat_test.go mirrors the applicable subset of etcd's integration tests
-// (go.etcd.io/etcd/tests/v3/integration/clientv3) against strata's etcd adapter.
+// (go.etcd.io/etcd/tests/v3/integration/clientv3) against t4's etcd adapter.
 //
 // Unsupported / out-of-scope features that are intentionally skipped:
 //   - Historical Gets with WithRev (point-in-time reads)
@@ -18,16 +18,16 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/strata-db/strata"
+	"github.com/t4db/t4"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func newCompatNode(t *testing.T) (*strata.Node, *clientv3.Client) {
+func newCompatNode(t *testing.T) (*t4.Node, *clientv3.Client) {
 	t.Helper()
-	node, err := strata.Open(strata.Config{DataDir: t.TempDir()})
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("strata.Open: %v", err)
+		t.Fatalf("t4.Open: %v", err)
 	}
 	t.Cleanup(func() { node.Close() })
 	endpoint := startEtcdServer(t, node)
@@ -177,7 +177,7 @@ func TestCompatKVGetLimit(t *testing.T) {
 	if len(resp.Kvs) != 3 {
 		t.Errorf("want 3 kvs, got %d", len(resp.Kvs))
 	}
-	// Note: strata does not set the More flag in paginated responses.
+	// Note: t4 does not set the More flag in paginated responses.
 }
 
 // TestCompatKVGetSortedAscend verifies ascending key order from WithPrefix.
@@ -456,7 +456,7 @@ func TestCompatLeaseGrantAttachTTL(t *testing.T) {
 		t.Fatalf("Get all keys: %v", err)
 	}
 	for _, kv := range getResp.Kvs {
-		if strings.HasPrefix(string(kv.Key), "\x00strata/") {
+		if strings.HasPrefix(string(kv.Key), "\x00t4/") {
 			t.Fatalf("internal key leaked through etcd API: %q", kv.Key)
 		}
 	}

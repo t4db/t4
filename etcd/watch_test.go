@@ -10,7 +10,7 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/strata-db/strata"
+	"github.com/t4db/t4"
 )
 
 // ── Watch unit tests ──────────────────────────────────────────────────────────
@@ -332,13 +332,13 @@ func TestWatchKubeLikeCompactionRecovery(t *testing.T) {
 	}
 }
 
-// newWatchNode opens a strata.Node and an etcd client. Returns both so tests
+// newWatchNode opens a t4.Node and an etcd client. Returns both so tests
 // can write to the node directly.
-func newWatchNode(t *testing.T) (*strata.Node, *clientv3.Client) {
+func newWatchNode(t *testing.T) (*t4.Node, *clientv3.Client) {
 	t.Helper()
-	node, err := strata.Open(strata.Config{DataDir: t.TempDir()})
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("strata.Open: %v", err)
+		t.Fatalf("t4.Open: %v", err)
 	}
 	t.Cleanup(func() { node.Close() })
 	endpoint := startEtcdServer(t, node)

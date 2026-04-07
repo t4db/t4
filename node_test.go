@@ -1,4 +1,4 @@
-package strata_test
+package t4_test
 
 import (
 	"context"
@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strata-db/strata"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // openNode starts a Node with an in-memory object store and a temp data dir.
-func openNode(t *testing.T) *strata.Node {
+func openNode(t *testing.T) *t4.Node {
 	t.Helper()
-	n, err := strata.Open(strata.Config{
+	n, err := t4.Open(t4.Config{
 		DataDir:     t.TempDir(),
 		ObjectStore: object.NewMem(),
 	})
@@ -115,7 +115,7 @@ func TestNodeCreateExisting(t *testing.T) {
 	n.Create(c, "k", []byte("v"), 0)
 
 	_, err := n.Create(c, "k", []byte("v2"), 0)
-	if !errors.Is(err, strata.ErrKeyExists) {
+	if !errors.Is(err, t4.ErrKeyExists) {
 		t.Errorf("expected ErrKeyExists, got %v", err)
 	}
 
@@ -291,7 +291,7 @@ func TestNodeWatch(t *testing.T) {
 	}()
 
 	wantKeys := []string{"/w/a", "/w/b", "/w/a"}
-	wantTypes := []strata.EventType{strata.EventPut, strata.EventPut, strata.EventDelete}
+	wantTypes := []t4.EventType{t4.EventPut, t4.EventPut, t4.EventDelete}
 
 	for i := 0; i < 3; i++ {
 		select {
@@ -364,13 +364,13 @@ func TestWatchCompactedRevisionReturnsError(t *testing.T) {
 
 	// startRev=1 is inside the compacted range → ErrCompacted.
 	_, err := n.Watch(c, "k", 1)
-	if !errors.Is(err, strata.ErrCompacted) {
+	if !errors.Is(err, t4.ErrCompacted) {
 		t.Errorf("Watch from deeply compacted rev: want ErrCompacted, got %v", err)
 	}
 
 	// startRev=3 is the compact boundary itself; etcd semantics require ErrCompacted.
 	_, err = n.Watch(c, "k", 3)
-	if !errors.Is(err, strata.ErrCompacted) {
+	if !errors.Is(err, t4.ErrCompacted) {
 		t.Errorf("Watch from compact watermark (startRev=compactRev): want ErrCompacted, got %v", err)
 	}
 
@@ -407,10 +407,10 @@ func TestRevisionMonotonicity(t *testing.T) {
 func TestNodeRestart(t *testing.T) {
 	dir := t.TempDir()
 	obj := object.NewMem()
-	cfg := strata.Config{DataDir: dir, ObjectStore: obj}
+	cfg := t4.Config{DataDir: dir, ObjectStore: obj}
 
 	// First open: write some data.
-	n, err := strata.Open(cfg)
+	n, err := t4.Open(cfg)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestNodeRestart(t *testing.T) {
 	n.Close()
 
 	// Second open: state must survive.
-	n2, err := strata.Open(cfg)
+	n2, err := t4.Open(cfg)
 	if err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}

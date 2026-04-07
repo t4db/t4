@@ -1,6 +1,6 @@
 # Configuration Reference
 
-## Library: `strata.Config`
+## Library: `t4.Config`
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -56,17 +56,17 @@ Both `S3Store` and `Mem` implement `ConditionalStore`. If your custom store does
 
 ---
 
-## CLI: `strata run`
+## CLI: `t4 run`
 
 Start a node. All flags below are sub-flags of the `run` subcommand.
 
 ```bash
-strata run [flags]
+t4 run [flags]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--data-dir` | `/var/lib/strata` | Pebble + WAL storage directory |
+| `--data-dir` | `/var/lib/t4` | Pebble + WAL storage directory |
 | `--listen` | `0.0.0.0:3379` | etcd v3 gRPC listen address |
 | `--s3-bucket` | — | S3 bucket name |
 | `--s3-prefix` | — | Key prefix inside the bucket (no trailing slash needed) |
@@ -99,14 +99,14 @@ strata run [flags]
 
 ---
 
-## CLI: `strata branch`
+## CLI: `t4 branch`
 
 Manage database branches.
 
-### `strata branch fork`
+### `t4 branch fork`
 
 ```bash
-strata branch fork \
+t4 branch fork \
   --s3-bucket <bucket> --s3-prefix <source-prefix> \
   --branch-id <id> \
   [--checkpoint <checkpoint-key>]
@@ -122,10 +122,10 @@ Registers a new branch against the source store. Prints the checkpoint key to st
 | `--branch-id` | Unique identifier for the branch |
 | `--checkpoint` | Fork from a specific checkpoint key instead of the latest |
 
-### `strata branch unfork`
+### `t4 branch unfork`
 
 ```bash
-strata branch unfork \
+t4 branch unfork \
   --s3-bucket <bucket> --s3-prefix <source-prefix> \
   --branch-id <id>
 ```

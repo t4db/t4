@@ -1,0 +1,24 @@
+{{- if .Values.proxy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "t4.fullname" . }}-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "t4.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+  {{- with .Values.proxy.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.proxy.service.type }}
+  selector:
+    {{- include "t4.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+  ports:
+    - name: grpc
+      port: {{ .Values.proxy.service.port }}
+      targetPort: grpc
+      protocol: TCP
+{{- end }}

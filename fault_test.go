@@ -1,4 +1,4 @@
-package strata
+package t4
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strata-db/strata/internal/wal"
+	"github.com/t4db/t4/internal/wal"
 )
 
 var errInjected = errors.New("injected fault")

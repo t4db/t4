@@ -5,13 +5,13 @@ description: Checkpoint-based backups, point-in-time restore, zero-copy branchin
 
 # Backup and Restore
 
-This guide covers how to back up Strata data, how to restore a cluster after failure, and how to create zero-copy snapshots using branching.
+This guide covers how to back up T4 data, how to restore a cluster after failure, and how to create zero-copy snapshots using branching.
 
 ---
 
 ## How backups work
 
-Strata writes **checkpoints** to S3 automatically. A checkpoint contains:
+T4 writes **checkpoints** to S3 automatically. A checkpoint contains:
 
 - A Pebble database snapshot (SST files + metadata).
 - A manifest JSON file pointing to the checkpoint's SST files and the revision at which it was taken.
@@ -31,9 +31,9 @@ SST files are **content-addressed** — identical content is stored once regardl
 ## Listing available checkpoints
 
 ```bash
-strata restore list \
+t4 restore list \
   --s3-bucket my-bucket \
-  --s3-prefix strata/
+  --s3-prefix t4/
 ```
 
 Output:
@@ -53,19 +53,19 @@ The `(latest)` marker shows the checkpoint referenced by `manifest/latest`.
 Use this to recover a node that lost its local disk, or to spin up a replacement node.
 
 ```bash
-strata restore checkpoint \
+t4 restore checkpoint \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
-  --data-dir /var/lib/strata-restored
+  --s3-prefix t4/ \
+  --data-dir /var/lib/t4-restored
 ```
 
 Then start the node normally — it replays any WAL segments on S3 that are newer than the restored checkpoint before joining the cluster:
 
 ```bash
-strata run \
-  --data-dir  /var/lib/strata-restored \
+t4 run \
+  --data-dir  /var/lib/t4-restored \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --listen    0.0.0.0:3379
 ```
 
@@ -77,26 +77,26 @@ Use this when recent writes caused data corruption and you want to roll back to 
 
 ```bash
 # 1. List checkpoints to find the target revision.
-strata restore list --s3-bucket my-bucket --s3-prefix strata/
+t4 restore list --s3-bucket my-bucket --s3-prefix t4/
 
 # 2. Download the target checkpoint to a fresh directory.
-strata restore checkpoint \
+t4 restore checkpoint \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --checkpoint checkpoint/0000000001/00000000000000000050/manifest.json \
-  --data-dir /var/lib/strata-pitr
+  --data-dir /var/lib/t4-pitr
 
 # 3. Start a verification node (no S3 → stays at rev 50, read-only inspection).
-strata run --data-dir /var/lib/strata-pitr --listen 0.0.0.0:3380
+t4 run --data-dir /var/lib/t4-pitr --listen 0.0.0.0:3380
 
 # 4. Inspect data, verify correctness.
 etcdctl --endpoints=localhost:3380 get --prefix /
 
 # 5. When satisfied, promote to a new production prefix.
-strata run \
-  --data-dir  /var/lib/strata-pitr \
+t4 run \
+  --data-dir  /var/lib/t4-pitr \
   --s3-bucket my-bucket \
-  --s3-prefix strata-recovered/ \
+  --s3-prefix t4-recovered/ \
   --listen    0.0.0.0:3379
 ```
 
@@ -114,16 +114,16 @@ When the entire cluster fails:
 
 ```bash
 # On each node (same bucket+prefix, different data-dir and peer address):
-strata run \
-  --data-dir  /var/lib/strata \
+t4 run \
+  --data-dir  /var/lib/t4 \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --peer-listen 0.0.0.0:3380 \
   --advertise-peer <this-node-ip>:3380 \
   --listen 0.0.0.0:3379
 ```
 
-No manual restore step is needed — each node runs `strata restore checkpoint` internally on startup if its local Pebble database is absent.
+No manual restore step is needed — each node runs `t4 restore checkpoint` internally on startup if its local Pebble database is absent.
 
 ---
 
@@ -133,25 +133,25 @@ Branching lets you fork a database at a checkpoint without copying SST files in 
 
 ```bash
 # 1. Register a branch (prints checkpoint key).
-strata branch fork \
+t4 branch fork \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --branch-id staging
 
 # 2. Start the branch node with the printed checkpoint key.
-strata run \
-  --data-dir  /var/lib/strata-staging \
+t4 run \
+  --data-dir  /var/lib/t4-staging \
   --s3-bucket my-bucket \
-  --s3-prefix strata-staging/ \
+  --s3-prefix t4-staging/ \
   --branch-source-bucket my-bucket \
-  --branch-source-prefix strata/ \
+  --branch-source-prefix t4/ \
   --branch-checkpoint <key-from-step-1> \
   --listen 0.0.0.0:3379
 
 # 3. When done, remove the branch registration so source GC can reclaim space.
-strata branch unfork \
+t4 branch unfork \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --branch-id staging
 ```
 
@@ -164,10 +164,10 @@ strata branch unfork \
 If your S3 bucket has versioning enabled, you can restore to any point in time — not just to a checkpoint boundary.
 
 ```bash
-strata run \
-  --data-dir  /var/lib/strata-pitr \
+t4 run \
+  --data-dir  /var/lib/t4-pitr \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --restore-point-time "2024-06-01T12:00:00Z" \
   --listen 0.0.0.0:3380
 ```
@@ -178,12 +178,12 @@ See [API reference — RestorePoint](api#point-in-time-restore-s3-versioning) fo
 
 ## Backup retention and GC
 
-Old checkpoints and WAL segments accumulate in S3 unless explicitly pruned. Use `strata gc` to remove objects outside a retention window:
+Old checkpoints and WAL segments accumulate in S3 unless explicitly pruned. Use `t4 gc` to remove objects outside a retention window:
 
 ```bash
-strata gc \
+t4 gc \
   --s3-bucket my-bucket \
-  --s3-prefix strata/ \
+  --s3-prefix t4/ \
   --keep 5
 ```
 
@@ -193,13 +193,13 @@ This keeps the 5 most recent checkpoints and deletes everything else in three pa
 2. SST files exclusively referenced by the deleted checkpoints (orphans not needed by any surviving checkpoint or active branch).
 3. WAL segments whose entire revision range is covered by the latest surviving checkpoint.
 
-Use `strata status` first to see current counts:
+Use `t4 status` first to see current counts:
 
 ```bash
-strata status --s3-bucket my-bucket --s3-prefix strata/
+t4 status --s3-bucket my-bucket --s3-prefix t4/
 ```
 
-> **Branch safety:** GC reads the branch registry before deleting. A checkpoint pinned by an active `strata branch fork` is never deleted, nor are its SST files. Call `strata branch unfork` only after the branch node is fully decommissioned.
+> **Branch safety:** GC reads the branch registry before deleting. A checkpoint pinned by an active `t4 branch fork` is never deleted, nor are its SST files. Call `t4 branch unfork` only after the branch node is fully decommissioned.
 
 See [Storage management — Garbage collection](/operations#garbage-collection) for retention recommendations.
 
@@ -211,7 +211,7 @@ After restoring, verify that data is intact before promoting the node:
 
 ```bash
 # Check the revision at which the node is running.
-curl -s http://localhost:9090/metrics | grep strata_revision
+curl -s http://localhost:9090/metrics | grep t4_revision
 
 # Spot-check key data.
 etcdctl --endpoints=localhost:3379 get --prefix /your/prefix --limit 100

@@ -1,13 +1,13 @@
-(defproject jepsen.strata "0.1.0-SNAPSHOT"
-  :description "Jepsen linearizability tests for Strata"
+(defproject jepsen.t4 "0.1.0-SNAPSHOT"
+  :description "Jepsen linearizability tests for T4"
   :license     {:name "Apache-2.0"}
-  :main        jepsen.strata.core
+  :main        jepsen.t4.core
   :source-paths ["src"]
 
   :dependencies
   [[org.clojure/clojure  "1.11.3"]
    [jepsen               "0.3.5"]
-   ;; jetcd: official Java etcd v3 client used to drive strata's etcd API.
+   ;; jetcd: official Java etcd v3 client used to drive t4's etcd API.
    [io.etcd/jetcd-core   "0.7.7"]]
 
   :jvm-opts

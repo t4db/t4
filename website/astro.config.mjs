@@ -5,8 +5,8 @@ import starlight from '@astrojs/starlight';
 // When deploying to GitHub Pages the CI sets SITE and BASE_PATH via
 // the configure-pages action so internal links resolve correctly.
 // In local dev both are unset and the defaults below are used.
-const site = process.env.SITE ?? 'https://strata-db.github.io';
-const base = process.env.BASE_PATH ?? '/strata';
+const site = process.env.SITE ?? 'https://t4db.github.io';
+const base = process.env.BASE_PATH ?? '/t4';
 
 // https://astro.build/config
 export default defineConfig({
@@ -14,10 +14,10 @@ export default defineConfig({
 	base,
 	integrations: [
 		starlight({
-			title: 'Strata',
+			title: 'T4',
 			description: 'An embeddable, S3-durable key-value store for Go.',
 			social: [
-				{ icon: 'github', label: 'GitHub', href: 'https://github.com/strata-db/strata' },
+				{ icon: 'github', label: 'GitHub', href: 'https://github.com/t4db/t4' },
 			],
 			customCss: ['./src/styles/custom.css'],
 			components: {

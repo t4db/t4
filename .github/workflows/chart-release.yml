@@ -38,14 +38,14 @@ jobs:
 
       - name: Stamp version into Chart.yaml
         run: |
-          sed -i "s/^version:.*/version: ${CHART_VERSION}/" charts/strata/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${APP_VERSION}\"/" charts/strata/Chart.yaml
+          sed -i "s/^version:.*/version: ${CHART_VERSION}/" charts/t4/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${APP_VERSION}\"/" charts/t4/Chart.yaml
 
       - name: Lint chart
-        run: helm lint charts/strata
+        run: helm lint charts/t4
 
       - name: Package chart
-        run: helm package charts/strata --destination dist/
+        run: helm package charts/t4 --destination dist/
 
       - name: Log in to GHCR
         run: |
@@ -56,5 +56,5 @@ jobs:
 
       - name: Push chart to GHCR
         run: |
-          helm push dist/strata-${CHART_VERSION}.tgz \
+          helm push dist/t4-${CHART_VERSION}.tgz \
             oci://ghcr.io/${{ github.repository_owner }}/charts

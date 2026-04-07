@@ -12,7 +12,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/sirupsen/logrus"
-	"github.com/strata-db/strata/internal/wal"
+	"github.com/t4db/t4/internal/wal"
 )
 
 // ErrClosed is returned by WaitForRevision when the store has been closed.
@@ -70,7 +70,7 @@ func Open(dir string, extraOpts ...func(*pebble.Options)) (*Store, error) {
 		if !isPebbleLockError(err) || time.Now().After(deadline) {
 			return nil, fmt.Errorf("store: open pebble %q: %w", dir, err)
 		}
-		logrus.Warnf("strata: pebble locked at %q, retrying in 1s (previous instance still terminating?)", dir)
+		logrus.Warnf("t4: pebble locked at %q, retrying in 1s (previous instance still terminating?)", dir)
 		time.Sleep(time.Second)
 	}
 }

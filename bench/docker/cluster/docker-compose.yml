@@ -1,6 +1,6 @@
-# cluster — 3-node Strata cluster (with MinIO) vs 3-node etcd Raft cluster.
+# cluster — 3-node T4 cluster (with MinIO) vs 3-node etcd Raft cluster.
 #
-# Strata model: leader streams WAL entries to followers; all followers ACK
+# T4 model: leader streams WAL entries to followers; all followers ACK
 # before the write completes; WAL is archived to MinIO. Leader election is
 # via an S3 object lock — no static topology configuration needed.
 #
@@ -10,22 +10,22 @@
 # etcd v3 client route writes to the current leader automatically.
 #
 # Ports exposed on the host:
-#   strata1 → localhost:3379   etcd1 → localhost:2379
-#   strata2 → localhost:3380   etcd2 → localhost:2380
-#   strata3 → localhost:3381   etcd3 → localhost:2381
+#   t41 → localhost:3379   etcd1 → localhost:2379
+#   t42 → localhost:3380   etcd2 → localhost:2380
+#   t43 → localhost:3381   etcd3 → localhost:2381
 #
 # Images must be pre-built before running:
-#   docker build -f bench/Dockerfile.strata -t strata-bench .
-#   docker build -f bench/Dockerfile        -t stratabench  .
+#   docker build -f bench/Dockerfile.t4 -t t4-bench .
+#   docker build -f bench/Dockerfile        -t t4bench  .
 
-x-strata-env: &strata-env
+x-t4-env: &t4-env
   AWS_ACCESS_KEY_ID: bench
   AWS_SECRET_ACCESS_KEY: bench123
   AWS_DEFAULT_REGION: us-east-1
 
-x-strata-base: &strata-base
-  image: strata-bench
-  environment: *strata-env
+x-t4-base: &t4-base
+  image: t4-bench
+  environment: *t4-env
   depends_on:
     minio-init:
       condition: service_completed_successfully
@@ -54,7 +54,7 @@ x-etcd-cluster-env: &etcd-cluster-env
 
 services:
 
-  # ── MinIO (S3 store for Strata WAL + leader election) ─────────────────────
+  # ── MinIO (S3 store for T4 WAL + leader election) ─────────────────────
 
   minio:
     image: minio/minio:latest
@@ -83,17 +83,17 @@ services:
       "
     networks: [bench]
 
-  # ── Strata cluster ─────────────────────────────────────────────────────────
+  # ── T4 cluster ─────────────────────────────────────────────────────────
 
-  strata1:
-    <<: *strata-base
-    hostname: strata1
+  t41:
+    <<: *t4-base
+    hostname: t41
     command:
       - run
       - --node-id=s1
       - --listen=0.0.0.0:2379
       - --peer-listen=0.0.0.0:3380
-      - --advertise-peer=strata1:3380
+      - --advertise-peer=t41:3380
       - --data-dir=/data
       - --metrics-addr=0.0.0.0:9090
       - --wal-sync-upload=false
@@ -104,7 +104,7 @@ services:
     ports:
       - "3379:2379"
     volumes:
-      - strata1-data:/data
+      - t41-data:/data
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
       interval: 5s
@@ -112,15 +112,15 @@ services:
       retries: 30
       start_period: 15s
 
-  strata2:
-    <<: *strata-base
-    hostname: strata2
+  t42:
+    <<: *t4-base
+    hostname: t42
     command:
       - run
       - --node-id=s2
       - --listen=0.0.0.0:2379
       - --peer-listen=0.0.0.0:3380
-      - --advertise-peer=strata2:3380
+      - --advertise-peer=t42:3380
       - --wal-sync-upload=false
       - --data-dir=/data
       - --metrics-addr=0.0.0.0:9090
@@ -131,7 +131,7 @@ services:
     ports:
       - "3380:2379"
     volumes:
-      - strata2-data:/data
+      - t42-data:/data
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
       interval: 5s
@@ -139,15 +139,15 @@ services:
       retries: 30
       start_period: 15s
 
-  strata3:
-    <<: *strata-base
-    hostname: strata3
+  t43:
+    <<: *t4-base
+    hostname: t43
     command:
       - run
       - --node-id=s3
       - --listen=0.0.0.0:2379
       - --peer-listen=0.0.0.0:3380
-      - --advertise-peer=strata3:3380
+      - --advertise-peer=t43:3380
       - --wal-sync-upload=false
       - --data-dir=/data
       - --metrics-addr=0.0.0.0:9090
@@ -158,7 +158,7 @@ services:
     ports:
       - "3381:2379"
     volumes:
-      - strata3-data:/data
+      - t43-data:/data
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
       interval: 5s
@@ -232,7 +232,7 @@ services:
       start_period: 10s
 
   bench:
-    image: stratabench
+    image: t4bench
     profiles: [bench]
     networks: [bench]
 
@@ -240,9 +240,9 @@ networks:
   bench:
 
 volumes:
-  strata1-data:
-  strata2-data:
-  strata3-data:
+  t41-data:
+  t42-data:
+  t43-data:
   etcd1-data:
   etcd2-data:
   etcd3-data:

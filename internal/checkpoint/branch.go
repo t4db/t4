@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // BranchEntry is stored at "branches/<id>" in the source object store.

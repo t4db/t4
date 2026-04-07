@@ -14,8 +14,8 @@ import (
 
 	"github.com/cockroachdb/pebble"
 
-	"github.com/strata-db/strata/internal/checkpoint"
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // versionedMem wraps MemStore to record a version ID for every Put, allowing

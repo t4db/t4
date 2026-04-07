@@ -1,11 +1,11 @@
 ---
 title: Getting Started
-description: Run Strata as an etcd-compatible server or embed it in your Go application.
+description: Run T4 as an etcd-compatible server or embed it in your Go application.
 sidebar:
   order: 0
 ---
 
-Strata has two modes. Pick the one that fits your use case:
+T4 has two modes. Pick the one that fits your use case:
 
 | | Standalone server | Go library |
 |---|---|---|
@@ -20,13 +20,13 @@ Strata has two modes. Pick the one that fits your use case:
 ### Install
 
 ```bash
-go install github.com/strata-db/strata/cmd/strata@latest
+go install github.com/t4db/t4/cmd/t4@latest
 ```
 
 Or use Docker:
 
 ```bash
-docker pull ghcr.io/strata-db/strata:latest
+docker pull ghcr.io/t4db/t4:latest
 ```
 
 ### Single node — local only
@@ -34,7 +34,7 @@ docker pull ghcr.io/strata-db/strata:latest
 Good for development or when durability comes from infrastructure (PVC, RAID):
 
 ```bash
-strata run --data-dir /var/lib/strata --listen 0.0.0.0:3379
+t4 run --data-dir /var/lib/t4 --listen 0.0.0.0:3379
 ```
 
 ### Single node — S3 durable
@@ -42,11 +42,11 @@ strata run --data-dir /var/lib/strata --listen 0.0.0.0:3379
 WAL segments and checkpoints are uploaded to S3. The node recovers automatically if it loses its disk:
 
 ```bash
-strata run \
-  --data-dir  /var/lib/strata \
+t4 run \
+  --data-dir  /var/lib/t4 \
   --listen    0.0.0.0:3379   \
   --s3-bucket my-bucket      \
-  --s3-prefix strata/
+  --s3-prefix t4/
 ```
 
 AWS credentials are resolved from the standard chain: `AWS_*` environment variables, `~/.aws/credentials`, instance profile, or EKS workload identity.
@@ -67,21 +67,21 @@ All nodes run the same command — no membership config, no initial cluster flag
 
 ```bash
 # Node A
-strata run \
-  --data-dir       /var/lib/strata      \
+t4 run \
+  --data-dir       /var/lib/t4      \
   --listen         0.0.0.0:3379         \
   --s3-bucket      my-bucket            \
-  --s3-prefix      strata/              \
+  --s3-prefix      t4/              \
   --node-id        node-a               \
   --peer-listen    0.0.0.0:3380         \
   --advertise-peer node-a.internal:3380
 
 # Node B (same bucket, same prefix)
-strata run \
-  --data-dir       /var/lib/strata      \
+t4 run \
+  --data-dir       /var/lib/t4      \
   --listen         0.0.0.0:3379         \
   --s3-bucket      my-bucket            \
-  --s3-prefix      strata/              \
+  --s3-prefix      t4/              \
   --node-id        node-b               \
   --peer-listen    0.0.0.0:3380         \
   --advertise-peer node-b.internal:3380
@@ -92,11 +92,11 @@ New nodes can join at any time — they restore the latest S3 checkpoint and sta
 ### MinIO / S3-compatible stores
 
 ```bash
-strata run \
-  --data-dir    /var/lib/strata \
+t4 run \
+  --data-dir    /var/lib/t4 \
   --listen      0.0.0.0:3379   \
   --s3-bucket   my-bucket      \
-  --s3-prefix   strata/        \
+  --s3-prefix   t4/        \
   --s3-endpoint http://minio:9000
 ```
 
@@ -113,7 +113,7 @@ Use this when you want the store running inside your binary — no network hop f
 ### Install
 
 ```bash
-go get github.com/strata-db/strata
+go get github.com/t4db/t4
 ```
 
 Requires Go 1.22+.
@@ -121,10 +121,10 @@ Requires Go 1.22+.
 ### Local only
 
 ```go
-import "github.com/strata-db/strata"
+import "github.com/t4db/t4"
 
-node, err := strata.Open(strata.Config{
-    DataDir: "/var/lib/myapp/strata",
+node, err := t4.Open(t4.Config{
+    DataDir: "/var/lib/myapp/t4",
 })
 if err != nil {
     log.Fatal(err)
@@ -154,14 +154,14 @@ for e := range events {
 import (
     awsconfig "github.com/aws/aws-sdk-go-v2/config"
     "github.com/aws/aws-sdk-go-v2/service/s3"
-    "github.com/strata-db/strata/pkg/object"
+    "github.com/t4db/t4/pkg/object"
 )
 
 awsCfg, _ := awsconfig.LoadDefaultConfig(ctx)
-store := object.NewS3Store(s3.NewFromConfig(awsCfg), "my-bucket", "strata/")
+store := object.NewS3Store(s3.NewFromConfig(awsCfg), "my-bucket", "t4/")
 
-node, err := strata.Open(strata.Config{
-    DataDir:     "/var/lib/myapp/strata",
+node, err := t4.Open(t4.Config{
+    DataDir:     "/var/lib/myapp/t4",
     ObjectStore: store,
 })
 ```
@@ -174,7 +174,7 @@ import (
     "github.com/aws/aws-sdk-go-v2/config"
     "github.com/aws/aws-sdk-go-v2/credentials"
     "github.com/aws/aws-sdk-go-v2/service/s3"
-    "github.com/strata-db/strata/pkg/object"
+    "github.com/t4db/t4/pkg/object"
 )
 
 cfg, _ := config.LoadDefaultConfig(ctx,
@@ -186,7 +186,7 @@ cfg, _ := config.LoadDefaultConfig(ctx,
         }),
     ),
 )
-store := object.NewS3Store(s3.NewFromConfig(cfg), "my-bucket", "strata/")
+store := object.NewS3Store(s3.NewFromConfig(cfg), "my-bucket", "t4/")
 ```
 
 ---
@@ -194,7 +194,7 @@ store := object.NewS3Store(s3.NewFromConfig(cfg), "my-bucket", "strata/")
 ## Next steps
 
 - **[Operations](/operations/)** — Multi-node clusters, TLS, auth, observability, branching
-- **[Configuration](/configuration/)** — All CLI flags and `strata.Config` fields
+- **[Configuration](/configuration/)** — All CLI flags and `t4.Config` fields
 - **[Kubernetes](/deployment/kubernetes/)** — Helm chart for production deployments
 - **[API Reference](/api/)** — Full Go embedded library API
 - **[Recipes](/recipes/)** — Distributed locks, service discovery, config hot-reload

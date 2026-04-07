@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // LockKey is the fixed object-storage key for the leader lock.

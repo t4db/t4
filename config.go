@@ -1,4 +1,4 @@
-package strata
+package t4
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 
 	"google.golang.org/grpc/credentials"
 
-	"github.com/strata-db/strata/pkg/object"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // ReadConsistency controls the consistency guarantee for read operations served
@@ -27,7 +27,7 @@ const (
 	// horizontally, but a follower may return data that is slightly behind the
 	// leader. Choose this when throughput and horizontal read scaling matter more
 	// than strict linearizability (e.g., when each API server has a dedicated
-	// strata leader).
+	// t4 leader).
 	ReadConsistencySerializable ReadConsistency = "serializable"
 )
 

@@ -9,22 +9,22 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/strata-db/strata"
-	strataetcd "github.com/strata-db/strata/etcd"
+	"github.com/t4db/t4"
+	t4etcd "github.com/t4db/t4/etcd"
 )
 
-// newServer opens a single-node strata Node (no S3) and wraps it in an etcd Server.
-func newServer(t *testing.T) *strataetcd.Server {
+// newServer opens a single-node t4 Node (no S3) and wraps it in an etcd Server.
+func newServer(t *testing.T) *t4etcd.Server {
 	t.Helper()
-	node, err := strata.Open(strata.Config{DataDir: t.TempDir()})
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("strata.Open: %v", err)
+		t.Fatalf("t4.Open: %v", err)
 	}
 	t.Cleanup(func() { node.Close() })
-	return strataetcd.New(node, nil, nil)
+	return t4etcd.New(node, nil, nil)
 }
 
-func put(t *testing.T, srv *strataetcd.Server, key, val string) int64 {
+func put(t *testing.T, srv *t4etcd.Server, key, val string) int64 {
 	t.Helper()
 	resp, err := srv.Put(context.Background(), &etcdserverpb.PutRequest{
 		Key:   []byte(key),

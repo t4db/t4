@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench/run.sh — orchestrate the full Strata vs etcd benchmark suite.
+# bench/run.sh — orchestrate the full T4 vs etcd benchmark suite.
 #
 # Usage:
 #   ./bench/run.sh [single] [single-s3] [cluster]
@@ -27,11 +27,11 @@ JSONL="$RESULTS_DIR/results.jsonl"
 
 log() { echo "[bench] $*"; }
 
-log "Building strata-bench image..."
-docker build -q -f "$BENCH_DIR/Dockerfile.strata" -t strata-bench "$REPO_ROOT"
+log "Building t4-bench image..."
+docker build -q -f "$BENCH_DIR/Dockerfile.t4" -t t4-bench "$REPO_ROOT"
 
-log "Building stratabench image..."
-docker build -q -f "$BENCH_DIR/Dockerfile" -t stratabench "$REPO_ROOT"
+log "Building t4bench image..."
+docker build -q -f "$BENCH_DIR/Dockerfile" -t t4bench "$REPO_ROOT"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ wait_ready() {
     local i=0
     printf "[bench]   waiting for %s " "$endpoint"
     while [ $i -lt $max ]; do
-        if docker run --rm --network "$network" stratabench \
+        if docker run --rm --network "$network" t4bench \
                --endpoints "$endpoint" --workload seq-put --total 1 \
                --output text >/dev/null 2>&1; then
             echo " ready"
@@ -66,7 +66,7 @@ run_workloads() {
     local endpoints="$4"
     for wl in $WORKLOADS; do
         log "  $system / $wl ..."
-        docker run --rm --network "$network" stratabench \
+        docker run --rm --network "$network" t4bench \
             --endpoints "$endpoints" \
             --workload   "$wl" \
             --clients    "$CLIENTS" \
@@ -78,11 +78,11 @@ run_workloads() {
     done
 }
 
-# run_scenario <name> <compose-file> <strata-ep> <etcd-ep>
+# run_scenario <name> <compose-file> <t4-ep> <etcd-ep>
 run_scenario() {
     local name="$1"
     local compose="$2"
-    local strata_ep="$3"
+    local t4_ep="$3"
     local etcd_ep="$4"
     local project="bench-${name}"
     local network="${project}_bench"
@@ -95,11 +95,11 @@ run_scenario() {
         | grep -v "^$" || true
 
     # Wait for both targets to be ready.
-    wait_ready "$network" "$strata_ep"
+    wait_ready "$network" "$t4_ep"
     wait_ready "$network" "$etcd_ep"
 
-    # Run all workloads against strata, then etcd.
-    run_workloads "$network" "$name" "strata" "$strata_ep"
+    # Run all workloads against t4, then etcd.
+    run_workloads "$network" "$name" "t4" "$t4_ep"
     run_workloads "$network" "$name" "etcd"   "$etcd_ep"
 
     # Tear down and remove volumes so the next scenario starts clean.
@@ -113,21 +113,21 @@ run_scenario() {
 do_single() {
     run_scenario "single" \
         "$BENCH_DIR/docker/single/docker-compose.yml" \
-        "strata:2379" \
+        "t4:2379" \
         "etcd:2379"
 }
 
 do_single_s3() {
     run_scenario "single-s3" \
         "$BENCH_DIR/docker/single-s3/docker-compose.yml" \
-        "strata:2379" \
+        "t4:2379" \
         "etcd:2379"
 }
 
 do_cluster() {
     run_scenario "cluster" \
         "$BENCH_DIR/docker/cluster/docker-compose.yml" \
-        "strata1:2379,strata2:2379,strata3:2379" \
+        "t41:2379,t42:2379,t43:2379" \
         "etcd1:2379,etcd2:2379,etcd3:2379"
 }
 
@@ -152,4 +152,4 @@ log ""
 log "=== Results ==="
 docker run --rm \
     -v "$RESULTS_DIR:/results:ro" \
-    stratabench compare --results /results/results.jsonl
+    t4bench compare --results /results/results.jsonl

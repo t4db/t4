@@ -1,6 +1,6 @@
 # Failure Scenarios
 
-This document describes how Strata behaves under various failure conditions, what data is at risk, and how to recover. Each scenario maps to automated tests.
+This document describes how T4 behaves under various failure conditions, what data is at risk, and how to recover. Each scenario maps to automated tests.
 
 ---
 
@@ -68,7 +68,7 @@ This document describes how Strata behaves under various failure conditions, wha
 **Recovery:**
 ```bash
 # Restart each node normally — they self-coordinate via S3.
-strata run --data-dir /var/lib/strata --s3-bucket my-bucket --s3-prefix strata/ \
+t4 run --data-dir /var/lib/t4 --s3-bucket my-bucket --s3-prefix t4/ \
            --peer-listen 0.0.0.0:3380 ...
 ```
 
@@ -171,8 +171,8 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 - If no valid checkpoint exists, the node fails to start and prints a clear error.
 
 **Recovery:**
-- Use `strata restore list` to identify the last good checkpoint.
-- Use `strata restore checkpoint` to download it to a fresh `--data-dir`.
+- Use `t4 restore list` to identify the last good checkpoint.
+- Use `t4 restore checkpoint` to download it to a fresh `--data-dir`.
 - Start the node normally pointing at the new data directory.
 
 **Tested by:** `TestCheckpointCorruptionManifest`, `TestCheckpointCorruptionArchive`

@@ -5,12 +5,12 @@ import (
 	"io"
 	"time"
 
-	"github.com/strata-db/strata/internal/metrics"
+	"github.com/t4db/t4/internal/metrics"
 )
 
 // instrumentedStore wraps a Store and records Prometheus metrics for every
-// operation: strata_object_store_ops_total{op, result} and
-// strata_object_store_duration_seconds{op}.
+// operation: t4_object_store_ops_total{op, result} and
+// t4_object_store_duration_seconds{op}.
 type instrumentedStore struct{ inner Store }
 
 // instrumentedConditionalStore additionally implements ConditionalStore.
