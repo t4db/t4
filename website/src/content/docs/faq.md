@@ -16,11 +16,10 @@ Use T4 when you want one or more of:
 
 Use etcd when you need:
 - Mature operational tooling and broad ecosystem support
-- Lease expiry / TTL-based key eviction
 - Very low write latency at 1–4 concurrent writers (etcd's fixed 100 ms batch interval helps here)
 - etcd snapshot restore support
 
-Both systems speak the etcd v3 gRPC protocol, so switching between them later is straightforward.
+Both systems implement the etcd v3 gRPC KV and Watch API, so switching between them is straightforward for most workloads. See the [compatibility guide](/etcd-migration/) for the supported subset and known gaps.
 
 ### Does T4 use Raft?
 
@@ -149,7 +148,7 @@ Complex multi-key transactions with mixed conditions are not supported.
 
 ### Do leases work?
 
-Partially. T4 accepts `LeaseGrant` / `LeaseKeepAlive` / `LeaseRevoke` RPCs and assigns lease IDs, but it does **not** evict keys when a lease expires. If your workload depends on lease expiry to clean up keys (e.g. ephemeral service registrations), delete keys explicitly on shutdown instead.
+Partially. T4 accepts `LeaseGrant` / `LeaseKeepAlive` / `LeaseRevoke` / `LeaseTimeToLive` / `LeaseLeases` and fully enforces TTL expiry — the leader runs a background loop that evicts expired leases and their associated keys every second. Lease-attached keys are automatically deleted when the lease expires or is revoked, matching standard etcd behaviour.
 
 ---
 

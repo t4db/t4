@@ -1,6 +1,27 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { visit } from 'unist-util-visit';
+
+/**
+ * Rehype plugin that prepends the configured base path to every root-relative
+ * link in markdown/MDX content (i.e. href="/foo" → href="/t4/foo").
+ * This lets content files use bare paths like "/page/" without knowing the
+ * deployment base, which Astro does not rewrite automatically for prose links.
+ */
+function rehypePrependBase(base) {
+	const normalised = base.replace(/\/$/, '');
+	return () => (tree) => {
+		visit(tree, 'element', (node) => {
+			if (node.tagName === 'a' && typeof node.properties?.href === 'string') {
+				const href = node.properties.href;
+				if (href.startsWith('/') && !href.startsWith('//')) {
+					node.properties.href = normalised + href;
+				}
+			}
+		});
+	};
+}
 
 // When deploying to GitHub Pages the CI sets SITE and BASE_PATH via
 // the configure-pages action so internal links resolve correctly.
@@ -12,6 +33,9 @@ const base = process.env.BASE_PATH ?? '/t4';
 export default defineConfig({
 	site,
 	base,
+	markdown: {
+		rehypePlugins: [rehypePrependBase(base)],
+	},
 	integrations: [
 		starlight({
 			title: 'T4',

@@ -3,7 +3,7 @@ title: Migrating from etcd
 description: How to move an existing etcd workload to T4 — standalone binary replacement and embedded library adoption.
 ---
 
-T4 implements the full etcd v3 gRPC protocol. In most cases, replacing the etcd binary with `t4 run` and pointing your existing clients at the new endpoint is all that's needed.
+T4 implements the core etcd v3 gRPC API — KV, Watch, Lease, and Auth. In most cases, replacing the etcd binary with `t4 run` and pointing your existing clients at the new endpoint is all that's needed. Some Maintenance and Cluster RPCs are not implemented; see the tables below for the full picture.
 
 ---
 
@@ -15,17 +15,15 @@ T4 supports the following etcd v3 operations:
 |---|---|
 | `Range` (Get / List / prefix scan) | Full |
 | `Put` | Full |
-| `DeleteRange` (single key or prefix) | Full |
-| `Txn` (compare-and-set) | Full (MOD revision comparisons) |
+| `DeleteRange` (single key) | Single-key only — range/prefix deletes return `Unimplemented` |
+| `Txn` (compare-and-set) | Subset — single-key MOD==0 (create-if-not-exists) and MOD==X (CAS update/delete); multi-key and bare (no-compare) transactions return `Unimplemented` |
 | `Watch` | Full (history replay, cancel) |
 | `Compact` | Full |
-| `LeaseGrant` / `LeaseKeepAlive` / `LeaseRevoke` | Stubbed (TTL=60, no expiry eviction) |
+| `LeaseGrant` / `LeaseKeepAlive` / `LeaseRevoke` / `LeaseTimeToLive` / `LeaseLeases` | Full |
 | `AuthEnable` / Users / Roles | Full |
 | `MemberList` | Returns single synthetic member |
-| `Snapshot` | Not supported |
-
-**Leases without expiry**: T4's lease implementation stubs TTL renewal and does not evict keys when a lease expires. If your workload relies on lease expiry to automatically delete keys (e.g. ephemeral service registrations), you'll need to delete those keys explicitly on shutdown, or use `Watch` to detect disconnected clients.
-
+| `MemberAdd` / `MemberRemove` / `MemberUpdate` / `MemberPromote` | Not supported |
+| `Snapshot` / `Status` / `Defragment` / `Hash` / `Alarm` / `MoveLeader` | Not supported |
 ---
 
 ## Migrating the standalone binary
@@ -150,7 +148,7 @@ Key API differences from the etcd v3 Go client:
 | `cli.Delete(ctx, key)` | `node.Delete(ctx, key)` |
 | `cli.Watch(ctx, prefix, WithPrefix())` | `node.Watch(ctx, prefix, 0)` |
 | `cli.Txn(ctx).If(...).Then(Put).Commit()` | `node.Create` / `node.Update` / `node.DeleteIfRevision` |
-| `cli.Grant(ctx, ttl)` + lease ID on Put | Leases are stubbed; use `Delete` on shutdown instead |
+| `cli.Grant(ctx, ttl)` + lease ID on Put | `node.Put(ctx, key, value, leaseID)` — obtain a lease ID from `LeaseGrant` via the etcd gRPC API, or manage leases directly through the embedded server |
 
 ---
 
@@ -158,8 +156,10 @@ Key API differences from the etcd v3 Go client:
 
 | etcd feature | T4 behaviour | Workaround |
 |---|---|---|
-| Lease expiry / TTL eviction | Not implemented | Delete keys explicitly on shutdown; use `Watch` to detect disconnects |
+| `DeleteRange` with prefix/range end | Not supported — returns `Unimplemented` | Delete keys individually or iterate with `List` + `Delete` |
+| Multi-key / no-compare transactions | Not supported — returns `Unimplemented` | Decompose into individual `Create` / `Update` / `Delete` calls |
+| Maintenance RPCs (Status, Defrag, Hash, Alarm, MoveLeader) | Not supported | Not needed for standard application clients |
 | `etcdctl snapshot restore` | Not supported | Use `t4 branch fork` for point-in-time copies |
-| etcd cluster membership API | Single synthetic member | Not needed for standard clients |
+| `MemberAdd` / `MemberRemove` / `MemberUpdate` / `MemberPromote` | Not supported | Not needed for standard clients |
 | etcd v2 API | Not supported | Migrate to v3 first |
 | gRPC gateway (HTTP/JSON) | Not included | Use a gRPC proxy (e.g. grpc-gateway) in front |
