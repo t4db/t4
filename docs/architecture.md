@@ -183,7 +183,7 @@ Mapping summary:
 | `Watch` | `node.Watch` |
 | `Compact` | `node.Compact` |
 
-Lease operations are stubbed (TTL=60, no eviction). Cluster operations return a single synthetic member. These are sufficient for all standard etcd v3 clients.
+Leases are fully implemented: `LeaseGrant` stores a record with a real expiry timestamp, `LeaseKeepAlive` extends it, and the leader runs a background eviction loop (1 s tick) that deletes expired leases and all keys attached to them. `LeaseTimeToLive` and `LeaseLeases` are also supported. Cluster operations return a single synthetic member.
 
 ## Branches
 

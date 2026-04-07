@@ -63,7 +63,7 @@ kv, _  := node.Get("/config/timeout")
 
 <CardGrid stagger>
   <Card title="etcd v3 compatible" icon="approve-check">
-    The standalone binary speaks the full etcd v3 gRPC protocol. Drop in as an etcd replacement — `etcdctl`, the Go client, and any etcd v3 library work unchanged.
+    The standalone binary speaks the etcd v3 gRPC protocol. Drop in for most cases as an etcd replacement — `etcdctl`, the Go client, and any etcd v3 library work unchanged. See the [compatibility guide](/etcd-migration/) for the supported subset.
   </Card>
   <Card title="S3-durable" icon="cloud-upload">
     WAL segments and checkpoints are uploaded to S3. A node that loses its disk recovers automatically on next boot — no manual intervention.
@@ -113,7 +113,7 @@ Requires Go 1.22+.
 
 | | T4 | etcd |
 |---|---|---|
-| etcd v3 protocol | ✅ | ✅ |
+| etcd v3 KV + Watch API¹ | ✅ | ✅ |
 | S3-backed disaster recovery | ✅ | ❌ |
 | Survive total disk loss | ✅ | ❌ |
 | Embeddable Go library | ✅ | ❌ |
@@ -122,3 +122,5 @@ Requires Go 1.22+.
 | Write throughput (8+ concurrent writers) | faster | slower |
 | Write throughput (1–4 concurrent writers) | slower | faster |
 | Read throughput | equivalent | equivalent |
+
+¹ T4 implements the KV, Watch, Lease, and Auth services. Maintenance RPCs (Status, Defrag, Snapshot, etc.) and cluster membership mutations (MemberAdd/Remove) are not supported. See the [compatibility guide](/etcd-migration/) for details.
