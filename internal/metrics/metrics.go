@@ -1,4 +1,4 @@
-// Package metrics defines Prometheus metrics for a Strata node.
+// Package metrics defines Prometheus metrics for a t4 node.
 //
 // Call Register once during node startup to register all metrics on the
 // provided registerer. When reg is nil, prometheus.DefaultRegisterer is used.
@@ -75,7 +75,7 @@ var (
 var once sync.Once
 var gatherer prometheus.Gatherer = prometheus.DefaultGatherer
 
-// Register registers all Strata metrics on reg. Only the first call takes
+// Register registers all t4 metrics on reg. Only the first call takes
 // effect — subsequent calls are no-ops (safe for multiple Open() calls).
 // If reg is nil, prometheus.DefaultRegisterer is used.
 func Register(reg prometheus.Registerer) {
@@ -88,100 +88,100 @@ func Register(reg prometheus.Registerer) {
 		}
 
 		WritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "strata_writes_total",
+			Name: "t4_writes_total",
 			Help: "Total write operations (put/create/update/delete/compact).",
 		}, []string{"op"})
 
 		WriteErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "strata_write_errors_total",
+			Name: "t4_write_errors_total",
 			Help: "Total write errors by op type.",
 		}, []string{"op"})
 
 		WriteDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "strata_write_duration_seconds",
+			Name:    "t4_write_duration_seconds",
 			Help:    "Write operation duration (local execution, excluding forwarding).",
 			Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .5},
 		}, []string{"op"})
 
 		ForwardedWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "strata_forwarded_writes_total",
+			Name: "t4_forwarded_writes_total",
 			Help: "Total writes forwarded to the leader by this follower.",
 		}, []string{"op"})
 
 		ForwardDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "strata_forward_duration_seconds",
+			Name:    "t4_forward_duration_seconds",
 			Help:    "Forwarded write round-trip duration.",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
 		}, []string{"op"})
 
 		CurrentRevision = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "strata_current_revision",
+			Name: "t4_current_revision",
 			Help: "Latest applied revision.",
 		})
 
 		CompactRevision = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "strata_compact_revision",
+			Name: "t4_compact_revision",
 			Help: "Compaction watermark revision.",
 		})
 
 		Role = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "strata_role",
+			Name: "t4_role",
 			Help: "Current node role; 1 = active, 0 = inactive.",
 		}, []string{"role"})
 
 		WALUploadsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "strata_wal_uploads_total",
+			Name: "t4_wal_uploads_total",
 			Help: "Total WAL segments uploaded to object storage.",
 		})
 
 		WALUploadErrors = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "strata_wal_upload_errors_total",
+			Name: "t4_wal_upload_errors_total",
 			Help: "Total WAL segment upload errors.",
 		})
 
 		WALUploadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "strata_wal_upload_duration_seconds",
+			Name:    "t4_wal_upload_duration_seconds",
 			Help:    "WAL segment upload duration.",
 			Buckets: []float64{.01, .05, .1, .5, 1, 5, 10},
 		})
 
 		WALGCTotal = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "strata_wal_gc_segments_total",
+			Name: "t4_wal_gc_segments_total",
 			Help: "Total WAL segments deleted from object storage during GC.",
 		})
 
 		CheckpointsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "strata_checkpoints_total",
+			Name: "t4_checkpoints_total",
 			Help: "Total checkpoints written to object storage.",
 		})
 
 		ElectionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "strata_elections_total",
+			Name: "t4_elections_total",
 			Help: "Total leader election attempts by outcome (won/lost).",
 		}, []string{"outcome"})
 
 		FollowerResyncsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "strata_follower_resyncs_total",
+			Name: "t4_follower_resyncs_total",
 			Help: "Total follower resyncs by trigger reason.",
 		}, []string{"reason"})
 
 		AuthAttemptsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "strata_auth_attempts_total",
+			Name: "t4_auth_attempts_total",
 			Help: "Total authentication attempts by result (success/fail/locked).",
 		}, []string{"result"})
 
 		FollowerLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "strata_follower_lag_revisions",
+			Name: "t4_follower_lag_revisions",
 			Help: "Number of revisions the follower is behind the leader (0 = fully caught up).",
 		}, []string{"follower_id"})
 
 		ObjectStoreOpsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "strata_object_store_ops_total",
+			Name: "t4_object_store_ops_total",
 			Help: "Total object storage operations by op (get/put/delete/list/get_etag/put_if_absent/put_if_match) and result (success/error).",
 		}, []string{"op", "result"})
 
 		ObjectStoreDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "strata_object_store_duration_seconds",
+			Name:    "t4_object_store_duration_seconds",
 			Help:    "Object storage operation latency.",
 			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		}, []string{"op"})

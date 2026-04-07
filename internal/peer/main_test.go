@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/strata-db/strata/internal/metrics"
+	"github.com/t4db/t4/internal/metrics"
 )
 
 func TestMain(m *testing.M) {

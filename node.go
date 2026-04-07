@@ -165,7 +165,7 @@ func Open(cfg Config) (*Node, error) {
 	log := cfg.Logger
 	cp := checkpoint.New(log)
 
-	// Register all Strata metrics on the configured registerer.
+	// Register all t4 metrics on the configured registerer.
 	// When nil, metrics.Register falls back to prometheus.DefaultRegisterer.
 	metrics.Register(cfg.MetricsRegisterer)
 
