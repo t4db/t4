@@ -196,7 +196,7 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 To run extended chaos testing:
 
 ```bash
-STRATA_CHAOS_ROUNDS=100 go test -run TestChaos -timeout 600s
+T4_CHAOS_ROUNDS=100 go test -run TestChaos -timeout 600s
 ```
 
 ---
