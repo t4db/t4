@@ -165,6 +165,10 @@ func Open(cfg Config) (*Node, error) {
 	log := cfg.Logger
 	cp := checkpoint.New(log)
 
+	// Register all t4 metrics on the configured registerer.
+	// When nil, metrics.Register falls back to prometheus.DefaultRegisterer.
+	metrics.Register(cfg.MetricsRegisterer)
+
 	// Wrap the object store with Prometheus instrumentation so every S3
 	// operation is counted and timed without scattering metrics calls
 	// throughout the codebase.
@@ -528,7 +532,7 @@ func Open(cfg Config) (*Node, error) {
 // and /healthz/leader (used by Envoy active health checks to identify the leader).
 func (n *Node) serveMetrics(ctx context.Context, addr string) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Gatherer(), promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
