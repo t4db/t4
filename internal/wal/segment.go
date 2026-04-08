@@ -13,13 +13,13 @@ import (
 
 // Segment file format:
 //
-//	[8:  magic    "STRATA\x01\n"]
+//	[4:  magic    "T4\x01\n"]
 //	[8:  term     uint64 BE]
 //	[8:  firstRev int64  BE]      ← first revision in this segment (0 if unknown at open time)
 //	[entry frames ... ]
 //
-// The sixth byte of the magic string (\x01) is the WAL format version.
-// Readers check the full 8-byte magic; an incompatible format change bumps
+// The third byte of the magic string (\x01) is the WAL format version.
+// Readers check the full 4-byte magic; an incompatible format change bumps
 // this byte (e.g. \x02), causing old readers to reject new segments with a
 // clear error rather than silently misinterpreting them.
 //
@@ -32,8 +32,8 @@ const (
 	// an incompatible change to the segment or entry wire format.
 	WALFormatVersion = 1
 
-	segMagic     = "STRATA\x01\n"
-	segHeaderLen = 24
+	segMagic     = "T4\x01\n"
+	segHeaderLen = 20
 )
 
 // SegmentWriter appends entries to a local WAL segment file.
@@ -67,9 +67,9 @@ func OpenSegmentWriter(dir string, term uint64, firstRev int64) (*SegmentWriter,
 
 func (sw *SegmentWriter) writeHeader() error {
 	hdr := make([]byte, segHeaderLen)
-	copy(hdr[0:8], segMagic)
-	binary.BigEndian.PutUint64(hdr[8:16], sw.term)
-	binary.BigEndian.PutUint64(hdr[16:24], uint64(sw.firstRev))
+	copy(hdr[0:4], segMagic)
+	binary.BigEndian.PutUint64(hdr[4:12], sw.term)
+	binary.BigEndian.PutUint64(hdr[12:20], uint64(sw.firstRev))
 	if _, err := sw.f.Write(hdr); err != nil {
 		return fmt.Errorf("wal: write segment header: %w", err)
 	}
@@ -203,13 +203,13 @@ func newSegmentReader(r io.Reader) (*SegmentReader, error) {
 	if _, err := io.ReadFull(r, hdr); err != nil {
 		return nil, fmt.Errorf("wal: read segment header: %w", err)
 	}
-	if string(hdr[0:8]) != segMagic {
-		return nil, fmt.Errorf("wal: bad segment magic %q", hdr[0:8])
+	if string(hdr[0:4]) != segMagic {
+		return nil, fmt.Errorf("wal: bad segment magic %q", hdr[0:4])
 	}
 	return &SegmentReader{
 		r:        r,
-		Term:     binary.BigEndian.Uint64(hdr[8:16]),
-		FirstRev: int64(binary.BigEndian.Uint64(hdr[16:24])),
+		Term:     binary.BigEndian.Uint64(hdr[4:12]),
+		FirstRev: int64(binary.BigEndian.Uint64(hdr[12:20])),
 	}, nil
 }
 

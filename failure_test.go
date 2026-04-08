@@ -1360,9 +1360,9 @@ func TestNetworkPartitionNoSplitBrain(t *testing.T) {
 //	[4: crc32c      uint32 BE]
 //	[payload_len bytes: entry data]
 //
-// Segment header: 24 bytes ("STRATA\x01\n" + term uint64 BE + firstRev int64 BE).
+// Segment header: 20 bytes ("T4\x01\n" + term uint64 BE + firstRev int64 BE).
 // For key "/wal/N" (N < 10): payload = 49 fixed + 6 key + 1 val = 56 → frame = 64 bytes.
-// Entry 10 (key "/wal/10") starts at byte 24 + 10*64 = 664; CRC at offset +4 = 668.
+// Entry 10 (key "/wal/10") starts at byte 20 + 10*64 = 660; CRC at offset +4 = 664.
 func TestWALCorruptionMidSegment(t *testing.T) {
 	dir := t.TempDir()
 
@@ -1393,8 +1393,8 @@ func TestWALCorruptionMidSegment(t *testing.T) {
 
 	// Corrupt the CRC of entry at index 10 (key "/wal/10").
 	// Entries 0–9 have key len 6 → frame = 8 header + 49 fixed + 6 key + 1 val = 64 bytes.
-	// Entry 10 starts at: 24 (segment header) + 10*64 = 664; CRC at +4 → byte 668.
-	const corruptOffset = 24 + 10*64 + 4 // = 668
+	// Entry 10 starts at: 20 (segment header) + 10*64 = 660; CRC at +4 → byte 664.
+	const corruptOffset = 20 + 10*64 + 4 // = 664
 	segPath := sw.Path()
 	data, err := os.ReadFile(segPath)
 	if err != nil {
@@ -1492,8 +1492,8 @@ func TestFailoverTime(t *testing.T) {
 // writes happen concurrently, then verifies that every durably acknowledged
 // write is still visible. It is the scaffolding for chaos/soak testing.
 //
-// Default: 5 rounds (fast CI gate). Set STRATA_CHAOS_ROUNDS env var to run
-// more rounds for extended soak testing (e.g. STRATA_CHAOS_ROUNDS=500).
+// Default: 5 rounds (fast CI gate). Set T4_CHAOS_ROUNDS env var to run
+// more rounds for extended soak testing (e.g. T4_CHAOS_ROUNDS=500).
 //
 // Each round:
 //  1. Write 5 keys with a concurrent writer goroutine.
@@ -1504,10 +1504,10 @@ func TestFailoverTime(t *testing.T) {
 //  5. Verify all keys written in previous rounds are still readable.
 func TestChaos(t *testing.T) {
 	rounds := 5
-	if v := os.Getenv("STRATA_CHAOS_ROUNDS"); v != "" {
+	if v := os.Getenv("T4_CHAOS_ROUNDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
-			t.Fatalf("invalid STRATA_CHAOS_ROUNDS=%q", v)
+			t.Fatalf("invalid T4_CHAOS_ROUNDS=%q", v)
 		}
 		rounds = n
 	}

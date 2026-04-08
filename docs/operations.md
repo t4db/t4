@@ -826,7 +826,7 @@ Use `t4 status` to check current checkpoint and WAL segment counts before and af
 
 ### WAL format versioning
 
-Each WAL segment file begins with an 8-byte magic header `"STRATA\x01\n"`. The sixth byte (`\x01`) is the **WAL format version** (currently 1). Readers verify the full magic string on open; a format change bumps this byte, causing old readers to reject new segments with a clear error rather than silently misinterpreting them.
+Each WAL segment file begins with a 4-byte magic header `"T4\x01\n"`. The third byte (`\x01`) is the **WAL format version** (currently 1). Readers verify the full magic string on open; a format change bumps this byte, causing old readers to reject new segments with a clear error rather than silently misinterpreting them.
 
 **Current: WAL format version 1.** Entry wire format: CRC32C-framed records with big-endian fixed-width fields (see `internal/wal/entry.go`).
 
