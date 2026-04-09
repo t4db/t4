@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/pkg/object"
 )
 
 func restoreCmd() *cobra.Command {
@@ -22,16 +23,12 @@ func restoreCmd() *cobra.Command {
 }
 
 func restoreListCmd() *cobra.Command {
-	var (
-		bucket   string
-		prefix   string
-		endpoint string
-	)
+	var s3 *s3Flags
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List checkpoints available in S3",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := newS3Store(cmd.Context(), bucket, prefix, endpoint)
+			store, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
 			if err != nil {
 				return fmt.Errorf("init S3: %w", err)
 			}
@@ -62,18 +59,13 @@ func restoreListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&bucket, "s3-bucket", "", "S3 bucket to list (required)")
-	cmd.Flags().StringVar(&prefix, "s3-prefix", "", "key prefix inside the S3 bucket")
-	cmd.Flags().StringVar(&endpoint, "s3-endpoint", "", "custom S3 endpoint URL")
-	cmd.MarkFlagRequired("s3-bucket")
+	s3 = addS3Flags(cmd, true)
 	return cmd
 }
 
 func restoreCheckpointCmd() *cobra.Command {
 	var (
-		bucket        string
-		prefix        string
-		endpoint      string
+		s3            *s3Flags
 		checkpointKey string
 		dataDir       string
 	)
@@ -100,7 +92,7 @@ replaying newer WAL from S3, omit --s3-bucket entirely.`,
 				return fmt.Errorf("data directory %q already contains a Pebble database; remove it first", pebbleDir)
 			}
 
-			store, err := newS3Store(cmd.Context(), bucket, prefix, endpoint)
+			store, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
 			if err != nil {
 				return fmt.Errorf("init S3: %w", err)
 			}
@@ -114,7 +106,7 @@ replaying newer WAL from S3, omit --s3-bucket entirely.`,
 					return fmt.Errorf("read manifest: %w", err)
 				}
 				if manifest == nil {
-					return fmt.Errorf("no checkpoints found in s3://%s/%s", bucket, prefix)
+					return fmt.Errorf("no checkpoints found in s3://%s/%s", s3.Bucket, s3.Prefix)
 				}
 				key = manifest.CheckpointKey
 				logrus.Infof("using latest checkpoint: %s (rev=%d)", key, manifest.Revision)
@@ -136,12 +128,12 @@ replaying newer WAL from S3, omit --s3-bucket entirely.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&bucket, "s3-bucket", "", "S3 bucket containing the checkpoint (required)")
-	cmd.Flags().StringVar(&prefix, "s3-prefix", "", "key prefix inside the S3 bucket")
-	cmd.Flags().StringVar(&endpoint, "s3-endpoint", "", "custom S3 endpoint URL")
+	s3 = addS3Flags(cmd, true)
 	cmd.Flags().StringVar(&checkpointKey, "checkpoint", "", "checkpoint key to restore (default: latest; use 't4 restore list' to find keys)")
-	cmd.Flags().StringVar(&dataDir, "data-dir", "", "local directory to restore into (required; must not already contain a Pebble database)")
-	cmd.MarkFlagRequired("s3-bucket")
+	cmd.Flags().StringVar(&dataDir, "data-dir", "", "local directory to restore into (required; must not already contain a Pebble database) (env: T4_DATA_DIR)")
 	cmd.MarkFlagRequired("data-dir")
+	prependPreRunE(cmd, func(cmd *cobra.Command, _ []string) error {
+		return applyEnvVars(cmd, map[string]string{"data-dir": "T4_DATA_DIR"})
+	})
 	return cmd
 }

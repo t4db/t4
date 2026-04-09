@@ -7,14 +7,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/pkg/object"
 )
 
 func statusCmd() *cobra.Command {
-	var (
-		bucket   string
-		prefix   string
-		endpoint string
-	)
+	var s3 *s3Flags
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show the S3 storage status of a t4 node",
@@ -23,7 +20,7 @@ total checkpoint and WAL segment counts, and any registered branch forks.
 
 This command does not require a running node — it reads directly from S3.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := newS3Store(cmd.Context(), bucket, prefix, endpoint)
+			store, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
 			if err != nil {
 				return fmt.Errorf("init S3: %w", err)
 			}
@@ -51,7 +48,7 @@ This command does not require a running node — it reads directly from S3.`,
 				return fmt.Errorf("read branch entries: %w", err)
 			}
 
-			fmt.Printf("S3 status  s3://%s/%s\n\n", bucket, prefix)
+			fmt.Printf("S3 status  s3://%s/%s\n\n", s3.Bucket, s3.Prefix)
 
 			fmt.Printf("Latest checkpoint\n")
 			if manifest == nil {
@@ -78,9 +75,6 @@ This command does not require a running node — it reads directly from S3.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&bucket, "s3-bucket", "", "S3 bucket to inspect (required)")
-	cmd.Flags().StringVar(&prefix, "s3-prefix", "", "key prefix inside the S3 bucket")
-	cmd.Flags().StringVar(&endpoint, "s3-endpoint", "", "custom S3 endpoint URL")
-	cmd.MarkFlagRequired("s3-bucket")
+	s3 = addS3Flags(cmd, true)
 	return cmd
 }
