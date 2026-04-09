@@ -763,3 +763,44 @@ func TestTxnMultiKeyDeleteAccuracy(t *testing.T) {
 		t.Errorf("response[1] Deleted: want 0 got %v", dr1)
 	}
 }
+
+// TestTxnVersionNonZeroRejected verifies that VERSION comparisons against a
+// non-zero value return an error rather than silently producing wrong results.
+func TestTxnVersionNonZeroRejected(t *testing.T) {
+	_, cli := newCompatNode(t)
+	ctx := context.Background()
+
+	if _, err := cli.Put(ctx, "/txn/version/key", "v"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	_, err := cli.Txn(ctx).
+		If(clientv3.Compare(clientv3.Version("/txn/version/key"), "=", 2)).
+		Then(clientv3.OpPut("/txn/version/key", "bad")).
+		Commit()
+	if err == nil {
+		t.Fatal("expected error for VERSION == 2, got nil")
+	}
+}
+
+// TestTxnInvalidLeaseRejected verifies that a txn Put referencing a
+// non-existent lease is rejected before any write is committed.
+func TestTxnInvalidLeaseRejected(t *testing.T) {
+	_, cli := newCompatNode(t)
+	ctx := context.Background()
+
+	const bogusLeaseID = 99999999
+	_, err := cli.Txn(ctx).
+		Then(clientv3.OpPut("/txn/lease/key", "v",
+			clientv3.WithLease(clientv3.LeaseID(bogusLeaseID)))).
+		Commit()
+	if err == nil {
+		t.Fatal("expected error for txn Put with non-existent lease, got nil")
+	}
+
+	// Key must not have been written.
+	resp, _ := cli.Get(ctx, "/txn/lease/key")
+	if len(resp.Kvs) != 0 {
+		t.Errorf("key should not exist after rejected txn, got %v", resp.Kvs)
+	}
+}

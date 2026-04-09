@@ -1176,7 +1176,15 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 			code, msg := encodeErr(err)
 			return &peer.ForwardResponse{ErrCode: code, ErrMsg: msg}, nil
 		}
-		return &peer.ForwardResponse{Revision: resp.Revision, Succeeded: resp.Succeeded}, nil
+		deletedKeys := make([]string, 0, len(resp.DeletedKeys))
+		for k := range resp.DeletedKeys {
+			deletedKeys = append(deletedKeys, k)
+		}
+		return &peer.ForwardResponse{
+			Revision:    resp.Revision,
+			Succeeded:   resp.Succeeded,
+			DeletedKeys: deletedKeys,
+		}, nil
 	}
 	return nil, fmt.Errorf("t4: unknown forward op %d", req.Op)
 }
@@ -1749,7 +1757,15 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (TxnResponse, error) {
 		if err != nil {
 			return TxnResponse{}, err
 		}
-		return TxnResponse{Succeeded: resp.Succeeded, Revision: resp.Revision}, decodeErr(resp.ErrCode, resp.ErrMsg)
+		deletedKeys := make(map[string]struct{}, len(resp.DeletedKeys))
+		for _, k := range resp.DeletedKeys {
+			deletedKeys[k] = struct{}{}
+		}
+		return TxnResponse{
+			Succeeded:   resp.Succeeded,
+			Revision:    resp.Revision,
+			DeletedKeys: deletedKeys,
+		}, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()

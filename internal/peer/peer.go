@@ -264,11 +264,12 @@ type ForwardRequest struct {
 
 // ForwardResponse encodes the leader's reply to a forwarded write.
 type ForwardResponse struct {
-	Revision  int64  `json:"revision"`
-	OldKV     *KVMsg `json:"old_kv,omitempty"` // Update / DeleteIfRevision
-	Succeeded bool   `json:"succeeded"`        // CAS result
-	ErrCode   string `json:"err_code,omitempty"`
-	ErrMsg    string `json:"err_msg,omitempty"`
+	Revision    int64    `json:"revision"`
+	OldKV       *KVMsg   `json:"old_kv,omitempty"` // Update / DeleteIfRevision
+	Succeeded   bool     `json:"succeeded"`        // CAS result
+	ErrCode     string   `json:"err_code,omitempty"`
+	ErrMsg      string   `json:"err_msg,omitempty"`
+	DeletedKeys []string `json:"deleted_keys,omitempty"` // ForwardTxn: keys actually removed
 }
 
 // ForwardHandler is implemented by the Node to handle forwarded writes on the

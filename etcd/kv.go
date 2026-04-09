@@ -244,6 +244,16 @@ func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserv
 		return nil, err
 	}
 
+	// Validate leases referenced by Put ops in both branches.  This mirrors
+	// the check in standalone Put and prevents phantom lease IDs from being
+	// committed even if the branch that contains them is never selected.
+	if err := s.validateTxnOpLeases(ctx, r.Success); err != nil {
+		return nil, err
+	}
+	if err := s.validateTxnOpLeases(ctx, r.Failure); err != nil {
+		return nil, err
+	}
+
 	// Execute the atomic write portion.
 	txnResp, err := s.node.Txn(ctx, t4.TxnRequest{
 		Conditions: conds,
@@ -297,14 +307,16 @@ func convertCompare(cmp *etcdserverpb.Compare) (t4.TxnCondition, error) {
 		c.ModRevision = cmp.GetModRevision()
 	case etcdserverpb.Compare_VERSION:
 		// t4 does not track per-key write counts; VERSION is treated as a binary
-		// presence flag (0 = absent, non-zero = present).  Only Equal and
-		// NotEqual are safe; Greater/Less would silently misbehave.
-		if c.Result == t4.TxnCondGreater || c.Result == t4.TxnCondLess {
+		// presence flag (0 = absent, non-zero = present).  Only comparisons against
+		// zero are correct: VERSION == 0 (key absent) and VERSION != 0 (key present).
+		// Any non-zero RHS would produce silently wrong results for keys that have
+		// been updated more than once, so reject them.
+		if cmp.GetVersion() != 0 {
 			return t4.TxnCondition{}, status.Error(codes.Unimplemented,
-				"VERSION GREATER/LESS comparisons are not supported; use MOD revision instead")
+				"VERSION comparisons against non-zero values are not supported; use ModRevision instead")
 		}
 		c.Target = t4.TxnCondVersion
-		c.Version = cmp.GetVersion()
+		c.Version = 0
 	case etcdserverpb.Compare_CREATE:
 		c.Target = t4.TxnCondCreate
 		c.CreateRevision = cmp.GetCreateRevision()
@@ -405,3 +417,19 @@ func (s *Server) Compact(ctx context.Context, r *etcdserverpb.CompactionRequest)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+// validateTxnOpLeases checks that every Put op in ops that carries a non-zero
+// Lease ID refers to an existing lease.  This mirrors the check in standalone
+// Put and prevents phantom lease IDs from being written inside a transaction.
+func (s *Server) validateTxnOpLeases(ctx context.Context, ops []*etcdserverpb.RequestOp) error {
+	for _, op := range ops {
+		if p, ok := op.GetRequest().(*etcdserverpb.RequestOp_RequestPut); ok {
+			if p.RequestPut.Lease != 0 {
+				if _, err := s.getLease(ctx, p.RequestPut.Lease, true); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
