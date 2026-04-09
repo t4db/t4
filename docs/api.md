@@ -43,7 +43,90 @@ DeleteIfRevision(ctx context.Context, key string, revision int64) (int64, *KeyVa
 // Compact discards the history of all keys up to and including revision.
 // The current value of every key is preserved.
 Compact(ctx context.Context, revision int64) error
+
+// Txn evaluates all Conditions atomically under the write lock.
+// If all conditions pass, Success ops are applied; otherwise Failure ops are applied.
+// All writes in the chosen branch are committed at a single revision — every key
+// gets the same ModRevision.
+// Returns ErrNotLeader if the node is a follower and the leader is unreachable.
+Txn(ctx context.Context, req TxnRequest) (TxnResponse, error)
 ```
+
+### Transaction types
+
+```go
+// TxnRequest is the input to Node.Txn.
+type TxnRequest struct {
+    // Conditions are evaluated atomically. All must pass for Success to run.
+    Conditions []TxnCondition
+
+    // Success ops are applied when all Conditions hold. May be nil (no-op check).
+    Success []TxnOp
+
+    // Failure ops are applied when any Condition fails. May be nil.
+    Failure []TxnOp
+}
+
+// TxnResponse is returned by Node.Txn.
+type TxnResponse struct {
+    Succeeded   bool                // true if all Conditions passed
+    Revision    int64               // revision of the write, or current revision for a no-op
+    DeletedKeys map[string]struct{} // set of keys actually removed by the write
+}
+
+// TxnOp is one write operation in a transaction branch.
+type TxnOp struct {
+    Type  TxnOpType // TxnPut or TxnDelete
+    Key   string
+    Value []byte // used for TxnPut
+    Lease int64  // used for TxnPut; must reference a live lease, or 0
+}
+
+// TxnOpType identifies the kind of operation within a transaction branch.
+type TxnOpType uint8
+
+const (
+    TxnPut    TxnOpType = iota // upsert: create or replace key
+    TxnDelete                  // unconditional delete
+)
+
+// TxnCondition is one predicate in the If clause.
+type TxnCondition struct {
+    Key    string
+    Target TxnCondTarget // which metadata field to inspect
+    Result TxnCondResult // comparison operator
+
+    // Exactly one of the following is used, depending on Target:
+    ModRevision    int64
+    CreateRevision int64
+    Version        int64  // 0 = key does not exist; see version note below
+    Value          []byte
+    Lease          int64
+}
+
+// TxnCondTarget identifies which field to compare.
+type TxnCondTarget uint8
+
+const (
+    TxnCondMod     TxnCondTarget = iota // compare ModRevision (last write revision)
+    TxnCondVersion                      // compare Version (write count; 0 = absent)
+    TxnCondCreate                       // compare CreateRevision
+    TxnCondValue                        // compare Value bytes
+    TxnCondLease                        // compare Lease ID
+)
+
+// TxnCondResult is the comparison operator.
+type TxnCondResult uint8
+
+const (
+    TxnCondEqual    TxnCondResult = iota
+    TxnCondNotEqual
+    TxnCondGreater
+    TxnCondLess
+)
+```
+
+**Version note**: T4 does not yet track a per-key write counter. `TxnCondVersion` supports only `Version == 0` (key absent) and `Version != 0` (key present). All other VERSION comparisons return an error. Use `TxnCondMod` for revision-based guards instead.
 
 ---
 

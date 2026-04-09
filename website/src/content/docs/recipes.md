@@ -3,6 +3,112 @@ title: Recipes
 description: Common patterns for using T4 — distributed locks, service discovery, config management, and leader election.
 ---
 
+## Multi-key atomic writes
+
+Use `Txn` when you need to write several keys at once — either all succeed at the same revision or none do.
+
+```go
+// Write /account/balance and /account/last-updated atomically.
+resp, err := node.Txn(ctx, t4.TxnRequest{
+    Success: []t4.TxnOp{
+        {Type: t4.TxnPut, Key: "/account/balance",      Value: []byte("1000")},
+        {Type: t4.TxnPut, Key: "/account/last-updated", Value: []byte(time.Now().Format(time.RFC3339))},
+    },
+})
+if err != nil {
+    return err
+}
+// Both keys now share resp.Revision as their ModRevision.
+```
+
+---
+
+## Conditional multi-key write (check-then-act)
+
+`Txn` lets you guard a write on the current state of one or more keys. The classic pattern is "update a key only if it has not changed since I last read it":
+
+```go
+// Read the current state.
+balanceKV, err := node.Get("/account/balance")
+if err != nil || balanceKV == nil {
+    return fmt.Errorf("account not found")
+}
+currentBalance, _ := strconv.ParseInt(string(balanceKV.Value), 10, 64)
+currentRev := balanceKV.Revision
+
+// Apply a debit only if no one else has modified /account/balance.
+resp, err := node.Txn(ctx, t4.TxnRequest{
+    Conditions: []t4.TxnCondition{
+        {
+            Key:         "/account/balance",
+            Target:      t4.TxnCondMod,
+            Result:      t4.TxnCondEqual,
+            ModRevision: currentRev, // fail if another writer raced us
+        },
+    },
+    Success: []t4.TxnOp{
+        {Type: t4.TxnPut, Key: "/account/balance", Value: []byte(strconv.FormatInt(currentBalance-100, 10))},
+        {Type: t4.TxnPut, Key: "/audit/last-debit", Value: []byte(time.Now().Format(time.RFC3339))},
+    },
+    // Failure branch is empty — condition failed, nothing written.
+})
+if err != nil {
+    return err
+}
+if !resp.Succeeded {
+    return fmt.Errorf("concurrent modification — retry")
+}
+```
+
+### Create-if-absent across multiple keys
+
+Use `TxnCondVersion == 0` to check that a key does not yet exist:
+
+```go
+resp, err := node.Txn(ctx, t4.TxnRequest{
+    Conditions: []t4.TxnCondition{
+        {Key: "/locks/job-42", Target: t4.TxnCondVersion, Result: t4.TxnCondEqual, Version: 0},
+    },
+    Success: []t4.TxnOp{
+        {Type: t4.TxnPut, Key: "/locks/job-42",   Value: []byte("worker-1")},
+        {Type: t4.TxnPut, Key: "/jobs/42/status",  Value: []byte("running")},
+    },
+})
+if err != nil {
+    return err
+}
+if !resp.Succeeded {
+    return fmt.Errorf("job 42 is already locked")
+}
+```
+
+### Atomic move (delete + put)
+
+Move an item from one queue to another atomically — no other worker can claim it between the delete and the put:
+
+```go
+resp, err := node.Txn(ctx, t4.TxnRequest{
+    Conditions: []t4.TxnCondition{
+        // Source key must still be at the revision we read.
+        {Key: "/queue/pending/task-7", Target: t4.TxnCondMod, Result: t4.TxnCondEqual, ModRevision: taskRev},
+    },
+    Success: []t4.TxnOp{
+        {Type: t4.TxnDelete, Key: "/queue/pending/task-7"},
+        {Type: t4.TxnPut,    Key: "/queue/processing/task-7", Value: taskData},
+    },
+})
+if err != nil {
+    return err
+}
+if !resp.Succeeded {
+    return fmt.Errorf("task was already claimed by another worker")
+}
+_, wasDeleted := resp.DeletedKeys["/queue/pending/task-7"]
+_ = wasDeleted // true when the source key existed and was removed
+```
+
+---
+
 ## Distributed lock
 
 Use `Create` + `Delete` for a simple distributed lock. `Create` fails with `ErrKeyExists` if the key already exists, making it safe for concurrent acquisition.
