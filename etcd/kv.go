@@ -2,7 +2,6 @@ package etcd
 
 import (
 	"context"
-	"errors"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -220,91 +219,181 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 
 // Txn implements KVServer.Txn.
 //
-// Supported patterns:
-//   - Single compare on MOD == 0 or VERSION == 0: create-if-not-exists.
-//   - Single compare on MOD == X, Success=Put: compare-and-swap update.
-//   - Single compare on MOD == X, Success=Delete: compare-and-swap delete.
+// All Compare conditions are evaluated atomically. Write ops (Put /
+// DeleteRange) in the selected branch are applied as a single atomic revision.
+// Range ops in the selected branch are executed non-atomically after the write
+// commits (reads see the post-transaction state).
 func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserverpb.TxnResponse, error) {
-	if len(r.Compare) == 0 {
-		ops, err := s.execOps(ctx, r.Success)
+	// Convert conditions.
+	conds := make([]t4.TxnCondition, 0, len(r.Compare))
+	for _, cmp := range r.Compare {
+		cond, err := convertCompare(cmp)
 		if err != nil {
 			return nil, err
 		}
-		return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: true, Responses: ops}, nil
+		conds = append(conds, cond)
 	}
 
-	if len(r.Compare) != 1 {
-		return nil, status.Error(codes.Unimplemented, "multi-key transactions not supported")
-	}
-
-	cmp := r.Compare[0]
-	key := string(cmp.Key)
-	if err := validateUserKey(key); err != nil {
+	// Convert both branches to t4 ops (write ops only).
+	successOps, err := convertWriteOps(r.Success)
+	if err != nil {
 		return nil, err
 	}
-	putOp := successPut(r)
-	delOp := successDelete(r)
+	failureOps, err := convertWriteOps(r.Failure)
+	if err != nil {
+		return nil, err
+	}
 
-	// Create-if-not-exists: compare MOD==0 or VERSION==0.
-	if isZeroCompare(cmp) && putOp != nil {
-		if err := validateUserKey(string(putOp.Key)); err != nil {
-			return nil, err
+	// Execute the atomic write portion.
+	txnResp, err := s.node.Txn(ctx, t4.TxnRequest{
+		Conditions: conds,
+		Success:    successOps,
+		Failure:    failureOps,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Execute any Range ops in the selected branch (non-atomic read after write).
+	selectedBranch := r.Failure
+	if txnResp.Succeeded {
+		selectedBranch = r.Success
+	}
+	responses, err := s.buildTxnResponses(ctx, selectedBranch, txnResp.DeletedKeys)
+	if err != nil {
+		return nil, err
+	}
+
+	return &etcdserverpb.TxnResponse{
+		Header:    s.header(),
+		Succeeded: txnResp.Succeeded,
+		Responses: responses,
+	}, nil
+}
+
+// convertCompare converts a single etcd Compare into a t4 TxnCondition.
+func convertCompare(cmp *etcdserverpb.Compare) (t4.TxnCondition, error) {
+	if err := validateUserKey(string(cmp.Key)); err != nil {
+		return t4.TxnCondition{}, err
+	}
+	c := t4.TxnCondition{Key: string(cmp.Key)}
+
+	switch cmp.Result {
+	case etcdserverpb.Compare_EQUAL:
+		c.Result = t4.TxnCondEqual
+	case etcdserverpb.Compare_NOT_EQUAL:
+		c.Result = t4.TxnCondNotEqual
+	case etcdserverpb.Compare_GREATER:
+		c.Result = t4.TxnCondGreater
+	case etcdserverpb.Compare_LESS:
+		c.Result = t4.TxnCondLess
+	default:
+		return t4.TxnCondition{}, status.Errorf(codes.Unimplemented, "unsupported compare result %v", cmp.Result)
+	}
+
+	switch cmp.Target {
+	case etcdserverpb.Compare_MOD:
+		c.Target = t4.TxnCondMod
+		c.ModRevision = cmp.GetModRevision()
+	case etcdserverpb.Compare_VERSION:
+		// t4 does not track per-key write counts; VERSION is treated as a binary
+		// presence flag (0 = absent, non-zero = present).  Only Equal and
+		// NotEqual are safe; Greater/Less would silently misbehave.
+		if c.Result == t4.TxnCondGreater || c.Result == t4.TxnCondLess {
+			return t4.TxnCondition{}, status.Error(codes.Unimplemented,
+				"VERSION GREATER/LESS comparisons are not supported; use MOD revision instead")
 		}
-		if putOp.Lease != 0 {
-			if _, err := s.getLease(ctx, putOp.Lease, true); err != nil {
+		c.Target = t4.TxnCondVersion
+		c.Version = cmp.GetVersion()
+	case etcdserverpb.Compare_CREATE:
+		c.Target = t4.TxnCondCreate
+		c.CreateRevision = cmp.GetCreateRevision()
+	case etcdserverpb.Compare_VALUE:
+		c.Target = t4.TxnCondValue
+		c.Value = []byte(cmp.GetValue())
+	case etcdserverpb.Compare_LEASE:
+		c.Target = t4.TxnCondLease
+		c.Lease = cmp.GetLease()
+	default:
+		return t4.TxnCondition{}, status.Errorf(codes.Unimplemented, "unsupported compare target %v", cmp.Target)
+	}
+
+	return c, nil
+}
+
+// convertWriteOps extracts the write ops (Put / DeleteRange) from a list of
+// RequestOps and converts them to t4.TxnOps.  Range ops are skipped here and
+// handled later by buildTxnResponses.  Nested Txn ops are rejected.
+func convertWriteOps(ops []*etcdserverpb.RequestOp) ([]t4.TxnOp, error) {
+	var result []t4.TxnOp
+	for _, op := range ops {
+		switch v := op.GetRequest().(type) {
+		case *etcdserverpb.RequestOp_RequestPut:
+			if err := validateUserKey(string(v.RequestPut.Key)); err != nil {
 				return nil, err
 			}
-		}
-		rev, err := s.node.Create(ctx, string(putOp.Key), putOp.Value, putOp.Lease)
-		if err != nil {
-			if errors.Is(err, t4.ErrKeyExists) {
-				ops, _ := s.execOps(ctx, r.Failure)
-				return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: false, Responses: ops}, nil
-			}
-			return nil, err
-		}
-		_ = rev
-		return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: true}, nil
-	}
-
-	// CAS update: compare MOD == X, success = put.
-	if cmp.Target == etcdserverpb.Compare_MOD && cmp.Result == etcdserverpb.Compare_EQUAL && putOp != nil {
-		if err := validateUserKey(string(putOp.Key)); err != nil {
-			return nil, err
-		}
-		if putOp.Lease != 0 {
-			if _, err := s.getLease(ctx, putOp.Lease, true); err != nil {
+			result = append(result, t4.TxnOp{
+				Type:  t4.TxnPut,
+				Key:   string(v.RequestPut.Key),
+				Value: v.RequestPut.Value,
+				Lease: v.RequestPut.Lease,
+			})
+		case *etcdserverpb.RequestOp_RequestDeleteRange:
+			key := string(v.RequestDeleteRange.Key)
+			if err := validateUserKey(key); err != nil {
 				return nil, err
 			}
+			// Only single-key deletes are supported in atomic txn branches.
+			if len(v.RequestDeleteRange.RangeEnd) > 0 {
+				return nil, status.Error(codes.Unimplemented, "range deletes are not supported in transaction branches")
+			}
+			result = append(result, t4.TxnOp{Type: t4.TxnDelete, Key: key})
+		case *etcdserverpb.RequestOp_RequestRange:
+			// Range ops are read-only; handled separately in buildTxnResponses.
+		case *etcdserverpb.RequestOp_RequestTxn:
+			return nil, status.Error(codes.Unimplemented, "nested transactions are not supported")
 		}
-		_, _, ok, err := s.node.Update(ctx, key, putOp.Value, cmp.GetModRevision(), putOp.Lease)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			ops, _ := s.execOps(ctx, r.Failure)
-			return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: false, Responses: ops}, nil
-		}
-		return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: true}, nil
 	}
+	return result, nil
+}
 
-	// CAS delete: compare MOD == X, success = delete.
-	if cmp.Target == etcdserverpb.Compare_MOD && cmp.Result == etcdserverpb.Compare_EQUAL && delOp != nil {
-		if err := validateUserKey(string(delOp.Key)); err != nil {
-			return nil, err
+// buildTxnResponses builds the ResponseOp list for the selected transaction
+// branch. Write ops get responses based on the committed state; Range ops are
+// executed and their results included.
+func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.RequestOp, deletedKeys map[string]struct{}) ([]*etcdserverpb.ResponseOp, error) {
+	responses := make([]*etcdserverpb.ResponseOp, 0, len(ops))
+	hdr := s.header()
+	for _, op := range ops {
+		switch v := op.GetRequest().(type) {
+		case *etcdserverpb.RequestOp_RequestPut:
+			responses = append(responses, &etcdserverpb.ResponseOp{
+				Response: &etcdserverpb.ResponseOp_ResponsePut{
+					ResponsePut: &etcdserverpb.PutResponse{Header: hdr},
+				},
+			})
+		case *etcdserverpb.RequestOp_RequestDeleteRange:
+			var deleted int64
+			if _, ok := deletedKeys[string(v.RequestDeleteRange.Key)]; ok {
+				deleted = 1
+			}
+			responses = append(responses, &etcdserverpb.ResponseOp{
+				Response: &etcdserverpb.ResponseOp_ResponseDeleteRange{
+					ResponseDeleteRange: &etcdserverpb.DeleteRangeResponse{Header: hdr, Deleted: deleted},
+				},
+			})
+		case *etcdserverpb.RequestOp_RequestRange:
+			resp, err := s.Range(ctx, v.RequestRange)
+			if err != nil {
+				return nil, err
+			}
+			responses = append(responses, &etcdserverpb.ResponseOp{
+				Response: &etcdserverpb.ResponseOp_ResponseRange{ResponseRange: resp},
+			})
+		case *etcdserverpb.RequestOp_RequestTxn:
+			return nil, status.Error(codes.Unimplemented, "nested transactions are not supported")
 		}
-		_, _, ok, err := s.node.DeleteIfRevision(ctx, key, cmp.GetModRevision())
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			ops, _ := s.execOps(ctx, r.Failure)
-			return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: false, Responses: ops}, nil
-		}
-		return &etcdserverpb.TxnResponse{Header: s.header(), Succeeded: true}, nil
 	}
-
-	return nil, status.Errorf(codes.Unimplemented, "unsupported transaction pattern (target=%v result=%v)", cmp.Target, cmp.Result)
+	return responses, nil
 }
 
 // Compact implements KVServer.Compact.
@@ -316,68 +405,3 @@ func (s *Server) Compact(ctx context.Context, r *etcdserverpb.CompactionRequest)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
-
-// isZeroCompare returns true for "MOD == 0" or "VERSION == 0" compares,
-// which are the create-if-not-exists patterns.
-func isZeroCompare(c *etcdserverpb.Compare) bool {
-	if c.Result != etcdserverpb.Compare_EQUAL {
-		return false
-	}
-	switch c.Target {
-	case etcdserverpb.Compare_MOD:
-		return c.GetModRevision() == 0
-	case etcdserverpb.Compare_VERSION:
-		return c.GetVersion() == 0
-	case etcdserverpb.Compare_CREATE:
-		return c.GetCreateRevision() == 0
-	}
-	return false
-}
-
-// successPut returns the PutRequest from the first Success op, or nil.
-func successPut(r *etcdserverpb.TxnRequest) *etcdserverpb.PutRequest {
-	if len(r.Success) == 1 {
-		if p, ok := r.Success[0].GetRequest().(*etcdserverpb.RequestOp_RequestPut); ok {
-			return p.RequestPut
-		}
-	}
-	return nil
-}
-
-// successDelete returns the DeleteRangeRequest from the first Success op, or nil.
-func successDelete(r *etcdserverpb.TxnRequest) *etcdserverpb.DeleteRangeRequest {
-	if len(r.Success) == 1 {
-		if d, ok := r.Success[0].GetRequest().(*etcdserverpb.RequestOp_RequestDeleteRange); ok {
-			return d.RequestDeleteRange
-		}
-	}
-	return nil
-}
-
-// execOps executes a list of RequestOps and returns their ResponseOps.
-func (s *Server) execOps(ctx context.Context, ops []*etcdserverpb.RequestOp) ([]*etcdserverpb.ResponseOp, error) {
-	results := make([]*etcdserverpb.ResponseOp, len(ops))
-	for i, op := range ops {
-		switch v := op.GetRequest().(type) {
-		case *etcdserverpb.RequestOp_RequestRange:
-			resp, err := s.Range(ctx, v.RequestRange)
-			if err != nil {
-				return nil, err
-			}
-			results[i] = &etcdserverpb.ResponseOp{Response: &etcdserverpb.ResponseOp_ResponseRange{ResponseRange: resp}}
-		case *etcdserverpb.RequestOp_RequestPut:
-			resp, err := s.Put(ctx, v.RequestPut)
-			if err != nil {
-				return nil, err
-			}
-			results[i] = &etcdserverpb.ResponseOp{Response: &etcdserverpb.ResponseOp_ResponsePut{ResponsePut: resp}}
-		case *etcdserverpb.RequestOp_RequestDeleteRange:
-			resp, err := s.DeleteRange(ctx, v.RequestDeleteRange)
-			if err != nil {
-				return nil, err
-			}
-			results[i] = &etcdserverpb.ResponseOp{Response: &etcdserverpb.ResponseOp_ResponseDeleteRange{ResponseDeleteRange: resp}}
-		}
-	}
-	return results, nil
-}

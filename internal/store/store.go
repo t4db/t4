@@ -230,13 +230,33 @@ func (s *Store) Recover(entries []wal.Entry) error {
 			// newer term may write a different key at the same revision as the
 			// old term. Remove any stale index pointer before overwriting the
 			// log entry so idx[oldKey]=rev doesn't dangle.
-			if old, closer, err := s.db.Get(logKey(e.Revision)); err == nil {
-				r, rerr := unmarshalRecord(old)
-				closer.Close()
-				if rerr == nil && !r.delete && r.key != e.Key {
-					if err := b.Delete(idxKey(r.key), pebble.NoSync); err != nil {
-						b.Close()
-						return fmt.Errorf("store: cleanup stale idx %q rev=%d: %w", r.key, e.Revision, err)
+			//
+			// For OpTxn entries we must also purge any stale sub-keys at this
+			// revision written by a previous term (single-key or txn).
+			if e.Op == wal.OpTxn {
+				// Delete all existing log entries in [logKey(rev), logKey(rev+1))
+				// and remove any dangling idx pointers they reference.
+				lo := logKey(e.Revision)
+				hi := logKey(e.Revision + 1)
+				iter, iterErr := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+				if iterErr == nil {
+					for iter.First(); iter.Valid(); iter.Next() {
+						if stale, serr := unmarshalRecord(iter.Value()); serr == nil && !stale.delete {
+							_ = b.Delete(idxKey(stale.key), pebble.NoSync)
+						}
+						_ = b.Delete(iter.Key(), pebble.NoSync)
+					}
+					iter.Close()
+				}
+			} else {
+				if old, closer, err := s.db.Get(logKey(e.Revision)); err == nil {
+					r, rerr := unmarshalRecord(old)
+					closer.Close()
+					if rerr == nil && !r.delete && r.key != e.Key {
+						if err := b.Delete(idxKey(r.key), pebble.NoSync); err != nil {
+							b.Close()
+							return fmt.Errorf("store: cleanup stale idx %q rev=%d: %w", r.key, e.Revision, err)
+						}
 					}
 				}
 			}
@@ -266,6 +286,9 @@ func (s *Store) Recover(entries []wal.Entry) error {
 }
 
 func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
+	if e.Op == wal.OpTxn {
+		return s.applyTxnEntry(b, e)
+	}
 	lk := logKey(e.Revision)
 
 	r := &record{
@@ -288,6 +311,42 @@ func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
 	} else {
 		if err := b.Set(ik, encodeRev(e.Revision), pebble.NoSync); err != nil {
 			return fmt.Errorf("store: set idx key %q rev=%d: %w", e.Key, e.Revision, err)
+		}
+	}
+	return nil
+}
+
+// applyTxnEntry decodes and atomically applies all sub-operations from an
+// OpTxn WAL entry. Each sub-op is stored at logKeyWithSub(rev, i) so that
+// the log scan in Watch returns one event per key at the transaction revision.
+func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) error {
+	ops, err := wal.DecodeTxnOps(e.Value)
+	if err != nil {
+		return fmt.Errorf("store: decode txn ops rev=%d: %w", e.Revision, err)
+	}
+	for i, op := range ops {
+		lk := logKeyWithSub(e.Revision, uint16(i))
+		r := &record{
+			key:            op.Key,
+			value:          op.Value,
+			createRevision: op.CreateRevision,
+			prevRevision:   op.PrevRevision,
+			lease:          op.Lease,
+			create:         op.Op == wal.OpCreate,
+			delete:         op.Op == wal.OpDelete,
+		}
+		if err := b.Set(lk, marshalRecord(r), pebble.NoSync); err != nil {
+			return fmt.Errorf("store: set txn log key rev=%d sub=%d: %w", e.Revision, i, err)
+		}
+		ik := idxKey(op.Key)
+		if op.Op == wal.OpDelete {
+			if err := b.Delete(ik, pebble.NoSync); err != nil {
+				return fmt.Errorf("store: delete txn idx key %q: %w", op.Key, err)
+			}
+		} else {
+			if err := b.Set(ik, encodeRev(e.Revision), pebble.NoSync); err != nil {
+				return fmt.Errorf("store: set txn idx key %q rev=%d: %w", op.Key, e.Revision, err)
+			}
 		}
 	}
 	return nil
@@ -412,23 +471,53 @@ func (s *Store) getIdxRev(key string) (int64, error) {
 }
 
 func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
+	// Fast path: non-txn entries are stored at logKey(rev).
 	v, closer, err := s.db.Get(logKey(rev))
-	if err != nil {
+	if err == nil {
+		defer closer.Close()
+		r, err := unmarshalRecord(v)
+		if err != nil {
+			return nil, err
+		}
+		return &KeyValue{
+			Key:            key,
+			Value:          r.value,
+			Revision:       rev,
+			CreateRevision: r.createRevision,
+			PrevRevision:   r.prevRevision,
+			Lease:          r.lease,
+		}, nil
+	}
+	if err != pebble.ErrNotFound {
 		return nil, fmt.Errorf("store: get log rev=%d: %w", rev, err)
 	}
-	defer closer.Close()
-	r, err := unmarshalRecord(v)
-	if err != nil {
-		return nil, err
+
+	// Slow path: txn entries are stored at logKeyWithSub(rev, subIndex).
+	// Scan all sub-keys at this revision and find the one matching key.
+	lower := logKeyWithSub(rev, 0)
+	upper := logKey(rev + 1)
+	iter, iterErr := s.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if iterErr != nil {
+		return nil, fmt.Errorf("store: get log txn scan rev=%d: %w", rev, iterErr)
 	}
-	return &KeyValue{
-		Key:            key,
-		Value:          r.value,
-		Revision:       rev,
-		CreateRevision: r.createRevision,
-		PrevRevision:   r.prevRevision,
-		Lease:          r.lease,
-	}, nil
+	defer iter.Close()
+	for iter.First(); iter.Valid(); iter.Next() {
+		r, rerr := unmarshalRecord(iter.Value())
+		if rerr != nil {
+			continue
+		}
+		if r.key == key {
+			return &KeyValue{
+				Key:            key,
+				Value:          r.value,
+				Revision:       rev,
+				CreateRevision: r.createRevision,
+				PrevRevision:   r.prevRevision,
+				Lease:          r.lease,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("store: get log rev=%d key=%q: not found in txn sub-ops", rev, key)
 }
 
 // List returns all live keys with the given prefix, sorted lexicographically.

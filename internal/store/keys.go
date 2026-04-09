@@ -58,8 +58,20 @@ func logKey(rev int64) []byte {
 	return k
 }
 
+// logKeyWithSub encodes a revision + sub-index as a pebble log key.
+// Used to store individual operations within an OpTxn entry; all sub-keys
+// for a given revision sort between logKey(rev) and logKey(rev+1).
+func logKeyWithSub(rev int64, sub uint16) []byte {
+	k := make([]byte, 11)
+	k[0] = prefixLog
+	binary.BigEndian.PutUint64(k[1:], uint64(rev))
+	binary.BigEndian.PutUint16(k[9:], sub)
+	return k
+}
+
+// decodeLogKey extracts the revision from a log key (9 or 11 bytes).
 func decodeLogKey(k []byte) int64 {
-	return int64(binary.BigEndian.Uint64(k[1:]))
+	return int64(binary.BigEndian.Uint64(k[1:9]))
 }
 
 func idxKey(key string) []byte {

@@ -20,6 +20,9 @@ const (
 	OpUpdate  Op = 2
 	OpDelete  Op = 3
 	OpCompact Op = 4
+	// OpTxn is a multi-key atomic transaction. Key is empty; sub-operations
+	// are encoded in Value using EncodeTxnOps / DecodeTxnOps.
+	OpTxn Op = 5
 )
 
 // Entry is one record in the write-ahead log.
@@ -32,6 +35,82 @@ type Entry struct {
 	Lease          int64
 	CreateRevision int64 // meaningful for Update/Delete
 	PrevRevision   int64 // meaningful for Update/Delete
+}
+
+// TxnSubOp is one operation within an OpTxn entry.
+// Op must be OpCreate, OpUpdate, or OpDelete.
+type TxnSubOp struct {
+	Op             Op
+	Key            string
+	Value          []byte
+	Lease          int64
+	CreateRevision int64
+	PrevRevision   int64
+}
+
+// txnSubOpFixedSize: op(1) + lease(8) + createRev(8) + prevRev(8) + keyLen(4) + valLen(4) = 33
+const txnSubOpFixedSize = 33
+
+// EncodeTxnOps encodes a slice of TxnSubOp into a byte slice for storage in
+// an OpTxn Entry's Value field.
+func EncodeTxnOps(ops []TxnSubOp) []byte {
+	total := 4 // uint32 count prefix
+	for i := range ops {
+		total += txnSubOpFixedSize + len(ops[i].Key) + len(ops[i].Value)
+	}
+	buf := make([]byte, total)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(len(ops)))
+	off := 4
+	for i := range ops {
+		o := &ops[i]
+		buf[off] = byte(o.Op)
+		binary.BigEndian.PutUint64(buf[off+1:], uint64(o.Lease))
+		binary.BigEndian.PutUint64(buf[off+9:], uint64(o.CreateRevision))
+		binary.BigEndian.PutUint64(buf[off+17:], uint64(o.PrevRevision))
+		binary.BigEndian.PutUint32(buf[off+25:], uint32(len(o.Key)))
+		binary.BigEndian.PutUint32(buf[off+29:], uint32(len(o.Value)))
+		off += txnSubOpFixedSize
+		copy(buf[off:], o.Key)
+		off += len(o.Key)
+		copy(buf[off:], o.Value)
+		off += len(o.Value)
+	}
+	return buf
+}
+
+// DecodeTxnOps decodes a byte slice produced by EncodeTxnOps.
+func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
+	if len(b) < 4 {
+		return nil, fmt.Errorf("wal: txn ops payload too short (%d bytes)", len(b))
+	}
+	count := int(binary.BigEndian.Uint32(b[0:4]))
+	ops := make([]TxnSubOp, 0, count)
+	off := 4
+	for i := 0; i < count; i++ {
+		if len(b)-off < txnSubOpFixedSize {
+			return nil, fmt.Errorf("wal: txn sub-op %d header truncated", i)
+		}
+		o := TxnSubOp{}
+		o.Op = Op(b[off])
+		o.Lease = int64(binary.BigEndian.Uint64(b[off+1:]))
+		o.CreateRevision = int64(binary.BigEndian.Uint64(b[off+9:]))
+		o.PrevRevision = int64(binary.BigEndian.Uint64(b[off+17:]))
+		keyLen := int(binary.BigEndian.Uint32(b[off+25:]))
+		valLen := int(binary.BigEndian.Uint32(b[off+29:]))
+		off += txnSubOpFixedSize
+		if len(b)-off < keyLen+valLen {
+			return nil, fmt.Errorf("wal: txn sub-op %d payload truncated (need %d, have %d)", i, keyLen+valLen, len(b)-off)
+		}
+		o.Key = string(b[off : off+keyLen])
+		off += keyLen
+		if valLen > 0 {
+			o.Value = make([]byte, valLen)
+			copy(o.Value, b[off:])
+		}
+		off += valLen
+		ops = append(ops, o)
+	}
+	return ops, nil
 }
 
 // Wire layout:

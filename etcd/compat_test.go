@@ -610,3 +610,156 @@ func TestCompatDeleteRevisionAdvances(t *testing.T) {
 		t.Errorf("Delete revision %d should be > put revision %d", dr.Header.Revision, putRev)
 	}
 }
+
+// TestTxnMultiKeyAtomic verifies that a multi-key transaction writes all keys
+// at the same revision and that all keys are visible after the txn commits.
+func TestTxnMultiKeyAtomic(t *testing.T) {
+	_, cli := newCompatNode(t)
+	ctx := context.Background()
+
+	txnResp, err := cli.Txn(ctx).
+		Then(
+			clientv3.OpPut("/txn/multi/a", "alpha"),
+			clientv3.OpPut("/txn/multi/b", "beta"),
+			clientv3.OpPut("/txn/multi/c", "gamma"),
+		).
+		Commit()
+	if err != nil {
+		t.Fatalf("Txn: %v", err)
+	}
+	if !txnResp.Succeeded {
+		t.Fatal("Txn: want Succeeded=true")
+	}
+
+	// All keys must be present and share the same ModRevision.
+	getResp, err := cli.Get(ctx, "/txn/multi/", clientv3.WithPrefix())
+	if err != nil {
+		t.Fatalf("Get prefix: %v", err)
+	}
+	if len(getResp.Kvs) != 3 {
+		t.Fatalf("want 3 keys, got %d", len(getResp.Kvs))
+	}
+	rev := getResp.Kvs[0].ModRevision
+	for _, kv := range getResp.Kvs {
+		if kv.ModRevision != rev {
+			t.Errorf("key %q: ModRevision %d != txn revision %d", kv.Key, kv.ModRevision, rev)
+		}
+	}
+}
+
+// TestTxnMultiKeyConditionalSuccess verifies that a true condition applies the
+// Then branch atomically across multiple keys.
+func TestTxnMultiKeyConditionalSuccess(t *testing.T) {
+	_, cli := newCompatNode(t)
+	ctx := context.Background()
+
+	putResp, err := cli.Put(ctx, "/txn/cond/lock", "free")
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	lockRev := putResp.Header.Revision
+
+	txnResp, err := cli.Txn(ctx).
+		If(clientv3.Compare(clientv3.ModRevision("/txn/cond/lock"), "=", lockRev)).
+		Then(
+			clientv3.OpPut("/txn/cond/lock", "held"),
+			clientv3.OpPut("/txn/cond/data", "written"),
+		).
+		Else(clientv3.OpPut("/txn/cond/data", "not-written")).
+		Commit()
+	if err != nil {
+		t.Fatalf("Txn: %v", err)
+	}
+	if !txnResp.Succeeded {
+		t.Fatal("want Succeeded=true")
+	}
+
+	lock, _ := cli.Get(ctx, "/txn/cond/lock")
+	data, _ := cli.Get(ctx, "/txn/cond/data")
+	if len(lock.Kvs) == 0 || string(lock.Kvs[0].Value) != "held" {
+		t.Errorf("lock: want held, got %v", lock.Kvs)
+	}
+	if len(data.Kvs) == 0 || string(data.Kvs[0].Value) != "written" {
+		t.Errorf("data: want written, got %v", data.Kvs)
+	}
+	if lock.Kvs[0].ModRevision != data.Kvs[0].ModRevision {
+		t.Errorf("lock and data must share revision: %d vs %d",
+			lock.Kvs[0].ModRevision, data.Kvs[0].ModRevision)
+	}
+}
+
+// TestTxnMultiKeyConditionalFailure verifies that a false condition applies the
+// Else branch and returns Succeeded=false.
+func TestTxnMultiKeyConditionalFailure(t *testing.T) {
+	_, cli := newCompatNode(t)
+	ctx := context.Background()
+
+	if _, err := cli.Put(ctx, "/txn/fail/key", "v1"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// Second write to bump ModRevision past 0.
+	if _, err := cli.Put(ctx, "/txn/fail/key", "v2"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	txnResp, err := cli.Txn(ctx).
+		If(clientv3.Compare(clientv3.ModRevision("/txn/fail/key"), "=", 0)).
+		Then(clientv3.OpPut("/txn/fail/result", "success")).
+		Else(
+			clientv3.OpPut("/txn/fail/result", "failure"),
+			clientv3.OpPut("/txn/fail/extra", "extra-value"),
+		).
+		Commit()
+	if err != nil {
+		t.Fatalf("Txn: %v", err)
+	}
+	if txnResp.Succeeded {
+		t.Fatal("want Succeeded=false")
+	}
+
+	result, _ := cli.Get(ctx, "/txn/fail/result")
+	extra, _ := cli.Get(ctx, "/txn/fail/extra")
+	if len(result.Kvs) == 0 || string(result.Kvs[0].Value) != "failure" {
+		t.Errorf("result: want failure, got %v", result.Kvs)
+	}
+	if len(extra.Kvs) == 0 || string(extra.Kvs[0].Value) != "extra-value" {
+		t.Errorf("extra: want extra-value, got %v", extra.Kvs)
+	}
+	if result.Kvs[0].ModRevision != extra.Kvs[0].ModRevision {
+		t.Errorf("result and extra must share revision: %d vs %d",
+			result.Kvs[0].ModRevision, extra.Kvs[0].ModRevision)
+	}
+}
+
+// TestTxnMultiKeyDeleteAccuracy verifies that Deleted counts reflect actual
+// deletions rather than blindly reporting 1 per delete op.
+func TestTxnMultiKeyDeleteAccuracy(t *testing.T) {
+	_, cli := newCompatNode(t)
+	ctx := context.Background()
+
+	if _, err := cli.Put(ctx, "/txn/del/exists", "yes"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	txnResp, err := cli.Txn(ctx).
+		Then(
+			clientv3.OpDelete("/txn/del/exists"),  // exists → Deleted=1
+			clientv3.OpDelete("/txn/del/missing"), // absent → Deleted=0
+		).
+		Commit()
+	if err != nil {
+		t.Fatalf("Txn: %v", err)
+	}
+
+	if len(txnResp.Responses) != 2 {
+		t.Fatalf("want 2 responses, got %d", len(txnResp.Responses))
+	}
+	dr0 := txnResp.Responses[0].GetResponseDeleteRange()
+	dr1 := txnResp.Responses[1].GetResponseDeleteRange()
+	if dr0 == nil || dr0.Deleted != 1 {
+		t.Errorf("response[0] Deleted: want 1 got %v", dr0)
+	}
+	if dr1 == nil || dr1.Deleted != 0 {
+		t.Errorf("response[1] Deleted: want 0 got %v", dr1)
+	}
+}

@@ -212,6 +212,7 @@ const (
 	ForwardDeleteIfRevision           // CAS delete by revision (revision=0 = unconditional)
 	ForwardCompact                    // compact up to Revision
 	ForwardGetRevision                // ReadIndex: returns the leader's current revision
+	ForwardTxn                        // multi-key atomic transaction
 )
 
 // KVMsg is the wire representation of a key-value record.
@@ -224,13 +225,41 @@ type KVMsg struct {
 	Lease          int64  `json:"lease"`
 }
 
+// TxnCondMsg is the wire representation of a TxnCondition.
+type TxnCondMsg struct {
+	Key            string `json:"key"`
+	Target         uint8  `json:"target"`
+	Result         uint8  `json:"result"`
+	ModRevision    int64  `json:"mod_revision,omitempty"`
+	CreateRevision int64  `json:"create_revision,omitempty"`
+	Version        int64  `json:"version,omitempty"`
+	Value          []byte `json:"value,omitempty"`
+	Lease          int64  `json:"lease,omitempty"`
+}
+
+// TxnOpMsg is the wire representation of a TxnOp (one branch operation).
+type TxnOpMsg struct {
+	Type  uint8  `json:"type"` // 0=put, 1=delete
+	Key   string `json:"key"`
+	Value []byte `json:"value,omitempty"`
+	Lease int64  `json:"lease,omitempty"`
+}
+
+// TxnReqMsg is the wire representation of a TxnRequest.
+type TxnReqMsg struct {
+	Conditions []TxnCondMsg `json:"conditions,omitempty"`
+	Success    []TxnOpMsg   `json:"success,omitempty"`
+	Failure    []TxnOpMsg   `json:"failure,omitempty"`
+}
+
 // ForwardRequest encodes a write operation for forwarding to the leader.
 type ForwardRequest struct {
-	Op       ForwardOp `json:"op"`
-	Key      string    `json:"key"`
-	Value    []byte    `json:"value,omitempty"`
-	Revision int64     `json:"revision,omitempty"` // CAS revision / compact target
-	Lease    int64     `json:"lease,omitempty"`
+	Op       ForwardOp  `json:"op"`
+	Key      string     `json:"key"`
+	Value    []byte     `json:"value,omitempty"`
+	Revision int64      `json:"revision,omitempty"` // CAS revision / compact target
+	Lease    int64      `json:"lease,omitempty"`
+	TxnReq   *TxnReqMsg `json:"txn,omitempty"` // ForwardTxn only
 }
 
 // ForwardResponse encodes the leader's reply to a forwarded write.

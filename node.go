@@ -44,6 +44,74 @@ var (
 	ErrCompacted = errors.New("t4: required revision has been compacted")
 )
 
+// TxnCondTarget identifies which field of a key's metadata is compared.
+type TxnCondTarget uint8
+
+const (
+	TxnCondMod     TxnCondTarget = iota // compare ModRevision
+	TxnCondVersion                      // compare Version (write count; 0 = does not exist)
+	TxnCondCreate                       // compare CreateRevision
+	TxnCondValue                        // compare Value bytes
+	TxnCondLease                        // compare Lease ID
+)
+
+// TxnCondResult is the comparison operator for a TxnCondition.
+type TxnCondResult uint8
+
+const (
+	TxnCondEqual    TxnCondResult = iota
+	TxnCondNotEqual               //nolint:deadcode
+	TxnCondGreater
+	TxnCondLess
+)
+
+// TxnCondition is one predicate in a transaction's If clause.
+// All conditions in a TxnRequest are evaluated atomically under the write
+// lock; no revision can change between evaluating the first and last condition.
+type TxnCondition struct {
+	Key    string
+	Target TxnCondTarget
+	Result TxnCondResult
+	// Exactly one of the following is used, depending on Target:
+	ModRevision    int64
+	CreateRevision int64
+	Version        int64  // number of writes to key; 0 means key does not exist
+	Value          []byte
+	Lease          int64
+}
+
+// TxnOpType identifies the kind of operation within a transaction branch.
+type TxnOpType uint8
+
+const (
+	TxnPut    TxnOpType = iota // upsert
+	TxnDelete                  // unconditional delete
+)
+
+// TxnOp is one write operation in a transaction's Then or Else branch.
+type TxnOp struct {
+	Type  TxnOpType
+	Key   string
+	Value []byte
+	Lease int64
+}
+
+// TxnRequest is the input to Node.Txn.
+// If all Conditions are met the Success ops are applied atomically; otherwise
+// the Failure ops are applied atomically (may be empty for a read-only else).
+type TxnRequest struct {
+	Conditions []TxnCondition
+	Success    []TxnOp
+	Failure    []TxnOp
+}
+
+// TxnResponse is returned by Node.Txn.
+type TxnResponse struct {
+	Succeeded   bool              // true if all Conditions were satisfied
+	Revision    int64             // revision assigned to the write, or current revision if no-op
+	DeletedKeys map[string]struct{} // set of keys actually removed by the txn's write ops
+}
+
 // nodeRole identifies whether the node is leader, follower, or single-node.
 type nodeRole int32
 
@@ -1097,6 +1165,18 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		rev := n.nextRev
 		n.mu.Unlock()
 		return &peer.ForwardResponse{Revision: rev, Succeeded: true}, nil
+
+	case peer.ForwardTxn:
+		if req.TxnReq == nil {
+			return nil, fmt.Errorf("t4: ForwardTxn missing TxnReq")
+		}
+		txnReq := forwardMsgToTxnRequest(req.TxnReq)
+		resp, err := n.Txn(ctx, txnReq)
+		if err != nil {
+			code, msg := encodeErr(err)
+			return &peer.ForwardResponse{ErrCode: code, ErrMsg: msg}, nil
+		}
+		return &peer.ForwardResponse{Revision: resp.Revision, Succeeded: resp.Succeeded}, nil
 	}
 	return nil, fmt.Errorf("t4: unknown forward op %d", req.Op)
 }
@@ -1129,6 +1209,8 @@ func fwdOpLabel(op peer.ForwardOp) string {
 		return "compact"
 	case peer.ForwardGetRevision:
 		return "get_revision"
+	case peer.ForwardTxn:
+		return "txn"
 	default:
 		return "unknown"
 	}
@@ -1588,6 +1670,319 @@ func (n *Node) readKey(key string) (*istore.KeyValue, error) {
 	return n.db.Load().Get(key)
 }
 
+// txnCondMatches reports whether existing satisfies cond.
+// existing is nil when the key does not exist.
+//
+// Note on TxnCondVersion: t4 does not track a per-key write count, so Version
+// is treated as a binary presence flag — 0 means the key is absent, 1 means it
+// is present. TxnCondGreater and TxnCondLess on Version are therefore
+// semantically equivalent to "> 0" and "< 1" respectively; callers that need
+// accurate multi-version comparisons should use TxnCondMod instead.
+func txnCondMatches(cond TxnCondition, existing *istore.KeyValue) bool {
+	var (
+		modRev    int64
+		createRev int64
+		version   int64
+		lease     int64
+		val       []byte
+	)
+	if existing != nil {
+		modRev = existing.Revision
+		createRev = existing.CreateRevision
+		version = 1 // t4 does not track per-key write count; treat as "exists"
+		lease = existing.Lease
+		val = existing.Value
+	}
+
+	var lhs, rhs int64
+	switch cond.Target {
+	case TxnCondMod:
+		lhs, rhs = modRev, cond.ModRevision
+	case TxnCondVersion:
+		lhs, rhs = version, cond.Version
+	case TxnCondCreate:
+		lhs, rhs = createRev, cond.CreateRevision
+	case TxnCondLease:
+		lhs, rhs = lease, cond.Lease
+	case TxnCondValue:
+		switch cond.Result {
+		case TxnCondEqual:
+			return string(val) == string(cond.Value)
+		case TxnCondNotEqual:
+			return string(val) != string(cond.Value)
+		default:
+			return false // ordering on Value bytes not supported
+		}
+	default:
+		return false
+	}
+	switch cond.Result {
+	case TxnCondEqual:
+		return lhs == rhs
+	case TxnCondNotEqual:
+		return lhs != rhs
+	case TxnCondGreater:
+		return lhs > rhs
+	case TxnCondLess:
+		return lhs < rhs
+	default:
+		return false
+	}
+}
+
+// Txn executes an atomic multi-key transaction.
+//
+// All Conditions are evaluated under the write lock in a single atomic step.
+// If every condition is satisfied the Success ops are applied and Succeeded is
+// true; otherwise the Failure ops are applied and Succeeded is false.
+// Either branch may be empty — if no ops need to be written the method returns
+// immediately with the current revision.
+//
+// All write ops within the selected branch share a single revision and are
+// committed to the WAL in one entry, ensuring crash-safe atomicity.
+func (n *Node) Txn(ctx context.Context, req TxnRequest) (TxnResponse, error) {
+	if n.closed.Load() {
+		return TxnResponse{}, ErrClosed
+	}
+	if n.loadRole() == roleFollower {
+		resp, err := n.forwardWrite(ctx, txnToForwardRequest(req))
+		if err != nil {
+			return TxnResponse{}, err
+		}
+		return TxnResponse{Succeeded: resp.Succeeded, Revision: resp.Revision}, decodeErr(resp.ErrCode, resp.ErrMsg)
+	}
+	n.fenceMu.RLock()
+	defer n.fenceMu.RUnlock()
+	start := time.Now()
+	n.mu.Lock()
+	if n.closed.Load() {
+		n.mu.Unlock()
+		return TxnResponse{}, ErrClosed
+	}
+	e, succeeded, deletedKeys, err := n.prepareTxn(req)
+	if err != nil {
+		n.mu.Unlock()
+		return TxnResponse{}, err
+	}
+	if e.Op == 0 {
+		// No-op branch: conditions evaluated but no writes needed.
+		curRev := n.nextRev
+		n.mu.Unlock()
+		return TxnResponse{Succeeded: succeeded, Revision: curRev}, nil
+	}
+	wr := newWriteReq(ctx, e)
+	n.writeC <- wr
+	n.mu.Unlock()
+	rev, err := n.await(ctx, wr, "txn", start, "", e.Revision)
+	if err != nil {
+		return TxnResponse{}, err
+	}
+	return TxnResponse{Succeeded: succeeded, Revision: rev, DeletedKeys: deletedKeys}, nil
+}
+
+// txnToForwardRequest converts a TxnRequest into a peer ForwardRequest for
+// follower-to-leader forwarding.
+func txnToForwardRequest(req TxnRequest) *peer.ForwardRequest {
+	conds := make([]peer.TxnCondMsg, len(req.Conditions))
+	for i, c := range req.Conditions {
+		conds[i] = peer.TxnCondMsg{
+			Key:            c.Key,
+			Target:         uint8(c.Target),
+			Result:         uint8(c.Result),
+			ModRevision:    c.ModRevision,
+			CreateRevision: c.CreateRevision,
+			Version:        c.Version,
+			Value:          c.Value,
+			Lease:          c.Lease,
+		}
+	}
+	success := txnOpsToMsg(req.Success)
+	failure := txnOpsToMsg(req.Failure)
+	return &peer.ForwardRequest{
+		Op: peer.ForwardTxn,
+		TxnReq: &peer.TxnReqMsg{
+			Conditions: conds,
+			Success:    success,
+			Failure:    failure,
+		},
+	}
+}
+
+func txnOpsToMsg(ops []TxnOp) []peer.TxnOpMsg {
+	if len(ops) == 0 {
+		return nil
+	}
+	msgs := make([]peer.TxnOpMsg, len(ops))
+	for i, op := range ops {
+		msgs[i] = peer.TxnOpMsg{
+			Type:  uint8(op.Type),
+			Key:   op.Key,
+			Value: op.Value,
+			Lease: op.Lease,
+		}
+	}
+	return msgs
+}
+
+// forwardMsgToTxnRequest converts a peer TxnReqMsg back to a TxnRequest.
+func forwardMsgToTxnRequest(m *peer.TxnReqMsg) TxnRequest {
+	conds := make([]TxnCondition, len(m.Conditions))
+	for i, c := range m.Conditions {
+		conds[i] = TxnCondition{
+			Key:            c.Key,
+			Target:         TxnCondTarget(c.Target),
+			Result:         TxnCondResult(c.Result),
+			ModRevision:    c.ModRevision,
+			CreateRevision: c.CreateRevision,
+			Version:        c.Version,
+			Value:          c.Value,
+			Lease:          c.Lease,
+		}
+	}
+	return TxnRequest{
+		Conditions: conds,
+		Success:    msgToTxnOps(m.Success),
+		Failure:    msgToTxnOps(m.Failure),
+	}
+}
+
+func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
+	if len(msgs) == 0 {
+		return nil
+	}
+	ops := make([]TxnOp, len(msgs))
+	for i, m := range msgs {
+		ops[i] = TxnOp{
+			Type:  TxnOpType(m.Type),
+			Key:   m.Key,
+			Value: m.Value,
+			Lease: m.Lease,
+		}
+	}
+	return ops
+}
+
+// prepareTxn evaluates all conditions and prepares the WAL entry for the
+// selected branch. Must be called under n.mu.
+//
+// Returns a zero-valued Entry (Op==0) when the branch has no write ops.
+func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{}, error) {
+	// Evaluate conditions.
+	succeeded := true
+	for _, cond := range req.Conditions {
+		existing, err := n.readKey(cond.Key)
+		if err != nil {
+			return wal.Entry{}, false, nil, err
+		}
+		if !txnCondMatches(cond, existing) {
+			succeeded = false
+			break
+		}
+	}
+
+	ops := req.Success
+	if !succeeded {
+		ops = req.Failure
+	}
+	if len(ops) == 0 {
+		return wal.Entry{}, succeeded, nil, nil
+	}
+
+	// Pre-resolve all ops (read current state) before incrementing nextRev,
+	// so that a lookup error cannot leave nextRev in a skipped state.
+	type resolvedOp struct {
+		walOp          wal.Op
+		key            string
+		value          []byte
+		lease          int64
+		createRevision int64
+		prevRevision   int64
+		skip           bool // delete of a non-existent key
+	}
+	resolved := make([]resolvedOp, 0, len(ops))
+	for _, op := range ops {
+		existing, err := n.readKey(op.Key)
+		if err != nil {
+			return wal.Entry{}, false, nil, err
+		}
+		switch op.Type {
+		case TxnPut:
+			var walOp wal.Op
+			var createRev, prevRev int64
+			if existing == nil {
+				walOp = wal.OpCreate
+			} else {
+				walOp = wal.OpUpdate
+				createRev = existing.CreateRevision
+				prevRev = existing.Revision
+			}
+			resolved = append(resolved, resolvedOp{
+				walOp: walOp, key: op.Key, value: op.Value, lease: op.Lease,
+				createRevision: createRev, prevRevision: prevRev,
+			})
+		case TxnDelete:
+			if existing == nil {
+				resolved = append(resolved, resolvedOp{skip: true})
+				continue
+			}
+			resolved = append(resolved, resolvedOp{
+				walOp: wal.OpDelete, key: op.Key,
+				createRevision: existing.CreateRevision, prevRevision: existing.Revision,
+			})
+		}
+	}
+
+	// Drop skipped ops; if nothing remains this is effectively a no-op.
+	active := resolved[:0]
+	for _, r := range resolved {
+		if !r.skip {
+			active = append(active, r)
+		}
+	}
+	if len(active) == 0 {
+		return wal.Entry{}, succeeded, nil, nil
+	}
+
+	n.nextRev++
+	newRev := n.nextRev
+
+	var deletedKeys map[string]struct{}
+	subOps := make([]wal.TxnSubOp, len(active))
+	for i, r := range active {
+		cr := r.createRevision
+		if r.walOp == wal.OpCreate {
+			cr = newRev
+		}
+		subOps[i] = wal.TxnSubOp{
+			Op: r.walOp, Key: r.key, Value: r.value, Lease: r.lease,
+			CreateRevision: cr, PrevRevision: r.prevRevision,
+		}
+		if r.walOp == wal.OpDelete {
+			n.pending[r.key] = pendingKV{rev: newRev, deleted: true}
+			if deletedKeys == nil {
+				deletedKeys = make(map[string]struct{})
+			}
+			deletedKeys[r.key] = struct{}{}
+		} else {
+			n.pending[r.key] = pendingKV{
+				rev: newRev,
+				kv: &istore.KeyValue{
+					Key: r.key, Value: r.value, Revision: newRev,
+					CreateRevision: cr, PrevRevision: r.prevRevision,
+					Lease: r.lease,
+				},
+			}
+		}
+	}
+
+	return wal.Entry{
+		Revision: newRev,
+		Term:     n.term,
+		Op:       wal.OpTxn,
+		Value:    wal.EncodeTxnOps(subOps),
+	}, succeeded, deletedKeys, nil
+}
+
 func opLabel(op wal.Op) string {
 	switch op {
 	case wal.OpCreate:
@@ -1598,6 +1993,8 @@ func opLabel(op wal.Op) string {
 		return "delete"
 	case wal.OpCompact:
 		return "compact"
+	case wal.OpTxn:
+		return "txn"
 	default:
 		return "unknown"
 	}
@@ -1660,6 +2057,18 @@ func (n *Node) clearPendingBatch(batch []*writeReq) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for _, req := range batch {
+		if req.entry.Op == wal.OpTxn {
+			// For txn entries the key field is empty; decode sub-ops to clear
+			// each affected key from the pending map.
+			if ops, err := wal.DecodeTxnOps(req.entry.Value); err == nil {
+				for _, op := range ops {
+					if p, ok := n.pending[op.Key]; ok && p.rev == req.entry.Revision {
+						delete(n.pending, op.Key)
+					}
+				}
+			}
+			continue
+		}
 		if req.entry.Key == "" {
 			continue
 		}
