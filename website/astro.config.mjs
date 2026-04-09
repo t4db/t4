@@ -46,6 +46,7 @@ export default defineConfig({
 			customCss: ['./src/styles/custom.css'],
 			components: {
 				Hero: './src/components/Hero.astro',
+				Header: './src/components/Header.astro',
 			},
 			sidebar: [
 				{ label: 'Getting Started', slug: 'getting-started' },
