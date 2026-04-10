@@ -143,9 +143,10 @@ func (s *Server) MemberPromote(_ context.Context, _ *etcdserverpb.MemberPromoteR
 
 // ── Maintenance ──────────────────────────────────────────────────────────────
 
-// Alarm is not implemented — t4 has no alarm subsystem.
+// Alarm returns an empty alarm list. T4 has no quota or corruption alarm
+// subsystem — Pebble manages storage internally with no fixed size cap.
 func (s *Server) Alarm(_ context.Context, _ *etcdserverpb.AlarmRequest) (*etcdserverpb.AlarmResponse, error) {
-	return nil, unimplemented()
+	return &etcdserverpb.AlarmResponse{Header: s.header()}, nil
 }
 
 // Status returns basic node status: current revision, leader, and version.

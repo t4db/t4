@@ -111,7 +111,11 @@ See the [Kubernetes deployment guide](/deployment/kubernetes/) for details.
 
 ### Can T4 replace etcd in a Kubernetes control plane?
 
-Not directly — Kubernetes control planes expect a specific etcd cluster membership API and snapshot restore support that T4 doesn't implement. For embedded Kubernetes (k3s, k0s) using kine as an etcd shim, T4 can serve as the kine backend since kine uses the etcd v3 API.
+Yes, as the storage backend for kube-apiserver. Kubernetes talks to its datastore through the etcd v3 API; it does not depend on etcd's internal Raft implementation. kube-apiserver uses KV, Watch, Lease, Compact, and status calls, which T4 implements.
+
+The main caveat is tooling, not kube-apiserver compatibility. Tools that expect full etcd cluster-management APIs, such as member management or etcd snapshot streaming, may not work because T4 does not implement every etcd maintenance RPC. If something in your Kubernetes setup does not work, please file an issue and describe your use case and the failing command or component.
+
+We're also working on a T4 kine driver.
 
 ### How do I expose T4 outside the cluster?
 

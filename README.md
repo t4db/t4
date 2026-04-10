@@ -6,12 +6,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-t4db.github.io-green)](https://t4db.github.io/t4/)
 
-An embeddable, S3-durable key-value store for Go.
+An embeddable, S3-durable key-value store for Go, with an etcd-compatible standalone server.
 
 - **Embedded-first** — `t4.Open(cfg)` is the entire API. No sidecar, no daemon.
-- **S3-durable** — WAL segments and periodic snapshots are uploaded to S3. A node that loses its disk recovers automatically.
+- **S3-durable** — WAL segments and periodic checkpoints are uploaded to S3. A node that loses its disk recovers automatically.
 - **Multi-node** — Leader elected via an S3 lock. Followers stream the WAL in real time and forward writes transparently.
-- **etcd v3 compatible** — The standalone binary speaks the etcd v3 gRPC protocol. Any etcd client works against it unchanged.
+- **etcd v3 compatible** — The standalone binary speaks the etcd v3 gRPC protocol, including multi-key transactions.
+- **Twelve-factor config** — CLI flags can be supplied through `T4_*` environment variables.
 - **Branches** — Fork a database at any checkpoint with zero S3 copies. Each branch writes to its own prefix; shared SST files are deduplicated automatically.
 
 ---
@@ -41,13 +42,19 @@ for e := range events {
 
 ```go
 import (
-    awsconfig "github.com/aws/aws-sdk-go-v2/config"
-    "github.com/aws/aws-sdk-go-v2/service/s3"
+    "github.com/t4db/t4"
     "github.com/t4db/t4/pkg/object"
 )
 
-awsCfg, _ := awsconfig.LoadDefaultConfig(ctx)
-store := object.NewS3Store(s3.NewFromConfig(awsCfg), "my-bucket", "t4/")
+store, err := object.NewS3StoreFromConfig(ctx, object.S3Config{
+    Bucket: "my-bucket",
+    Prefix: "t4/",
+    Region: "us-east-1",
+    // Endpoint: "http://localhost:9000", // MinIO or another S3-compatible store
+})
+if err != nil {
+    return err
+}
 
 node, err := t4.Open(t4.Config{
     DataDir:     "/var/lib/myapp/t4",
@@ -71,12 +78,49 @@ t4 run --data-dir /var/lib/t4 --listen 0.0.0.0:3379
 t4 run --data-dir /var/lib/t4 --listen 0.0.0.0:3379 \
            --s3-bucket my-bucket --s3-prefix t4/
 
+# The same configuration can come from environment variables.
+T4_DATA_DIR=/var/lib/t4 \
+T4_LISTEN=0.0.0.0:3379 \
+T4_S3_BUCKET=my-bucket \
+T4_S3_PREFIX=t4/ \
+T4_S3_REGION=us-east-1 \
+t4 run
+
 # Verify
 etcdctl --endpoints=localhost:3379 put /hello world
 etcdctl --endpoints=localhost:3379 get /hello
 ```
 
 Multi-node and production setup: see [Operations](https://t4db.github.io/t4/operations/).
+
+---
+
+## Branching
+
+Branches fork a database from an existing S3 checkpoint without copying shared SST files.
+
+```bash
+# Register the branch against the source prefix.
+checkpoint_key=$(t4 branch fork \
+  --s3-bucket my-bucket \
+  --s3-prefix t4/ \
+  --branch-id experiment)
+
+# Start the branch in its own prefix, using the source prefix as its ancestor.
+t4 run \
+  --data-dir /var/lib/t4-experiment \
+  --listen 0.0.0.0:3379 \
+  --s3-bucket my-bucket \
+  --s3-prefix t4-experiment/ \
+  --branch-prefix t4/ \
+  --branch-checkpoint "$checkpoint_key"
+```
+
+When the branch is retired, remove its registry entry so future GC can reclaim unneeded source objects:
+
+```bash
+t4 branch unfork --s3-bucket my-bucket --s3-prefix t4/ --branch-id experiment
+```
 
 ---
 
