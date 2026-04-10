@@ -71,7 +71,7 @@ s3:
   #                          Workload Identity (no secret needed).
   #
   #   existingSecret: ""  → reference a pre-existing Secret whose keys are
-  #                         AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+  #                         T4_S3_ACCESS_KEY_ID and T4_S3_SECRET_ACCESS_KEY.
   #
   #   credentials: {}     → create a new Secret from these values (not
   #                         recommended for production; prefer IRSA).
@@ -80,7 +80,7 @@ s3:
   # ARN of the IAM role to annotate on the ServiceAccount (IRSA).
   iamRoleArn: ""
 
-  # Name of an existing Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+  # Name of an existing Secret with T4_S3_ACCESS_KEY_ID / T4_S3_SECRET_ACCESS_KEY.
   existingSecret: ""
 
   # Inline credentials — a new Secret is created when non-empty.
@@ -258,8 +258,8 @@ minio:
     tag: latest
     pullPolicy: IfNotPresent
 
-  # Credentials for the MinIO root user.  Also used as AWS_ACCESS_KEY_ID /
-  # AWS_SECRET_ACCESS_KEY when t4 connects to MinIO.
+  # Credentials for the MinIO root user.  Also used as T4_S3_ACCESS_KEY_ID /
+  # T4_S3_SECRET_ACCESS_KEY when t4 connects to MinIO.
   rootUser: minioadmin
   rootPassword: minioadmin  # Change this!
 

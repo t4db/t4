@@ -152,7 +152,7 @@ Effective S3 endpoint: explicit s3.endpoint takes priority, then MinIO service.
 {{- end }}
 
 {{/*
-Name of the Secret that holds AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for
+Name of the Secret that holds T4_S3_ACCESS_KEY_ID / T4_S3_SECRET_ACCESS_KEY for
 the t4 pods.  When minio.enabled, use the MinIO secret; otherwise fall
 back to the standard s3SecretName helper.
 */}}

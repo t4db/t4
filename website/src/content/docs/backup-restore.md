@@ -143,8 +143,7 @@ t4 run \
   --data-dir  /var/lib/t4-staging \
   --s3-bucket my-bucket \
   --s3-prefix t4-staging/ \
-  --branch-source-bucket my-bucket \
-  --branch-source-prefix t4/ \
+  --branch-prefix t4/ \
   --branch-checkpoint <key-from-step-1> \
   --listen 0.0.0.0:3379
 

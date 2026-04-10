@@ -8,14 +8,13 @@ import (
 
 	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/wal"
+	"github.com/t4db/t4/pkg/object"
 )
 
 func gcCmd() *cobra.Command {
 	var (
-		bucket   string
-		prefix   string
-		endpoint string
-		keep     int
+		s3   *s3Flags
+		keep int
 	)
 	cmd := &cobra.Command{
 		Use:   "gc",
@@ -31,7 +30,7 @@ Three passes are performed in order:
 
 Run this periodically (e.g. once a day) to reclaim S3 storage.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := newS3Store(cmd.Context(), bucket, prefix, endpoint)
+			store, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
 			if err != nil {
 				return fmt.Errorf("init S3: %w", err)
 			}
@@ -76,10 +75,7 @@ Run this periodically (e.g. once a day) to reclaim S3 storage.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&bucket, "s3-bucket", "", "S3 bucket to GC (required)")
-	cmd.Flags().StringVar(&prefix, "s3-prefix", "", "key prefix inside the S3 bucket")
-	cmd.Flags().StringVar(&endpoint, "s3-endpoint", "", "custom S3 endpoint URL")
+	s3 = addS3Flags(cmd, true)
 	cmd.Flags().IntVar(&keep, "keep", 3, "number of most-recent checkpoints to retain")
-	cmd.MarkFlagRequired("s3-bucket")
 	return cmd
 }

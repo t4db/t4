@@ -552,13 +552,12 @@ t4 branch fork \
 
 # 2. Start the branch node, pointing it at the source.
 t4 run \
-  --data-dir              /var/lib/t4-branch \
-  --listen                0.0.0.0:3379 \
-  --s3-bucket             my-bucket \
-  --s3-prefix             t4-branch/ \
-  --branch-source-bucket  my-bucket \
-  --branch-source-prefix  t4/ \
-  --branch-checkpoint     checkpoint/0000000001/00000000000000000100/manifest.json
+  --data-dir          /var/lib/t4-branch \
+  --listen            0.0.0.0:3379 \
+  --s3-bucket         my-bucket \
+  --s3-prefix         t4-branch/ \
+  --branch-prefix     t4/ \
+  --branch-checkpoint checkpoint/0000000001/00000000000000000100/manifest.json
 ```
 
 On first boot the branch node downloads SSTs and Pebble metadata from the source prefix. On subsequent restarts `--branch-checkpoint` is ignored (the local data directory already exists).

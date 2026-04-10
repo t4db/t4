@@ -111,20 +111,20 @@ spec:
                   fieldPath: metadata.namespace
             {{- $secretName := include "t4.effectiveS3SecretName" . }}
             {{- if $secretName }}
-            - name: AWS_ACCESS_KEY_ID
+            - name: T4_S3_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretName }}
-                  key: AWS_ACCESS_KEY_ID
-            - name: AWS_SECRET_ACCESS_KEY
+                  key: T4_S3_ACCESS_KEY_ID
+            - name: T4_S3_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretName }}
-                  key: AWS_SECRET_ACCESS_KEY
+                  key: T4_S3_SECRET_ACCESS_KEY
             {{- end }}
             {{- $effectiveRegion := .Values.s3.region | default (ternary "us-east-1" "" .Values.minio.enabled) }}
             {{- if $effectiveRegion }}
-            - name: AWS_DEFAULT_REGION
+            - name: T4_S3_REGION
               value: {{ $effectiveRegion | quote }}
             {{- end }}
           ports:

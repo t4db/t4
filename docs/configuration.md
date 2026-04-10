@@ -71,6 +71,10 @@ t4 run [flags]
 | `--s3-bucket` | — | S3 bucket name |
 | `--s3-prefix` | — | Key prefix inside the bucket (no trailing slash needed) |
 | `--s3-endpoint` | — | Custom S3 endpoint URL (MinIO, Ceph, etc.) |
+| `--s3-region` | — | AWS region (overrides `AWS_DEFAULT_REGION` and `~/.aws/config`) |
+| `--s3-profile` | — | AWS shared config profile (overrides `AWS_PROFILE`) |
+| `--s3-access-key-id` | — | AWS access key ID; when set, bypasses the default credential chain |
+| `--s3-secret-access-key` | — | AWS secret access key (required when `--s3-access-key-id` is set) |
 | `--segment-max-size-mb` | `50` | WAL segment rotation size threshold (MiB) |
 | `--segment-max-age-sec` | `10` | WAL segment rotation age (seconds) |
 | `--wal-sync-upload` | _(default true)_ | Upload WAL segments synchronously before acknowledging writes (`true`/`false`). Applies to single-node mode. In cluster mode the leader always uses async uploads (hardcoded in `becomeLeader`); set to `false` when local storage is durable for lower single-node write latency. |
@@ -92,9 +96,7 @@ t4 run [flags]
 | `--auth-enabled` | `false` | Enable etcd-compatible authentication and RBAC |
 | `--token-ttl` | `300` | Bearer token lifetime in seconds |
 | `--metrics-addr` | — | HTTP address for metrics and health endpoints |
-| `--branch-source-bucket` | — | S3 bucket of the source database (branch nodes only) |
-| `--branch-source-prefix` | — | S3 prefix of the source database (branch nodes only) |
-| `--branch-source-endpoint` | — | S3 endpoint of the source database (branch nodes only) |
+| `--branch-prefix` | — | S3 prefix of the source database (branch nodes only; uses `--s3-bucket`) |
 | `--branch-checkpoint` | — | Checkpoint key to fork from (branch nodes only; omit to use latest) |
 
 ---

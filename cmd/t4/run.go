@@ -22,15 +22,15 @@ import (
 	t4etcd "github.com/t4db/t4/etcd"
 	"github.com/t4db/t4/etcd/auth"
 	"github.com/t4db/t4/internal/metrics"
+	"github.com/t4db/t4/pkg/object"
 )
 
 func runCmd() *cobra.Command {
 	var (
+		s3 *s3Flags
+
 		dataDir               string
 		listenAddr            string
-		s3Bucket              string
-		s3Prefix              string
-		s3Endpoint            string
 		segmentMaxSizeMB      int64
 		segmentMaxAgeSec      int
 		checkpointIntervalMin int
@@ -59,10 +59,8 @@ func runCmd() *cobra.Command {
 		// observability
 		metricsAddr string
 		// branch node
-		branchSourceBucket   string
-		branchSourcePrefix   string
-		branchSourceEndpoint string
-		branchCheckpoint     string
+		branchPrefix     string
+		branchCheckpoint string
 	)
 
 	cmd := &cobra.Command{
@@ -87,9 +85,7 @@ func runCmd() *cobra.Command {
 			logrus.WithFields(startupLogFields(
 				dataDir,
 				listenAddr,
-				s3Bucket,
-				s3Prefix,
-				s3Endpoint,
+				s3,
 				readConsistency,
 				logLevel,
 				nodeID,
@@ -105,9 +101,7 @@ func runCmd() *cobra.Command {
 				authEnabled,
 				tokenTTLSec,
 				metricsAddr,
-				branchSourceBucket,
-				branchSourcePrefix,
-				branchSourceEndpoint,
+				branchPrefix,
 				branchCheckpoint,
 			)).Info("starting t4 server")
 
@@ -141,22 +135,27 @@ func runCmd() *cobra.Command {
 				logrus.Info("peer mTLS enabled for node replication")
 			}
 
-			if s3Bucket != "" {
-				obj, err := newS3Store(cmd.Context(), s3Bucket, s3Prefix, s3Endpoint)
+			if s3.Bucket != "" {
+				obj, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
 				if err != nil {
 					return fmt.Errorf("init S3: %w", err)
 				}
 				cfg.ObjectStore = obj
-				logrus.Infof("using S3 bucket %q prefix %q", s3Bucket, s3Prefix)
+				logrus.Infof("using S3 bucket %q prefix %q", s3.Bucket, s3.Prefix)
 			} else {
 				logrus.Warn("no S3 bucket configured — durability is local-only")
 			}
 
-			if branchSourceBucket != "" {
+			if branchPrefix != "" || branchCheckpoint != "" {
 				if branchCheckpoint == "" {
-					return fmt.Errorf("--branch-checkpoint is required when --branch-source-bucket is set")
+					return fmt.Errorf("--branch-checkpoint is required when --branch-prefix is set")
 				}
-				sourceStore, err := newS3Store(cmd.Context(), branchSourceBucket, branchSourcePrefix, branchSourceEndpoint)
+				if s3.Bucket == "" {
+					return fmt.Errorf("--s3-bucket is required for a branch node")
+				}
+				srcCfg := s3.config()
+				srcCfg.Prefix = branchPrefix
+				sourceStore, err := object.NewS3StoreFromConfig(cmd.Context(), srcCfg)
 				if err != nil {
 					return fmt.Errorf("init branch source S3: %w", err)
 				}
@@ -165,8 +164,8 @@ func runCmd() *cobra.Command {
 					CheckpointKey: branchCheckpoint,
 				}
 				cfg.AncestorStore = sourceStore
-				logrus.Infof("branch node: source bucket %q prefix %q checkpoint %q",
-					branchSourceBucket, branchSourcePrefix, branchCheckpoint)
+				logrus.Infof("branch node: source prefix %q checkpoint %q",
+					branchPrefix, branchCheckpoint)
 			}
 
 			node, err := t4.Open(cfg)
@@ -176,7 +175,7 @@ func runCmd() *cobra.Command {
 			defer node.Close()
 			logrus.WithFields(logrus.Fields{
 				"listen_addr": listenAddr,
-				"mode":        runMode(s3Bucket, peerListenAddr, branchSourceBucket),
+				"mode":        runMode(s3.Bucket, peerListenAddr, branchCheckpoint),
 				"node_id":     resolvedNodeID(nodeID),
 				"revision":    node.CurrentRevision(),
 			}).Info("t4 node opened")
@@ -245,43 +244,69 @@ func runCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&dataDir, "data-dir", "/var/lib/t4", "directory for Pebble data and local WAL segments")
-	cmd.Flags().StringVar(&listenAddr, "listen", "0.0.0.0:3379", "gRPC listen address (kine/etcd protocol)")
-	cmd.Flags().StringVar(&s3Bucket, "s3-bucket", "", "S3 bucket for WAL archive and checkpoints (optional)")
-	cmd.Flags().StringVar(&s3Prefix, "s3-prefix", "", "key prefix inside the S3 bucket")
-	cmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "custom S3 endpoint URL (for MinIO or other S3-compatible stores)")
-	cmd.Flags().Int64Var(&segmentMaxSizeMB, "segment-max-size-mb", 50, "WAL segment rotation size threshold in MiB")
-	cmd.Flags().IntVar(&segmentMaxAgeSec, "segment-max-age-sec", 10, "WAL segment rotation age threshold in seconds")
-	cmd.Flags().StringVar(&walSyncUpload, "wal-sync-upload", "", "upload WAL segments synchronously before ack (true/false; default true for safety, set false when local storage is durable)")
-	cmd.Flags().IntVar(&checkpointIntervalMin, "checkpoint-interval-min", 15, "checkpoint interval in minutes (requires --s3-bucket)")
-	cmd.Flags().Int64Var(&checkpointEntries, "checkpoint-entries", 0, "triggers a checkpoint after this many WAL entries regardless of time. 0 means disabled (requires --s3-bucket)")
-	cmd.Flags().StringVar(&readConsistency, "read-consistency", "linearizable", "read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale)")
-	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level (trace/debug/info/warn/error)")
+	s3 = addS3Flags(cmd, false)
+	cmd.Flags().StringVar(&dataDir, "data-dir", "/var/lib/t4", "directory for Pebble data and local WAL segments (env: T4_DATA_DIR)")
+	cmd.Flags().StringVar(&listenAddr, "listen", "0.0.0.0:3379", "gRPC listen address (kine/etcd protocol) (env: T4_LISTEN)")
+	cmd.Flags().Int64Var(&segmentMaxSizeMB, "segment-max-size-mb", 50, "WAL segment rotation size threshold in MiB (env: T4_SEGMENT_MAX_SIZE_MB)")
+	cmd.Flags().IntVar(&segmentMaxAgeSec, "segment-max-age-sec", 10, "WAL segment rotation age threshold in seconds (env: T4_SEGMENT_MAX_AGE_SEC)")
+	cmd.Flags().StringVar(&walSyncUpload, "wal-sync-upload", "", "upload WAL segments synchronously before ack (true/false; default true for safety, set false when local storage is durable) (env: T4_WAL_SYNC_UPLOAD)")
+	cmd.Flags().IntVar(&checkpointIntervalMin, "checkpoint-interval-min", 15, "checkpoint interval in minutes (requires --s3-bucket) (env: T4_CHECKPOINT_INTERVAL_MIN)")
+	cmd.Flags().Int64Var(&checkpointEntries, "checkpoint-entries", 0, "triggers a checkpoint after this many WAL entries regardless of time. 0 means disabled (requires --s3-bucket) (env: T4_CHECKPOINT_ENTRIES)")
+	cmd.Flags().StringVar(&readConsistency, "read-consistency", "linearizable", "read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale) (env: T4_READ_CONSISTENCY)")
+	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level (trace/debug/info/warn/error) (env: T4_LOG_LEVEL)")
 	// multi-node
-	cmd.Flags().StringVar(&nodeID, "node-id", "", "stable unique node identifier (default: hostname)")
-	cmd.Flags().StringVar(&peerListenAddr, "peer-listen", "", "address for leader→follower WAL stream (e.g. 0.0.0.0:3380); enables multi-node mode")
-	cmd.Flags().StringVar(&advertisePeerAddr, "advertise-peer", "", "address followers use to reach this node's peer stream (default: --peer-listen)")
-	cmd.Flags().IntVar(&leaderWatchIntervalSec, "leader-watch-interval-sec", 300, "how often (seconds) the leader reads the lock to detect supersession")
-	cmd.Flags().IntVar(&followerMaxRetries, "follower-max-retries", 5, "consecutive stream failures before a follower attempts a leader takeover")
-	cmd.Flags().StringVar(&followerWaitMode, "follower-wait-mode", "quorum", "leader wait policy for follower ACKs before commit: none, quorum, or all")
+	cmd.Flags().StringVar(&nodeID, "node-id", "", "stable unique node identifier (default: hostname) (env: T4_NODE_ID)")
+	cmd.Flags().StringVar(&peerListenAddr, "peer-listen", "", "address for leader→follower WAL stream (e.g. 0.0.0.0:3380); enables multi-node mode (env: T4_PEER_LISTEN)")
+	cmd.Flags().StringVar(&advertisePeerAddr, "advertise-peer", "", "address followers use to reach this node's peer stream (default: --peer-listen) (env: T4_ADVERTISE_PEER)")
+	cmd.Flags().IntVar(&leaderWatchIntervalSec, "leader-watch-interval-sec", 300, "how often (seconds) the leader reads the lock to detect supersession (env: T4_LEADER_WATCH_INTERVAL_SEC)")
+	cmd.Flags().IntVar(&followerMaxRetries, "follower-max-retries", 5, "consecutive stream failures before a follower attempts a leader takeover (env: T4_FOLLOWER_MAX_RETRIES)")
+	cmd.Flags().StringVar(&followerWaitMode, "follower-wait-mode", "quorum", "leader wait policy for follower ACKs before commit: none, quorum, or all (env: T4_FOLLOWER_WAIT_MODE)")
 	// peer mTLS
-	cmd.Flags().StringVar(&peerTLSCA, "peer-tls-ca", "", "CA certificate file for peer mTLS (PEM)")
-	cmd.Flags().StringVar(&peerTLSCert, "peer-tls-cert", "", "node certificate file for peer mTLS (PEM)")
-	cmd.Flags().StringVar(&peerTLSKey, "peer-tls-key", "", "node private key file for peer mTLS (PEM)")
+	cmd.Flags().StringVar(&peerTLSCA, "peer-tls-ca", "", "CA certificate file for peer mTLS (PEM) (env: T4_PEER_TLS_CA)")
+	cmd.Flags().StringVar(&peerTLSCert, "peer-tls-cert", "", "node certificate file for peer mTLS (PEM) (env: T4_PEER_TLS_CERT)")
+	cmd.Flags().StringVar(&peerTLSKey, "peer-tls-key", "", "node private key file for peer mTLS (PEM) (env: T4_PEER_TLS_KEY)")
 	// client TLS
-	cmd.Flags().StringVar(&clientTLSCert, "client-tls-cert", "", "server certificate file for client-facing TLS (PEM)")
-	cmd.Flags().StringVar(&clientTLSKey, "client-tls-key", "", "server private key file for client-facing TLS (PEM)")
-	cmd.Flags().StringVar(&clientTLSCA, "client-tls-ca", "", "CA certificate for client mTLS (PEM); omit for server-only TLS")
+	cmd.Flags().StringVar(&clientTLSCert, "client-tls-cert", "", "server certificate file for client-facing TLS (PEM) (env: T4_CLIENT_TLS_CERT)")
+	cmd.Flags().StringVar(&clientTLSKey, "client-tls-key", "", "server private key file for client-facing TLS (PEM) (env: T4_CLIENT_TLS_KEY)")
+	cmd.Flags().StringVar(&clientTLSCA, "client-tls-ca", "", "CA certificate for client mTLS (PEM); omit for server-only TLS (env: T4_CLIENT_TLS_CA)")
 	// auth
-	cmd.Flags().BoolVar(&authEnabled, "auth-enabled", false, "enable etcd-compatible authentication and RBAC")
-	cmd.Flags().IntVar(&tokenTTLSec, "token-ttl", 300, "bearer token TTL in seconds")
+	cmd.Flags().BoolVar(&authEnabled, "auth-enabled", false, "enable etcd-compatible authentication and RBAC (env: T4_AUTH_ENABLED)")
+	cmd.Flags().IntVar(&tokenTTLSec, "token-ttl", 300, "bearer token TTL in seconds (env: T4_TOKEN_TTL)")
 	// observability
-	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "0.0.0.0:9090", "HTTP address for /metrics, /healthz, /readyz (e.g. 0.0.0.0:9090)")
+	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "0.0.0.0:9090", "HTTP address for /metrics, /healthz, /readyz (e.g. 0.0.0.0:9090) (env: T4_METRICS_ADDR)")
 	// branch node
-	cmd.Flags().StringVar(&branchSourceBucket, "branch-source-bucket", "", "S3 bucket of the source node to branch from")
-	cmd.Flags().StringVar(&branchSourcePrefix, "branch-source-prefix", "", "S3 key prefix of the source node")
-	cmd.Flags().StringVar(&branchSourceEndpoint, "branch-source-endpoint", "", "custom S3 endpoint for the source store")
-	cmd.Flags().StringVar(&branchCheckpoint, "branch-checkpoint", "", "checkpoint index key returned by 't4 branch fork' (required with --branch-source-bucket)")
+	cmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "S3 key prefix of the source node to branch from (uses --s3-bucket) (env: T4_BRANCH_PREFIX)")
+	cmd.Flags().StringVar(&branchCheckpoint, "branch-checkpoint", "", "checkpoint index key returned by 't4 branch fork' (required with --branch-prefix) (env: T4_BRANCH_CHECKPOINT)")
+	prependPreRunE(cmd, func(cmd *cobra.Command, _ []string) error {
+		return applyEnvVars(cmd, map[string]string{
+			"data-dir":                  "T4_DATA_DIR",
+			"listen":                    "T4_LISTEN",
+			"segment-max-size-mb":       "T4_SEGMENT_MAX_SIZE_MB",
+			"segment-max-age-sec":       "T4_SEGMENT_MAX_AGE_SEC",
+			"wal-sync-upload":           "T4_WAL_SYNC_UPLOAD",
+			"checkpoint-interval-min":   "T4_CHECKPOINT_INTERVAL_MIN",
+			"checkpoint-entries":        "T4_CHECKPOINT_ENTRIES",
+			"read-consistency":          "T4_READ_CONSISTENCY",
+			"log-level":                 "T4_LOG_LEVEL",
+			"node-id":                   "T4_NODE_ID",
+			"peer-listen":               "T4_PEER_LISTEN",
+			"advertise-peer":            "T4_ADVERTISE_PEER",
+			"leader-watch-interval-sec": "T4_LEADER_WATCH_INTERVAL_SEC",
+			"follower-max-retries":      "T4_FOLLOWER_MAX_RETRIES",
+			"follower-wait-mode":        "T4_FOLLOWER_WAIT_MODE",
+			"peer-tls-ca":               "T4_PEER_TLS_CA",
+			"peer-tls-cert":             "T4_PEER_TLS_CERT",
+			"peer-tls-key":              "T4_PEER_TLS_KEY",
+			"client-tls-cert":           "T4_CLIENT_TLS_CERT",
+			"client-tls-key":            "T4_CLIENT_TLS_KEY",
+			"client-tls-ca":             "T4_CLIENT_TLS_CA",
+			"auth-enabled":              "T4_AUTH_ENABLED",
+			"token-ttl":                 "T4_TOKEN_TTL",
+			"metrics-addr":              "T4_METRICS_ADDR",
+			"branch-prefix":             "T4_BRANCH_PREFIX",
+			"branch-checkpoint":         "T4_BRANCH_CHECKPOINT",
+		})
+	})
 
 	return cmd
 }
@@ -289,9 +314,7 @@ func runCmd() *cobra.Command {
 func startupLogFields(
 	dataDir string,
 	listenAddr string,
-	s3Bucket string,
-	s3Prefix string,
-	s3Endpoint string,
+	s3 *s3Flags,
 	readConsistency string,
 	logLevel string,
 	nodeID string,
@@ -307,21 +330,21 @@ func startupLogFields(
 	authEnabled bool,
 	tokenTTLSec int,
 	metricsAddr string,
-	branchSourceBucket string,
-	branchSourcePrefix string,
-	branchSourceEndpoint string,
+	branchPrefix string,
 	branchCheckpoint string,
 ) logrus.Fields {
 	fields := logrus.Fields{
 		"data_dir":                  dataDir,
 		"listen_addr":               listenAddr,
 		"log_level":                 logLevel,
-		"mode":                      runMode(s3Bucket, peerListenAddr, branchSourceBucket),
+		"mode":                      runMode(s3.Bucket, peerListenAddr, branchCheckpoint),
 		"node_id":                   resolvedNodeID(nodeID),
 		"read_consistency":          readConsistency,
-		"s3_bucket":                 valueOrDisabled(s3Bucket),
-		"s3_prefix":                 valueOrNone(s3Prefix),
-		"s3_endpoint":               valueOrDefault(s3Endpoint, "aws-default"),
+		"s3_bucket":                 valueOrDisabled(s3.Bucket),
+		"s3_prefix":                 valueOrNone(s3.Prefix),
+		"s3_endpoint":               valueOrDefault(s3.Endpoint, "aws-default"),
+		"s3_region":                 valueOrDefault(s3.Region, "aws-default"),
+		"s3_credentials":            s3CredentialsMode(s3.AccessKeyID, s3.Profile),
 		"wal_sync_upload":           resolvedWALSyncUpload(walSyncUpload, peerListenAddr),
 		"peer_listen_addr":          valueOrDisabled(peerListenAddr),
 		"advertise_peer_addr":       resolvedAdvertisePeerAddr(peerListenAddr, advertisePeerAddr),
@@ -333,19 +356,27 @@ func startupLogFields(
 		"metrics_addr":              valueOrDisabled(metricsAddr),
 	}
 
-	if branchSourceBucket != "" {
-		fields["branch_source_bucket"] = branchSourceBucket
-		fields["branch_source_prefix"] = valueOrNone(branchSourcePrefix)
-		fields["branch_source_endpoint"] = valueOrDefault(branchSourceEndpoint, "aws-default")
+	if branchCheckpoint != "" {
+		fields["branch_prefix"] = valueOrNone(branchPrefix)
 		fields["branch_checkpoint"] = branchCheckpoint
 	}
 
 	return fields
 }
 
-func runMode(s3Bucket, peerListenAddr, branchSourceBucket string) string {
+func s3CredentialsMode(accessKeyID, profile string) string {
+	if accessKeyID != "" {
+		return "static"
+	}
+	if profile != "" {
+		return "profile:" + profile
+	}
+	return "default-chain"
+}
+
+func runMode(s3Bucket, peerListenAddr, branchCheckpoint string) string {
 	switch {
-	case branchSourceBucket != "":
+	case branchCheckpoint != "":
 		return "branch"
 	case peerListenAddr != "":
 		return "multi-node"

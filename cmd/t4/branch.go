@@ -8,6 +8,7 @@ import (
 
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/pkg/object"
 )
 
 func branchCmd() *cobra.Command {
@@ -22,11 +23,9 @@ func branchCmd() *cobra.Command {
 
 func branchForkCmd() *cobra.Command {
 	var (
-		sourceBucket   string
-		sourcePrefix   string
-		sourceEndpoint string
-		branchID       string
-		checkpointKey  string
+		src           *s3Flags
+		branchID      string
+		checkpointKey string
 	)
 	cmd := &cobra.Command{
 		Use:   "fork",
@@ -36,7 +35,7 @@ func branchForkCmd() *cobra.Command {
 By default the branch is forked from the latest committed checkpoint revision.
 Use --checkpoint to fork from a specific older revision instead.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			sourceStore, err := newS3Store(cmd.Context(), sourceBucket, sourcePrefix, sourceEndpoint)
+			sourceStore, err := object.NewS3StoreFromConfig(cmd.Context(), src.config())
 			if err != nil {
 				return fmt.Errorf("init source S3: %w", err)
 			}
@@ -58,39 +57,37 @@ Use --checkpoint to fork from a specific older revision instead.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&sourceBucket, "source-bucket", "", "S3 bucket of the source node (required)")
-	cmd.Flags().StringVar(&sourcePrefix, "source-prefix", "", "S3 key prefix of the source node")
-	cmd.Flags().StringVar(&sourceEndpoint, "source-endpoint", "", "custom S3 endpoint for the source store")
-	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required)")
+	src = addS3Flags(cmd, true)
+	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required) (env: T4_BRANCH_ID)")
 	cmd.Flags().StringVar(&checkpointKey, "checkpoint", "", "fork from this specific checkpoint key instead of the latest revision")
-	cmd.MarkFlagRequired("source-bucket")
 	cmd.MarkFlagRequired("branch-id")
+	prependPreRunE(cmd, func(cmd *cobra.Command, _ []string) error {
+		return applyEnvVars(cmd, map[string]string{"branch-id": "T4_BRANCH_ID"})
+	})
 	return cmd
 }
 
 func branchUnforkCmd() *cobra.Command {
 	var (
-		sourceBucket   string
-		sourcePrefix   string
-		sourceEndpoint string
-		branchID       string
+		src      *s3Flags
+		branchID string
 	)
 	cmd := &cobra.Command{
 		Use:   "unfork",
 		Short: "Unregister a branch, allowing GC to reclaim its protected SSTs",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			sourceStore, err := newS3Store(cmd.Context(), sourceBucket, sourcePrefix, sourceEndpoint)
+			sourceStore, err := object.NewS3StoreFromConfig(cmd.Context(), src.config())
 			if err != nil {
 				return fmt.Errorf("init source S3: %w", err)
 			}
 			return t4.Unfork(cmd.Context(), sourceStore, branchID)
 		},
 	}
-	cmd.Flags().StringVar(&sourceBucket, "source-bucket", "", "S3 bucket of the source node (required)")
-	cmd.Flags().StringVar(&sourcePrefix, "source-prefix", "", "S3 key prefix of the source node")
-	cmd.Flags().StringVar(&sourceEndpoint, "source-endpoint", "", "custom S3 endpoint for the source store")
-	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required)")
-	cmd.MarkFlagRequired("source-bucket")
+	src = addS3Flags(cmd, true)
+	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required) (env: T4_BRANCH_ID)")
 	cmd.MarkFlagRequired("branch-id")
+	prependPreRunE(cmd, func(cmd *cobra.Command, _ []string) error {
+		return applyEnvVars(cmd, map[string]string{"branch-id": "T4_BRANCH_ID"})
+	})
 	return cmd
 }
