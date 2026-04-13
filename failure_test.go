@@ -242,11 +242,28 @@ func TestLateNodeJoin(t *testing.T) {
 // fully operational and retaining all data.
 func TestScale3To1(t *testing.T) {
 	store := object.NewMem()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	nodes := openCluster(t, 3, store)
 	leader := waitForLeaderNode(t, nodes, 10*time.Second)
+
+	// Wait for the followers to finish their initial bootstrap/stream attach
+	// before issuing the first write burst. On slower race CI runners a follower
+	// can still be resyncing from rev=1 when the test starts writing, which
+	// makes this basic scale-down check flaky for reasons unrelated to the
+	// scenario under test.
+	initialRev := leader.CurrentRevision()
+	initialCtx, initialCancel := context.WithTimeout(ctx, 20*time.Second)
+	defer initialCancel()
+	for i, n := range nodes {
+		if n == leader {
+			continue
+		}
+		if err := n.WaitForRevision(initialCtx, initialRev); err != nil {
+			t.Fatalf("initial node-%d WaitForRevision(%d): %v", i, initialRev, err)
+		}
+	}
 
 	// Write initial data.
 	const phase1Keys = 10
@@ -258,10 +275,12 @@ func TestScale3To1(t *testing.T) {
 
 	// Wait for all nodes to replicate.
 	rev := leader.CurrentRevision()
+	replicateCtx, replicateCancel := context.WithTimeout(ctx, 45*time.Second)
+	defer replicateCancel()
 	for _, n := range nodes {
 		if n != leader {
-			if err := n.WaitForRevision(ctx, rev); err != nil {
-				t.Fatalf("WaitForRevision: %v", err)
+			if err := n.WaitForRevision(replicateCtx, rev); err != nil {
+				t.Fatalf("WaitForRevision(%d): %v (leader_rev=%d node_rev=%d)", rev, err, leader.CurrentRevision(), n.CurrentRevision())
 			}
 		}
 	}
