@@ -3,11 +3,14 @@ package t4
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/t4db/t4/internal/wal"
+	"github.com/t4db/t4/pkg/object"
 )
 
 var errInjected = errors.New("injected fault")
@@ -223,4 +226,119 @@ func TestClearPendingBatchRemovesOnlyMatchingRevisions(t *testing.T) {
 	if got, ok := n.pending["/same"]; !ok || got.rev != 2 {
 		t.Fatalf("newer pending entry was incorrectly removed: %+v", got)
 	}
+}
+
+func waitForLeaderNodeLocal(t *testing.T, nodes []*Node, timeout time.Duration) *Node {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, n := range nodes {
+			if n != nil && n.IsLeader() {
+				return n
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("no leader elected within %v", timeout)
+	return nil
+}
+
+func freeAddrLocal(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
+}
+
+func TestFollowerDoesNotExposeUncommittedEntryAfterLeaderWALError(t *testing.T) {
+	store := object.NewMem()
+
+	openNode := func(id string) *Node {
+		t.Helper()
+		addr := freeAddrLocal(t)
+		n, err := Open(Config{
+			DataDir:            t.TempDir(),
+			ObjectStore:        store,
+			NodeID:             id,
+			PeerListenAddr:     addr,
+			AdvertisePeerAddr:  addr,
+			FollowerMaxRetries: 2,
+			PeerBufferSize:     1000,
+			CheckpointInterval: 300 * time.Millisecond,
+			SegmentMaxAge:      200 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("open %s: %v", id, err)
+		}
+		return n
+	}
+
+	leaderOrFollowerA := openNode("node-a")
+	defer leaderOrFollowerA.Close()
+	leaderOrFollowerB := openNode("node-b")
+	defer leaderOrFollowerB.Close()
+
+	nodes := []*Node{leaderOrFollowerA, leaderOrFollowerB}
+	leader := waitForLeaderNodeLocal(t, nodes, 10*time.Second)
+	var follower *Node
+	for _, n := range nodes {
+		if n != leader {
+			follower = n
+			break
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	seedRev, err := leader.Put(ctx, "/seed", []byte("ok"), 0)
+	if err != nil {
+		t.Fatalf("seed Put: %v", err)
+	}
+	if err := follower.WaitForRevision(ctx, seedRev); err != nil {
+		t.Fatalf("follower seed WaitForRevision: %v", err)
+	}
+
+	fw := newFakeWAL(leader)
+	fw.failNow = true
+	if _, err := leader.Put(ctx, "/ghost", []byte("should-not-commit"), 0); err == nil {
+		t.Fatal("expected injected WAL failure, got nil")
+	}
+	fw.failNow = false
+
+	// The follower may already have received the staged entry over the stream,
+	// but without a commit marker it must never expose it locally.
+	time.Sleep(300 * time.Millisecond)
+	if kv, err := follower.Get("/ghost"); err != nil {
+		t.Fatalf("follower Get /ghost before takeover: %v", err)
+	} else if kv != nil {
+		t.Fatalf("follower exposed uncommitted key before takeover: %+v", kv)
+	}
+
+	if err := leader.Close(); err != nil {
+		t.Fatalf("close fenced leader: %v", err)
+	}
+
+	newLeader := waitForLeaderNodeLocal(t, []*Node{follower}, 30*time.Second)
+	if newLeader != follower {
+		t.Fatalf("expected follower to take over, got %p", newLeader)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		kv, err := newLeader.Get("/ghost")
+		if err == nil && kv == nil {
+			return
+		}
+		if err != nil {
+			t.Fatalf("new leader Get /ghost: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	kv, _ := newLeader.Get("/ghost")
+	t.Fatalf("new leader exposed uncommitted key after takeover: %v", fmt.Sprintf("%+v", kv))
 }
