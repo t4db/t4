@@ -311,28 +311,34 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	s.mu.Unlock()
 
 	defer func() {
-		s.mu.Lock()
-		delete(s.followers, req.NodeID)
-		delete(s.followerAckRevs, req.NodeID)
+		owned := false
 		graceful := false
-		if _, ok := s.gracefulGoodbyes[req.NodeID]; ok {
-			delete(s.gracefulGoodbyes, req.NodeID)
-			graceful = true
-		}
-		// Only trigger split-brain fencing for unexpected disconnects.
-		// A graceful GoodBye means the follower is shutting down intentionally
-		// and will not attempt a TakeOver.
-		if !graceful {
-			select {
-			case s.DisconnectC <- struct{}{}:
-			default:
+		s.mu.Lock()
+		if cur, ok := s.followers[req.NodeID]; ok && cur == ch {
+			owned = true
+			delete(s.followers, req.NodeID)
+			delete(s.followerAckRevs, req.NodeID)
+			if _, ok := s.gracefulGoodbyes[req.NodeID]; ok {
+				delete(s.gracefulGoodbyes, req.NodeID)
+				graceful = true
+			}
+			// Only trigger split-brain fencing for unexpected disconnects.
+			// A graceful GoodBye means the follower is shutting down intentionally
+			// and will not attempt a TakeOver.
+			if !graceful {
+				select {
+				case s.DisconnectC <- struct{}{}:
+				default:
+				}
 			}
 		}
 		s.mu.Unlock()
-		// Remove the lag metric so disconnected followers don't linger in dashboards.
-		metrics.FollowerLag.DeleteLabelValues(req.NodeID)
-		// Wake WaitForFollowers: this follower is no longer required.
-		s.notifyACK()
+		if owned {
+			// Remove the lag metric so disconnected followers don't linger in dashboards.
+			metrics.FollowerLag.DeleteLabelValues(req.NodeID)
+			// Wake WaitForFollowers: this follower is no longer required.
+			s.notifyACK()
+		}
 	}()
 
 	s.log.Infof("peer: follower %q connected (fromRev=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, len(snapshot))
@@ -347,6 +353,10 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				return // stream closed or context done
 			}
 			s.mu.Lock()
+			if cur, ok := s.followers[req.NodeID]; !ok || cur != ch {
+				s.mu.Unlock()
+				return
+			}
 			if ack.Revision > s.followerAckRevs[req.NodeID] {
 				s.followerAckRevs[req.NodeID] = ack.Revision
 			}
