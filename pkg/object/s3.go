@@ -39,33 +39,53 @@ type S3Config struct {
 	// automatically. Empty means the standard AWS endpoint.
 	Endpoint string
 
-	// Region overrides the AWS region. When empty, the region is resolved
-	// from the standard AWS chain (AWS_DEFAULT_REGION, ~/.aws/config,
-	// EC2 metadata, etc.).
+	// Region overrides the AWS region.
 	Region string
 
 	// Profile selects a named profile from the shared AWS config/credentials
-	// files. When empty, the default profile (or AWS_PROFILE) is used.
+	// files. When empty, shared config/credentials files are ignored entirely.
 	// Ignored when AccessKeyID is set.
 	Profile string
 
-	// AccessKeyID and SecretAccessKey provide static credentials, bypassing
-	// the default AWS credential chain entirely. Both must be set together.
-	// Use these to avoid accidentally picking up unrelated credentials from
-	// the environment or ~/.aws.
+	// AccessKeyID and SecretAccessKey provide static credentials. Both must be
+	// set together.
 	AccessKeyID     string
 	SecretAccessKey string
 }
 
-// NewS3StoreFromConfig creates an S3Store using the standard AWS credential
-// chain (env vars, ~/.aws/credentials, IAM roles, etc.) plus any overrides
-// supplied in cfg. If AccessKeyID and SecretAccessKey are both set, static
-// credentials are used instead and the credential chain is bypassed entirely.
+// NewS3StoreFromConfig creates an S3Store from explicit t4 S3 settings.
+//
+// Credential resolution order:
+//   - AccessKeyID + SecretAccessKey: use static credentials.
+//   - Profile: load only that named shared config/credentials profile.
+//   - otherwise: fail closed. t4 does not use the AWS ambient/default chain
+//     unless a profile is explicitly selected.
+//
 // Use NewS3Store directly when you already have a preconfigured *s3.Client.
 func NewS3StoreFromConfig(ctx context.Context, cfg S3Config) (*S3Store, error) {
 	if (cfg.AccessKeyID == "") != (cfg.SecretAccessKey == "") {
 		return nil, fmt.Errorf("object/s3: AccessKeyID and SecretAccessKey must both be set or both be empty")
 	}
+	if cfg.AccessKeyID == "" && cfg.Profile == "" {
+		return nil, fmt.Errorf("object/s3: credentials not configured; set T4_S3_ACCESS_KEY_ID and T4_S3_SECRET_ACCESS_KEY, or set T4_S3_PROFILE (for example \"default\")")
+	}
+	optFns := s3LoadOptions(cfg)
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, optFns...)
+	if err != nil {
+		return nil, fmt.Errorf("object/s3: load aws config: %w", err)
+	}
+	var clientOpts []func(*s3.Options)
+	if cfg.Endpoint != "" {
+		// Path-style addressing is required for MinIO and other S3-compatible stores.
+		clientOpts = append(clientOpts, func(o *s3.Options) {
+			o.UsePathStyle = true
+		})
+	}
+	client := s3.NewFromConfig(awsCfg, clientOpts...)
+	return NewS3Store(client, cfg.Bucket, cfg.Prefix), nil
+}
+
+func s3LoadOptions(cfg S3Config) []func(*awsconfig.LoadOptions) error {
 	optFns := []func(*awsconfig.LoadOptions) error{}
 	if cfg.AccessKeyID != "" {
 		optFns = append(optFns, awsconfig.WithCredentialsProvider(
@@ -80,19 +100,7 @@ func NewS3StoreFromConfig(ctx context.Context, cfg S3Config) (*S3Store, error) {
 	if cfg.Region != "" {
 		optFns = append(optFns, awsconfig.WithRegion(cfg.Region))
 	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, optFns...)
-	if err != nil {
-		return nil, fmt.Errorf("object/s3: load aws config: %w", err)
-	}
-	var clientOpts []func(*s3.Options)
-	if cfg.Endpoint != "" {
-		// Path-style addressing is required for MinIO and other S3-compatible stores.
-		clientOpts = append(clientOpts, func(o *s3.Options) {
-			o.UsePathStyle = true
-		})
-	}
-	client := s3.NewFromConfig(awsCfg, clientOpts...)
-	return NewS3Store(client, cfg.Bucket, cfg.Prefix), nil
+	return optFns
 }
 
 func (s *S3Store) key(k string) string {

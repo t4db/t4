@@ -49,7 +49,7 @@ t4 run \
   --s3-prefix t4/
 ```
 
-AWS credentials are resolved from the standard chain: `AWS_*` environment variables, `~/.aws/credentials`, instance profile, or EKS workload identity.
+AWS credentials are resolved from `T4_S3_ACCESS_KEY_ID`, `T4_S3_SECRET_ACCESS_KEY` environment variables.
 
 ### Use any etcd v3 client
 

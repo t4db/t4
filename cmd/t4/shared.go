@@ -52,8 +52,8 @@ func addS3Flags(cmd *cobra.Command, bucketRequired bool) *s3Flags {
 	cmd.Flags().StringVar(&f.Prefix, "s3-prefix", "", "key prefix inside the S3 bucket (env: T4_S3_PREFIX)")
 	cmd.Flags().StringVar(&f.Endpoint, "s3-endpoint", "", "custom S3 endpoint URL, e.g. for MinIO (env: T4_S3_ENDPOINT)")
 	cmd.Flags().StringVar(&f.Region, "s3-region", "", "AWS region (env: T4_S3_REGION)")
-	cmd.Flags().StringVar(&f.Profile, "s3-profile", "", "AWS shared config profile (env: T4_S3_PROFILE)")
-	cmd.Flags().StringVar(&f.AccessKeyID, "s3-access-key-id", "", "AWS access key ID (env: T4_S3_ACCESS_KEY_ID)")
+	cmd.Flags().StringVar(&f.Profile, "s3-profile", "", "named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) (env: T4_S3_PROFILE)")
+	cmd.Flags().StringVar(&f.AccessKeyID, "s3-access-key-id", "", "t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials (env: T4_S3_ACCESS_KEY_ID)")
 	cmd.Flags().StringVar(&f.SecretAccessKey, "s3-secret-access-key", "", "AWS secret access key (env: T4_S3_SECRET_ACCESS_KEY)")
 	if bucketRequired {
 		cmd.MarkFlagRequired("s3-bucket")

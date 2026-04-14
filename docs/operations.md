@@ -12,7 +12,7 @@ t4 run \
   --s3-prefix t4/
 ```
 
-AWS credentials are resolved from the standard chain: `AWS_*` environment variables, `~/.aws/credentials`, instance profile (EC2/ECS), workload identity (EKS).
+S3 credentials are resolved from the `T4_S3_ACCESS_KEY_ID`, `T4_S3_SECRET_ACCESS_KEY` env vars.
 
 ### MinIO or other S3-compatible stores
 
