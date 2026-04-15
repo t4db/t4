@@ -1,5 +1,6 @@
 ---
 title: Branches
+description: Branching in t4 lets you fork a database instantly and evolve it independently, without copying data.
 ---
 
 # Branching in t4
@@ -7,10 +8,6 @@ title: Branches
 t4 supports **instant, zero-copy database branching**.
 
 A branch is a fully independent database that starts from a consistent snapshot and evolves on its own — without duplicating existing data.
-
----
-
-## Overview
 
 Branching allows you to:
 
@@ -202,9 +199,3 @@ t4 branching provides:
 - storage-efficient isolation
 
 All built on top of immutable SST files, WAL history, and S3-backed durability.
-
----
-
-## One-line explanation
-
-**Branching in t4 lets you fork a database instantly and evolve it independently, without copying data.**
