@@ -56,6 +56,7 @@ export default defineConfig({
 						{ label: 'API Reference', slug: 'api' },
 						{ label: 'Configuration', slug: 'configuration' },
 						{ label: 'Operations', slug: 'operations' },
+						{ label: 'Branches', slug: 'branches' },
 						{ label: 'Backup and Restore', slug: 'backup-restore' },
 						{ label: 'Security', slug: 'security' },
 						{ label: 'Recipes', slug: 'recipes' },
