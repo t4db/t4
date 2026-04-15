@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>T4 — S3-durable key-value store</title>
+  <meta name="description" content="etcd-compatible key-value storage backed by S3. When a node loses its disk, T4 recovers automatically. No operator required." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #090909;
+      --bg-grain:    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+      --surface:     #111111;
+      --surface2:    #171717;
+      --border:      #1f1f1f;
+      --border2:     #2d2d2d;
+      --accent:      #2dd4bf;
+      --accent-dim:  #5eead4;
+      --accent-glow: rgba(45, 212, 191, 0.07);
+      --text:        #efefed;
+      --text-dim:    #949490;
+      --text-muted:  #4a4a48;
+      --green:       #34d399;
+      --teal:        #5eead4;
+      --r:           3px;
+      --font:        -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --mono:        'JetBrains Mono', monospace;
+    }
+
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      background-image: var(--bg-grain);
+      color: var(--text);
+      font-family: var(--font);
+font-weight: 400;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── NAV ─────────────────────────────── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 3.5rem; height: 52px;
+      background: rgba(9,9,9,0.92);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-brand { font-family: var(--mono); font-size: 0.95rem; color: var(--accent); text-decoration: none; font-weight: 500; letter-spacing: 0.02em; }
+    .nav-links { display: flex; gap: 2.5rem; align-items: center; }
+    .nav-links a { color: var(--text-muted); text-decoration: none; font-size: 0.8125rem; font-weight: 500; letter-spacing: 0.01em; transition: color 0.2s; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta {
+      padding: 0.35rem 1rem; border: 1px solid var(--border2); border-radius: var(--r);
+      color: var(--text-dim) !important; font-size: 0.8rem !important;
+      transition: border-color 0.2s, color 0.2s !important;
+    }
+    .nav-cta:hover { border-color: var(--accent) !important; color: var(--accent) !important; }
+
+    /* ── HERO ────────────────────────────── */
+    .hero {
+      min-height: 100vh;
+      max-width: 1400px; margin: 0 auto;
+      padding: 10rem 3.5rem 6rem;
+      display: flex; flex-direction: column;
+      justify-content: flex-end;
+    }
+    .hero-eyebrow {
+      display: flex; align-items: center; gap: 1.5rem;
+      margin-bottom: 2.5rem;
+      font-family: var(--mono); font-size: 0.7rem;
+      color: var(--text-muted); letter-spacing: 0.1em; text-transform: uppercase;
+    }
+    .hero-eyebrow::before {
+      content: ''; display: block; width: 32px; height: 1px; background: var(--accent);
+    }
+    .hero-eyebrow span { color: var(--accent); }
+
+    h1 {
+      font-size: clamp(3.5rem, 8.5vw, 7.5rem);
+      font-weight: 800;
+      line-height: 0.95;
+      letter-spacing: -0.04em;
+      max-width: 1100px;
+      margin-bottom: 3rem;
+    }
+    h1 .hi { color: var(--accent); }
+
+    .hero-bottom {
+      display: flex; align-items: flex-end; justify-content: space-between;
+      gap: 3rem; flex-wrap: wrap;
+      padding-top: 2.5rem;
+      border-top: 1px solid var(--border);
+    }
+    .hero-sub {
+      font-size: 1.0625rem; color: var(--text-dim);
+      max-width: 480px; line-height: 1.72; font-weight: 400;
+    }
+    .hero-actions { display: flex; gap: 0.75rem; align-items: center; flex-shrink: 0; }
+
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      padding: 0.75rem 1.625rem;
+      background: var(--accent); color: #070800;
+      font-family: var(--font); font-size: 0.9rem; font-weight: 700;
+      text-decoration: none; border-radius: var(--r);
+      letter-spacing: -0.01em;
+      transition: background 0.18s, transform 0.12s;
+    }
+    .btn-primary:hover { background: var(--accent-dim); transform: translateY(-1px); box-shadow: 0 6px 24px rgba(45,212,191,0.25); }
+
+    .btn-ghost {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      padding: 0.75rem 1.625rem;
+      border: 1px solid var(--border2); color: var(--text-dim);
+      font-family: var(--font); font-size: 0.9rem; font-weight: 500;
+      text-decoration: none; border-radius: var(--r);
+      transition: border-color 0.18s, color 0.18s;
+    }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── STATS ───────────────────────────── */
+    .stats {
+      border-top: 1px solid var(--border);
+      display: grid; grid-template-columns: repeat(3, 1fr);
+    }
+    .stat {
+      padding: 3.5rem;
+      border-right: 1px solid var(--border);
+      position: relative;
+    }
+    .stat:last-child { border-right: none; }
+    .stat-num {
+      font-size: clamp(3rem, 5vw, 5rem);
+      font-weight: 800; color: var(--accent);
+      letter-spacing: -0.05em; line-height: 1;
+      margin-bottom: 0.75rem;
+    }
+    .stat-label { font-size: 0.875rem; color: var(--text-dim); font-weight: 400; max-width: 180px; line-height: 1.5; }
+
+    /* ── PILLARS ─────────────────────────── */
+    .pillars-wrap {
+      max-width: 1400px; margin: 0 auto;
+      padding: 8rem 3.5rem;
+    }
+    .pillars-header {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 4rem; align-items: end;
+      margin-bottom: 5rem; padding-bottom: 4rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .pillars-header h2 { margin: 0; }
+    .pillars-header p { font-size: 1rem; color: var(--text-dim); line-height: 1.75; max-width: 440px; }
+
+    .pillars {
+      display: grid; grid-template-columns: repeat(3, 1fr);
+      gap: 0;
+    }
+    .pillar {
+      padding: 3rem 2.5rem 3rem 0;
+      border-right: 1px solid var(--border);
+      padding-right: 3rem;
+    }
+    .pillar:last-child { border-right: none; padding-right: 0; padding-left: 3rem; }
+    .pillar:nth-child(2) { padding-left: 3rem; }
+
+    .pillar-num {
+      font-family: var(--mono); font-size: 0.65rem;
+      color: var(--accent); letter-spacing: 0.1em;
+      margin-bottom: 2rem; display: block;
+    }
+    .pillar h3 {
+      font-size: 1.5rem; font-weight: 800;
+      letter-spacing: -0.03em; line-height: 1.15;
+      margin-bottom: 1rem; color: var(--text);
+    }
+    .pillar p { font-size: 0.9375rem; color: var(--text-dim); line-height: 1.75; }
+    .pillar p strong { color: var(--text); font-weight: 600; }
+
+    /* ── HOW IT WORKS ────────────────────── */
+    .how-bg {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .how-inner {
+      max-width: 1400px; margin: 0 auto;
+      padding: 8rem 3.5rem;
+      display: grid; grid-template-columns: 5fr 6fr;
+      gap: 7rem; align-items: start;
+    }
+    .how-text { padding-top: 0.5rem; }
+
+    h2 {
+      font-size: clamp(2.25rem, 3.5vw, 3.25rem);
+      font-weight: 800; letter-spacing: -0.035em; line-height: 1.08;
+      margin-bottom: 1.5rem;
+    }
+    h2 .hi { color: var(--accent); }
+
+    .eyebrow {
+      font-family: var(--mono); font-size: 0.65rem;
+      letter-spacing: 0.15em; text-transform: uppercase;
+      color: var(--accent); margin-bottom: 1.25rem; display: block;
+    }
+    .how-text p {
+      font-size: 0.9375rem; color: var(--text-dim); line-height: 1.78;
+      margin-bottom: 1.25rem;
+    }
+    .how-text p strong { color: var(--text); font-weight: 600; }
+    .how-text a { color: var(--accent); text-decoration: none; font-weight: 500; font-size: 0.875rem; }
+    .how-text a:hover { text-decoration: underline; }
+
+    .how-code {
+      background: #050505; border: 1px solid var(--border2);
+      border-radius: 6px; overflow: hidden;
+      font-family: var(--mono); font-size: 0.785rem;
+    }
+    .how-code-bar {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.625rem 1rem; background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; }
+    .dot:nth-child(1){background:#ff5f57} .dot:nth-child(2){background:#febc2e} .dot:nth-child(3){background:#28c840}
+    .how-code pre { padding: 1.625rem; line-height: 1.85; overflow-x: auto; white-space: pre; }
+    .ck{color:#7dd3fc} .cs{color:var(--teal)} .cf{color:#c4b5fd}
+    .cm{color:#333} .cp{color:var(--accent)} .cn{color:#fb923c}
+
+    /* ── COMPARISON ──────────────────────── */
+    .cmp-wrap {
+      max-width: 1400px; margin: 0 auto;
+      padding: 8rem 3.5rem;
+      display: grid; grid-template-columns: 1fr 2fr;
+      gap: 7rem; align-items: start;
+    }
+    .cmp-header { position: sticky; top: 5rem; }
+    .cmp-header h2 { margin-bottom: 1rem; }
+    .cmp-header p { font-size: 0.9375rem; color: var(--text-dim); line-height: 1.7; margin-bottom: 2rem; }
+    .cmp-header a { font-size: 0.875rem; color: var(--accent); text-decoration: none; font-weight: 500; }
+    .cmp-header a:hover { text-decoration: underline; }
+
+    .cmp-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    .cmp-table th {
+      padding: 0.75rem 1rem;
+      font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--text-muted); text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    .cmp-table th:not(:first-child) { text-align: center; }
+    .cmp-table td {
+      padding: 0.875rem 1rem; border-bottom: 1px solid var(--border);
+      color: var(--text-dim); font-weight: 400;
+    }
+    .cmp-table td:not(:first-child) { text-align: center; }
+    .cmp-table tr:hover td { background: rgba(45,212,191,0.04); }
+    .t4c { color: var(--text) !important; font-weight: 600 !important; }
+    .chk { color: var(--green); }
+    .crs { color: var(--border2); }
+    .win { color: var(--accent); font-weight: 600; }
+    .dim { color: var(--text-muted); font-size: 0.8rem; }
+
+    /* ── CTA ─────────────────────────────── */
+    .cta-bg {
+      background: var(--accent);
+      padding: 7rem 3.5rem;
+      position: relative; overflow: hidden;
+    }
+    .cta-bg::before {
+      content: '';
+      position: absolute; inset: 0;
+      background-image: var(--bg-grain);
+      opacity: 0.4;
+      pointer-events: none;
+    }
+    .cta-inner {
+      max-width: 1400px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 4rem; flex-wrap: wrap;
+      position: relative;
+    }
+    .cta-text {}
+    .cta-text h2 {
+      color: #070800; margin-bottom: 0.5rem;
+      font-size: clamp(2rem, 4vw, 3.5rem);
+    }
+    .cta-text p { color: rgba(7,8,0,0.65); font-size: 1.0625rem; max-width: 480px; line-height: 1.65; }
+    .cta-actions { display: flex; gap: 0.75rem; flex-shrink: 0; flex-wrap: wrap; }
+
+    .btn-dark {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      padding: 0.8rem 1.75rem;
+      background: #070800; color: var(--accent);
+      font-family: var(--font); font-size: 0.9rem; font-weight: 700;
+      text-decoration: none; border-radius: var(--r);
+      transition: opacity 0.18s, transform 0.12s;
+    }
+    .btn-dark:hover { opacity: 0.85; transform: translateY(-1px); }
+
+    .btn-outline-dark {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      padding: 0.8rem 1.75rem;
+      border: 1px solid rgba(7,8,0,0.25); color: #070800;
+      font-family: var(--font); font-size: 0.9rem; font-weight: 600;
+      text-decoration: none; border-radius: var(--r);
+      transition: background 0.18s;
+    }
+    .btn-outline-dark:hover { background: rgba(7,8,0,0.08); }
+
+    /* ── FOOTER ──────────────────────────── */
+    footer {
+      padding: 1.75rem 3.5rem;
+      display: flex; align-items: center; justify-content: space-between;
+      border-top: 1px solid var(--border);
+    }
+    .footer-brand { font-family: var(--mono); font-size: 0.8rem; color: var(--text-muted); }
+    .footer-brand strong { color: var(--accent); }
+    .footer-brand a { color: var(--text-muted); text-decoration: none; }
+    .footer-links { display: flex; gap: 2rem; }
+    .footer-links a { font-size: 0.8rem; color: var(--text-muted); text-decoration: none; transition: color 0.2s; }
+    .footer-links a:hover { color: var(--text); }
+
+    /* ── SCROLL REVEAL ───────────────────── */
+    [data-reveal] { opacity: 0; transform: translateY(24px); transition: opacity 0.6s ease, transform 0.6s ease; }
+    [data-reveal].vis { opacity: 1; transform: none; }
+
+    /* ── RESPONSIVE ──────────────────────── */
+    @media (max-width: 1100px) {
+      .cmp-wrap { grid-template-columns: 1fr; gap: 3rem; }
+      .cmp-header { position: static; }
+      .pillars-header { grid-template-columns: 1fr; gap: 1.5rem; }
+    }
+    @media (max-width: 900px) {
+      nav { padding: 0 1.5rem; }
+      .hero { padding: 8rem 1.5rem 5rem; }
+      .hero-bottom { flex-direction: column; align-items: flex-start; }
+      .stats { grid-template-columns: 1fr; }
+      .stat { border-right: none; border-bottom: 1px solid var(--border); padding: 2.5rem 1.5rem; }
+      .stat:last-child { border-bottom: none; }
+      .pillars { grid-template-columns: 1fr; }
+      .pillar, .pillar:nth-child(2), .pillar:last-child { padding: 2.5rem 0; border-right: none; border-top: 1px solid var(--border); }
+      .pillar:first-child { border-top: none; }
+      .pillars-wrap, .cmp-wrap { padding: 5rem 1.5rem; }
+      .how-inner { grid-template-columns: 1fr; gap: 3rem; padding: 5rem 1.5rem; }
+      .cta-bg { padding: 5rem 1.5rem; }
+      .cta-inner { flex-direction: column; align-items: flex-start; }
+      footer { flex-direction: column; gap: 1.25rem; padding: 1.5rem; }
+    }
+    @media (max-width: 600px) {
+      .nav-links a:not(.nav-cta) { display: none; }
+      h1 { font-size: 3rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a href="/" class="nav-brand">t4</a>
+  <div class="nav-links">
+    <a href="https://t4db.github.io/t4/getting-started/">Docs</a>
+    <a href="https://t4db.github.io/t4/architecture/">Architecture</a>
+    <a href="https://t4db.github.io/t4/benchmarks/">Benchmarks</a>
+    <a href="https://github.com/t4db/t4" class="nav-cta">GitHub</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-eyebrow">
+    <span>Open source</span>
+    MIT License &middot; etcd v3 compatible &middot; Go 1.22+
+  </div>
+  <h1>The key-value store<br/>that survives<br/><span class="hi">disk loss.</span></h1>
+  <div class="hero-bottom">
+    <p class="hero-sub">T4 is an etcd-compatible KV store backed by S3. When a node loses its disk &mdash; hardware failure, cloud instance gone, whatever &mdash; T4 recovers automatically. No operator required. No data lost.</p>
+    <div class="hero-actions">
+      <a href="https://t4db.github.io/t4/getting-started/" class="btn-primary">
+        Get started
+        <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"/></svg>
+      </a>
+      <a href="https://t4db.github.io/t4/" class="btn-ghost">Read the docs</a>
+    </div>
+  </div>
+</section>
+
+<!-- STATS -->
+<div class="stats">
+  <div class="stat">
+    <div class="stat-num">&lt;&thinsp;10s</div>
+    <div class="stat-label">automatic failover, no manual steps</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">0</div>
+    <div class="stat-label">operator actions needed to recover from total disk loss</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">100%</div>
+    <div class="stat-label">etcd v3 wire-compatible &mdash; existing clients work unchanged</div>
+  </div>
+</div>
+
+<!-- PILLARS -->
+<div class="pillars-wrap" data-reveal>
+  <div class="pillars-header">
+    <h2>Built for infrastructure<br/>that <span class="hi">can't go down.</span></h2>
+    <p>etcd is great &mdash; until a node loses its disk. T4 keeps your data safe, your deploys simple, and your on-call calendar clear. Same API. Radically better durability story.</p>
+  </div>
+  <div class="pillars">
+    <div class="pillar">
+      <span class="pillar-num">01 / DURABILITY</span>
+      <h3>Survive anything.</h3>
+      <p>Every write is streamed to S3 before it's acknowledged. When a node loses its disk &mdash; <strong>T4 restores from S3 automatically on next boot.</strong> No runbook. No 3am pages. No data loss.</p>
+    </div>
+    <div class="pillar">
+      <span class="pillar-num">02 / COMPATIBILITY</span>
+      <h3>Drop in, don't rip out.</h3>
+      <p>T4 speaks the etcd v3 gRPC protocol. <strong>Your existing clients, tooling, and Helm charts work unchanged.</strong> Swap the endpoint, keep everything else. Zero migration scripts.</p>
+    </div>
+    <div class="pillar">
+      <span class="pillar-num">03 / SIMPLICITY</span>
+      <h3>Ship it inside your app.</h3>
+      <p>One <code style="font-family:var(--mono);color:var(--teal);font-size:0.9em">t4.Open()</code> call. No sidecar daemon, no extra process. <strong>Embed the store directly in your Go binary.</strong> Local reads: zero network, zero latency.</p>
+    </div>
+  </div>
+</div>
+
+<!-- HOW IT WORKS -->
+<div class="how-bg">
+  <div class="how-inner" data-reveal>
+    <div class="how-text">
+      <span class="eyebrow">How it works</span>
+      <h2>S3 as the source<br/>of <span class="hi">truth.</span></h2>
+      <p>T4 writes every change to a local WAL <em>and</em> streams it to S3. Leader election uses S3 atomic conditional PUTs &mdash; <strong>no Raft, no ZooKeeper, no cluster membership config.</strong></p>
+      <p>Any node can join or leave at any time. A replacement node fetches the latest S3 checkpoint, replays recent WAL segments, and is serving traffic within seconds &mdash; automatically.</p>
+      <p>For multi-writer workloads, T4's S3-based consensus scales better than Raft under contention. Single-writer performance is slower. <a href="https://t4db.github.io/t4/benchmarks/">See the benchmarks.</a></p>
+      <br/>
+      <a href="https://t4db.github.io/t4/architecture/">Architecture deep-dive &rarr;</a>
+    </div>
+    <div class="how-code">
+      <div class="how-code-bar">
+        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+      </div>
+      <pre><span class="ck">import</span> <span class="cs">"github.com/t4db/t4"</span>
+
+<span class="cm">// No daemon. No sidecar. One call.</span>
+node, _ := t4.<span class="cf">Open</span>(t4.Config{
+    DataDir:     <span class="cs">"/var/lib/myapp/t4"</span>,
+    ObjectStore: s3Store,
+})
+<span class="ck">defer</span> node.<span class="cf">Close</span>()
+
+<span class="cm">// Write</span>
+node.<span class="cf">Put</span>(ctx, <span class="cs">"/cfg/timeout"</span>, []<span class="ck">byte</span>(<span class="cs">"30s"</span>), <span class="cn">0</span>)
+
+<span class="cm">// Read — zero network, zero latency</span>
+kv, _ := node.<span class="cf">Get</span>(<span class="cs">"/cfg/timeout"</span>)
+
+<span class="cm">// Watch any prefix</span>
+ch, _ := node.<span class="cf">Watch</span>(ctx, <span class="cs">"/cfg/"</span>, <span class="cn">0</span>)</pre>
+    </div>
+  </div>
+</div>
+
+<!-- COMPARISON -->
+<div data-reveal>
+  <div class="cmp-wrap">
+    <div class="cmp-header">
+      <span class="eyebrow">Comparison</span>
+      <h2>T4 vs <span class="hi">etcd</span></h2>
+      <p>Same wire protocol. Completely different durability model. T4 trades Raft's write-concurrency advantages for disk-loss immunity and S3-native recovery.</p>
+      <a href="https://t4db.github.io/t4/etcd-migration/">Full compatibility guide &rarr;</a>
+    </div>
+    <table class="cmp-table">
+      <thead>
+        <tr><th>Capability</th><th>T4</th><th>etcd</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>etcd v3 KV + Watch API</td><td class="t4c chk">&#x2713;</td><td class="chk">&#x2713;</td></tr>
+        <tr><td>Survive total disk loss</td><td class="t4c chk">&#x2713;</td><td class="crs">&mdash;</td></tr>
+        <tr><td>Automatic recovery from S3</td><td class="t4c chk">&#x2713;</td><td class="crs">&mdash;</td></tr>
+        <tr><td>Embeddable Go library</td><td class="t4c chk">&#x2713;</td><td class="crs">&mdash;</td></tr>
+        <tr><td>Zero-copy database branching</td><td class="t4c chk">&#x2713;</td><td class="crs">&mdash;</td></tr>
+        <tr><td>No cluster membership config</td><td class="t4c chk">&#x2713;</td><td class="crs">&mdash;</td></tr>
+        <tr><td>Consensus protocol</td><td class="t4c dim">S3 atomic locks</td><td class="dim">Raft</td></tr>
+        <tr><td>Write throughput, 8+ concurrent writers</td><td class="t4c win">Faster</td><td class="dim">Slower</td></tr>
+        <tr><td>Write throughput, 1&ndash;4 writers</td><td class="t4c dim">Slower</td><td class="win">Faster</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- CTA -->
+<div class="cta-bg">
+  <div class="cta-inner">
+    <div class="cta-text">
+      <h2>Running in minutes.<br/>No vendor lock-in.</h2>
+      <p>Open source, MIT licensed. Point it at an S3 bucket and you have an etcd-compatible cluster that survives anything.</p>
+    </div>
+    <div class="cta-actions">
+      <a href="https://t4db.github.io/t4/getting-started/" class="btn-dark">
+        Get started
+        <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"/></svg>
+      </a>
+      <a href="https://github.com/t4db/t4" class="btn-outline-dark">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+        Star on GitHub
+      </a>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-brand">
+    <strong>t4</strong> &mdash; MIT License &middot; <a href="https://github.com/t4db">t4db</a> team
+  </div>
+  <div class="footer-links">
+    <a href="https://t4db.github.io/t4/getting-started/">Docs</a>
+    <a href="https://t4db.github.io/t4/architecture/">Architecture</a>
+    <a href="https://t4db.github.io/t4/benchmarks/">Benchmarks</a>
+    <a href="https://github.com/t4db/t4">GitHub</a>
+  </div>
+</footer>
+
+<script>
+  const obs = new IntersectionObserver(
+    entries => entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('vis'); obs.unobserve(e.target); } }),
+    { threshold: 0.08 }
+  );
+  document.querySelectorAll('[data-reveal]').forEach(el => obs.observe(el));
+</script>
+
+</body>
+</html>
