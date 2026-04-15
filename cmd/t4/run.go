@@ -9,12 +9,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -78,6 +82,12 @@ func runCmd() *cobra.Command {
 			}
 			logrus.SetLevel(lvl)
 
+			tp, shutdownTracing, err := initTracing(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("init tracing: %w", err)
+			}
+			defer shutdownTracing(context.Background()) //nolint:errcheck
+
 			if walSyncUpload != "" && walSyncUpload != "true" && walSyncUpload != "false" {
 				return fmt.Errorf("--wal-sync-upload must be \"true\" or \"false\", got %q", walSyncUpload)
 			}
@@ -123,6 +133,7 @@ func runCmd() *cobra.Command {
 				LeaderWatchInterval: time.Duration(leaderWatchIntervalSec) * time.Second,
 				FollowerMaxRetries:  followerMaxRetries,
 				FollowerWaitMode:    t4.FollowerWaitMode(followerWaitMode),
+				TracerProvider:      tp,
 			}
 
 			if walSyncUpload != "" {
@@ -226,7 +237,7 @@ func runCmd() *cobra.Command {
 					Timeout:             grpcKeepaliveTimeout,
 				}),
 			)...)
-			grpcOpts = append(grpcOpts, t4etcd.TracingOptions(nil)...)
+			grpcOpts = append(grpcOpts, t4etcd.TracingOptions(tp)...)
 
 			lis, err := net.Listen("tcp", listenAddr)
 			if err != nil {
@@ -516,6 +527,53 @@ func buildPeerTLS(ca, cert, key string) (serverCreds, clientCreds credentials.Tr
 		MinVersion:   tls.VersionTLS13,
 	}
 	return credentials.NewTLS(serverTLS), credentials.NewTLS(clientTLS), nil
+}
+
+// initTracing creates a real OTLP TracerProvider when OTEL_EXPORTER_OTLP_ENDPOINT
+// is set, or returns nil (noop) otherwise. The caller must defer the returned
+// shutdown function.
+func initTracing(ctx context.Context) (trace.TracerProvider, func(context.Context) error, error) {
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" &&
+		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == "" {
+		return nil, func(context.Context) error { return nil }, nil
+	}
+	exp, err := otlptracegrpc.New(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("OTLP exporter: %w", err)
+	}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exp),
+		sdktrace.WithSampler(buildSampler()),
+	)
+	logrus.WithField("endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")).
+		Info("OpenTelemetry tracing enabled")
+	return tp, tp.Shutdown, nil
+}
+
+// buildSampler reads OTEL_TRACES_SAMPLER (and OTEL_TRACES_SAMPLER_ARG) to pick
+// a sampler, mirroring the OTel spec environment variable contract.
+func buildSampler() sdktrace.Sampler {
+	switch os.Getenv("OTEL_TRACES_SAMPLER") {
+	case "always_off":
+		return sdktrace.NeverSample()
+	case "traceidratio":
+		return sdktrace.TraceIDRatioBased(parseSamplerRatio())
+	case "parentbased_traceidratio":
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(parseSamplerRatio()))
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample())
+	default: // always_on, parentbased_always_on, ""
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	}
+}
+
+func parseSamplerRatio() float64 {
+	if s := os.Getenv("OTEL_TRACES_SAMPLER_ARG"); s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v >= 0 && v <= 1 {
+			return v
+		}
+	}
+	return 1.0
 }
 
 func serveMetrics(ctx context.Context, addr string, node *t4.Node) {

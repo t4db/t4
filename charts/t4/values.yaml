@@ -135,6 +135,22 @@ serviceAccount:
   name: ""
   annotations: {}
 
+# ── Tracing (OpenTelemetry) ───────────────────────────────────────────────────
+# Set endpoint to enable OTLP trace export; leave empty to disable.
+tracing:
+  # OTLP gRPC endpoint, e.g. http://otel-collector.monitoring:4317
+  endpoint: ""
+
+  # Sampler: always_on | always_off | traceidratio |
+  #          parentbased_always_on | parentbased_always_off | parentbased_traceidratio
+  sampler: parentbased_always_on
+
+  # Ratio for traceidratio / parentbased_traceidratio samplers (0.0–1.0).
+  samplerArg: ""
+
+  # Service name reported in trace resource attributes.
+  serviceName: t4
+
 # ── Prometheus ServiceMonitor ─────────────────────────────────────────────────
 serviceMonitor:
   enabled: false

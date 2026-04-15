@@ -131,6 +131,18 @@ spec:
             - name: T4_S3_REGION
               value: {{ $effectiveRegion | quote }}
             {{- end }}
+            {{- if .Values.tracing.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.tracing.endpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.tracing.serviceName | quote }}
+            - name: OTEL_TRACES_SAMPLER
+              value: {{ .Values.tracing.sampler | quote }}
+            {{- if .Values.tracing.samplerArg }}
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: {{ .Values.tracing.samplerArg | quote }}
+            {{- end }}
+            {{- end }}
           ports:
             - name: client
               containerPort: {{ (split ":" .Values.config.listenAddr)._1 | default 3379 }}
