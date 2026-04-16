@@ -34,6 +34,6 @@ RUN chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys
 
 COPY --from=builder /t4 /usr/local/bin/t4
 
-EXPOSE 22 2379 3380
+EXPOSE 22 3379 3380
 
 CMD ["/usr/sbin/sshd", "-D", "-e"]

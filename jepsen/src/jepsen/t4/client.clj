@@ -35,7 +35,7 @@
   "Opens a jetcd Client pointing at a single t4 node."
   [node]
   (-> (Client/builder)
-      (.endpoints (into-array String [(str "http://" (name node) ":2379")]))
+      (.endpoints (into-array String [(str "http://" (name node) ":3379")]))
       (.build)))
 
 ;; ── Register operations ───────────────────────────────────────────────────────

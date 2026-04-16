@@ -12,7 +12,7 @@
 (def data-dir    "/var/lib/t4")
 (def log-file    "/var/log/t4.log")
 (def pid-file    "/var/run/t4.pid")
-(def metrics-port 2380)   ; HTTP /healthz — distinct from the gRPC port (2379)
+(def metrics-port 2380)   ; HTTP /healthz — distinct from the gRPC port (3379)
 (def peer-port   3380)    ; leader→follower WAL stream (peer gRPC)
 
 ;; ── Helpers ───────────────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@
 (defn endpoint
   "etcd endpoint URL for a given node."
   [node]
-  (str "http://" (name node) ":2379"))
+  (str "http://" (name node) ":3379"))
 
 (defn await-ready!
   "Polls t4's HTTP /healthz until it returns 200, up to 30 s."
@@ -73,12 +73,13 @@
        :chdir   "/tmp"}
       binary
       :run
-      :--listen              "0.0.0.0:2379"
+      :--listen              "0.0.0.0:3379"
       :--data-dir            data-dir
       :--node-id             (node-id node)
       :--s3-endpoint         "http://minio:9000"
       :--s3-bucket           "jepsen"
       :--metrics-addr        (str "0.0.0.0:" metrics-port)
+      :--s3-profile          "default"  ; using profile makes t4 read ~/.aws/credentials file
       ;; Enable multi-node mode: nodes elect a leader via S3 and replicate
       ;; WAL entries over a peer gRPC stream.  Without these flags every node
       ;; runs in single-node (roleSingle) mode with no replication, making
