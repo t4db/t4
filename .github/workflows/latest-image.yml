@@ -1,0 +1,34 @@
+name: Publish Latest Image
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  packages: write
+
+jobs:
+  publish-latest:
+    name: Tag release image as latest
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.release.prerelease }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote release image to latest
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          image_tag="${TAG_NAME//+/-}"
+          docker buildx imagetools create \
+            --tag "ghcr.io/${{ github.repository }}:latest" \
+            "ghcr.io/${{ github.repository }}:${image_tag}"
