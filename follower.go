@@ -302,12 +302,12 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 	if rerr := os.RemoveAll(walDir); rerr != nil {
 		n.log.Warnf("t4: remove old wal dir during resync: %v", rerr)
 	}
-	newWal, rerr := wal.Open(walDir, n.term, newRev+1,
+	newWal := wal.New(
 		wal.WithSegmentMaxSize(n.cfg.SegmentMaxSize),
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 		wal.WithLogger(n.log),
 	)
-	if rerr != nil {
+	if rerr := newWal.Open(walDir, n.term, newRev+1); rerr != nil {
 		return fmt.Errorf("open new wal after resync: %w", rerr)
 	}
 	newWal.Start(bgCtx)

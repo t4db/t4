@@ -59,13 +59,13 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// WALs before the caller sees success. S3 is disaster-recovery only (both
 	// nodes fail simultaneously), so uploads can be async — driven by
 	// SegmentMaxAge — without affecting write durability.
-	w2, err := wal.Open(walDir, rec.Term, n.db.Load().CurrentRevision()+1,
+	w2 := wal.New(
 		wal.WithUploader(makeUploader(n.cfg.ObjectStore, n.log)),
 		wal.WithSegmentMaxSize(n.cfg.SegmentMaxSize),
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 		wal.WithLogger(n.log),
 	)
-	if err != nil {
+	if err := w2.Open(walDir, rec.Term, n.db.Load().CurrentRevision()+1); err != nil {
 		return fmt.Errorf("t4: open WAL as leader: %w", err)
 	}
 	w2.Start(bgCtx)

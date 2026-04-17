@@ -78,15 +78,14 @@ type uploadTask struct {
 	objectKey string
 }
 
-// Open opens (or creates) the WAL directory and returns a ready WAL.
-// Callers must call Start to begin background processing.
-func Open(dir string, term uint64, startRev int64, opts ...Option) (*WAL, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("wal: mkdir %q: %w", dir, err)
-	}
+// RecoveryStore is the state-machine subset needed for WAL replay.
+type RecoveryStore interface {
+	Recover(entries []Entry) error
+}
+
+// New returns a WAL configured with opts. Call Open before use.
+func New(opts ...Option) *WAL {
 	w := &WAL{
-		dir:        dir,
-		term:       term,
 		segMaxSize: DefaultSegmentMaxSize,
 		segMaxAge:  DefaultSegmentMaxAge,
 		uploadC:    make(chan uploadTask, 64),
@@ -97,12 +96,69 @@ func Open(dir string, term uint64, startRev int64, opts ...Option) (*WAL, error)
 	if w.log == nil {
 		w.log = stdlibLogger{}
 	}
-	sw, err := OpenSegmentWriter(dir, term, startRev)
-	if err != nil {
+	return w
+}
+
+// Open opens (or creates) the WAL directory and returns a ready WAL.
+// Callers must call Start to begin background processing.
+func Open(dir string, term uint64, startRev int64, opts ...Option) (*WAL, error) {
+	w := New(opts...)
+	if err := w.Open(dir, term, startRev); err != nil {
 		return nil, err
 	}
-	w.active = sw
 	return w, nil
+}
+
+// Open opens (or creates) the WAL directory and prepares the active segment.
+// Callers must call Start to begin background processing.
+func (w *WAL) Open(dir string, term uint64, startRev int64) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("wal: mkdir %q: %w", dir, err)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.dir = dir
+	w.term = term
+	w.closed = false
+	w.uploadC = make(chan uploadTask, 64)
+	sw, err := OpenSegmentWriter(dir, term, startRev)
+	if err != nil {
+		return err
+	}
+	w.active = sw
+	return nil
+}
+
+// ReplayLocal replays locally stored WAL segments into db, applying entries
+// whose revision is greater than afterRev.
+func (w *WAL) ReplayLocal(db RecoveryStore, afterRev int64) error {
+	paths, err := LocalSegments(w.dir)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		sr, closer, err := OpenSegmentFile(path)
+		if err != nil {
+			return err
+		}
+		entries, readErr := sr.ReadAll()
+		closer()
+		if readErr != nil {
+			w.log.Warnf("wal: partial local segment %q: %v", path, readErr)
+		}
+		var applicable []Entry
+		for _, e := range entries {
+			if e.Revision > afterRev {
+				applicable = append(applicable, *e)
+			}
+		}
+		if len(applicable) > 0 {
+			if err := db.Recover(applicable); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Option configures a WAL.

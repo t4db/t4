@@ -17,36 +17,6 @@ import (
 	"github.com/t4db/t4/pkg/object"
 )
 
-func replayLocal(db *istore.Store, walDir string, afterRev int64, log Logger) error {
-	paths, err := wal.LocalSegments(walDir)
-	if err != nil {
-		return err
-	}
-	for _, path := range paths {
-		sr, closer, err := wal.OpenSegmentFile(path)
-		if err != nil {
-			return err
-		}
-		entries, readErr := sr.ReadAll()
-		closer()
-		if readErr != nil {
-			log.Warnf("t4: partial local segment %q: %v", path, readErr)
-		}
-		var applicable []wal.Entry
-		for _, e := range entries {
-			if e.Revision > afterRev {
-				applicable = append(applicable, *e)
-			}
-		}
-		if len(applicable) > 0 {
-			if err := db.Recover(applicable); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // replayPinned replays the specific WAL segments listed in rp, applying
 // entries with revision > afterRev. Used during RestorePoint bootstrap.
 func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, afterRev int64, log Logger) error {

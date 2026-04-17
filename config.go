@@ -1,12 +1,15 @@
 package t4
 
 import (
+	"context"
 	"os"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/credentials"
 
+	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -50,6 +53,18 @@ const (
 	FollowerWaitAll FollowerWaitMode = "all"
 )
 
+// WAL is the write-ahead log implementation used by Node. The default opens
+// T4's filesystem WAL. Advanced embedders can provide an alternate
+// implementation for constrained runtimes such as browser WASM demos.
+type WALWriter interface {
+	Open(dir string, term uint64, startRev int64) error
+	ReplayLocal(db wal.RecoveryStore, afterRev int64) error
+	Append(e *wal.Entry) error
+	AppendBatch(ctx context.Context, entries []*wal.Entry) error
+	SealAndFlush(nextRev int64) error
+	Close() error
+}
+
 // Config holds all configuration for a Node.
 type Config struct {
 	// ── Read consistency ─────────────────────────────────────────────────────
@@ -65,6 +80,16 @@ type Config struct {
 	// DataDir is the directory used for local Pebble data and WAL segments.
 	// Required.
 	DataDir string
+
+	// PebbleOptions are appended to T4's Pebble options before opening the
+	// local state machine. This is an expert hook; production deployments
+	// normally leave it empty.
+	PebbleOptions []func(*pebble.Options)
+
+	// WAL overrides the filesystem WAL. Open is called during Node startup.
+	// This is an expert hook for alternate runtimes; production deployments
+	// normally leave it nil.
+	WAL WALWriter
 
 	// ObjectStore is used to archive WAL segments and checkpoints and to run
 	// leader election. If nil the node runs in single-node mode.

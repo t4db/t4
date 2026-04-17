@@ -92,10 +92,10 @@ func TestConcurrentCompactPutRevisionUniqueness(t *testing.T) {
 	}
 }
 
-// fakeWAL wraps a real walWriter and can be configured to fail or block.
+// fakeWAL wraps a real WALWriter and can be configured to fail or block.
 type fakeWAL struct {
 	mu      sync.RWMutex
-	real    walWriter
+	real    WALWriter
 	failNow bool          // AppendBatch returns errInjected when true
 	blockC  chan struct{} // AppendBatch blocks until this is closed (nil = no block)
 }
@@ -103,6 +103,12 @@ type fakeWAL struct {
 func (f *fakeWAL) Append(e *wal.Entry) error        { return f.real.Append(e) }
 func (f *fakeWAL) SealAndFlush(nextRev int64) error { return f.real.SealAndFlush(nextRev) }
 func (f *fakeWAL) Close() error                     { return f.real.Close() }
+func (f *fakeWAL) Open(dir string, term uint64, startRev int64) error {
+	return f.real.Open(dir, term, startRev)
+}
+func (f *fakeWAL) ReplayLocal(db wal.RecoveryStore, afterRev int64) error {
+	return f.real.ReplayLocal(db, afterRev)
+}
 
 func (f *fakeWAL) AppendBatch(ctx context.Context, entries []*wal.Entry) error {
 	f.mu.RLock()
