@@ -329,7 +329,7 @@ func convertCompare(cmp *etcdserverpb.Compare) (t4.TxnCondition, error) {
 	switch cmp.Target {
 	case etcdserverpb.Compare_MOD:
 		c.Target = t4.TxnCondMod
-		c.ModRevision = cmp.GetModRevision()
+		c.ModRevision = fromEtcdRevision(cmp.GetModRevision())
 	case etcdserverpb.Compare_VERSION:
 		// t4 does not track per-key write counts; VERSION is treated as a binary
 		// presence flag (0 = absent, non-zero = present).  Only comparisons against
@@ -344,7 +344,7 @@ func convertCompare(cmp *etcdserverpb.Compare) (t4.TxnCondition, error) {
 		c.Version = 0
 	case etcdserverpb.Compare_CREATE:
 		c.Target = t4.TxnCondCreate
-		c.CreateRevision = cmp.GetCreateRevision()
+		c.CreateRevision = fromEtcdRevision(cmp.GetCreateRevision())
 	case etcdserverpb.Compare_VALUE:
 		c.Target = t4.TxnCondValue
 		c.Value = []byte(cmp.GetValue())
@@ -435,7 +435,7 @@ func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.Requ
 
 // Compact implements KVServer.Compact.
 func (s *Server) Compact(ctx context.Context, r *etcdserverpb.CompactionRequest) (*etcdserverpb.CompactionResponse, error) {
-	if err := s.node.Compact(ctx, r.Revision); err != nil {
+	if err := s.node.Compact(ctx, fromEtcdRevision(r.Revision)); err != nil {
 		return nil, err
 	}
 	return &etcdserverpb.CompactionResponse{Header: s.header()}, nil

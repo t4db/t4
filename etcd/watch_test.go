@@ -210,7 +210,7 @@ func TestWatchFromRevision(t *testing.T) {
 	node.Put(ctx, "/rev/b", []byte("2"), 0)
 
 	// Watch from rev1 — both /rev/a and /rev/b should arrive.
-	wch := cli.Watch(ctx, "/rev/", clientv3.WithPrefix(), clientv3.WithRev(rev1))
+	wch := cli.Watch(ctx, "/rev/", clientv3.WithPrefix(), clientv3.WithRev(rev1+1))
 
 	received := 0
 	for received < 2 {
@@ -220,6 +220,45 @@ func TestWatchFromRevision(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("timeout: got %d/2 events", received)
 		}
+	}
+}
+
+func TestWatchFromInitialEmptyListRevision(t *testing.T) {
+	node, cli := newWatchNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	listResp, err := cli.Get(ctx, "/registry/pods/", clientv3.WithPrefix())
+	if err != nil {
+		t.Fatalf("initial Get: %v", err)
+	}
+	if listResp.Header.Revision == 0 {
+		t.Fatal("initial list returned revision 0")
+	}
+
+	wch := cli.Watch(ctx, "/registry/pods/", clientv3.WithPrefix(), clientv3.WithRev(listResp.Header.Revision+1))
+
+	key := "/registry/pods/default/first"
+	if _, err := node.Put(ctx, key, []byte("pod"), 0); err != nil {
+		t.Fatalf("Put(%q): %v", key, err)
+	}
+
+	select {
+	case wr, ok := <-wch:
+		if !ok {
+			t.Fatal("watch closed unexpectedly")
+		}
+		if err := wr.Err(); err != nil {
+			t.Fatalf("watch error: %v", err)
+		}
+		for _, ev := range wr.Events {
+			if string(ev.Kv.Key) == key {
+				return
+			}
+		}
+		t.Fatalf("watch response did not include %q: %v", key, wr.Events)
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for first write after empty list")
 	}
 }
 
@@ -252,8 +291,9 @@ func TestWatchKubeLikeCompactionRecovery(t *testing.T) {
 	}
 
 	// Emulate an apiserver resuming from stale list RV: it watches from rv+1.
-	// Choose staleListRV=compactRev-1 so watch starts at compactRev and gets compacted.
-	staleListRV := compactRev - 1
+	// Choose staleListRV=externalCompactRev-1 so watch starts at the compacted revision.
+	externalCompactRev := compactRev + 1
+	staleListRV := externalCompactRev - 1
 	if staleListRV < 1 {
 		t.Fatalf("unexpected staleListRV=%d", staleListRV)
 	}
