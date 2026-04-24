@@ -179,10 +179,10 @@ func WithSegmentMaxAge(d time.Duration) Option {
 	return func(w *WAL) { w.segMaxAge = d }
 }
 
-// WithSyncUpload makes every AppendBatch seal the active segment and upload it
-// to object storage synchronously before returning. This guarantees that any
-// acknowledged write is durable in S3, even if the process crashes immediately
-// after. Has no effect when no uploader is configured.
+// WithSyncUpload makes every AppendBatch upload the active segment to object
+// storage synchronously before returning. This guarantees that any acknowledged
+// write is durable in S3, even if the process crashes immediately after. Has no
+// effect when no uploader is configured.
 func WithSyncUpload() Option {
 	return func(w *WAL) { w.syncUpload = true }
 }
@@ -231,9 +231,9 @@ func (w *WAL) Append(e *Entry) error {
 // ctx is checked before acquiring the lock; a cancelled ctx causes an early
 // return. The fsync itself is not interrupted mid-way.
 //
-// If WithSyncUpload was set, the active segment is sealed and uploaded to
-// object storage synchronously before this method returns. AppendBatch fails
-// (and the write is not acknowledged) if the upload fails.
+// If WithSyncUpload was set, the active segment is uploaded to object storage
+// synchronously before this method returns. AppendBatch rolls back the batch and
+// fails (so the write is not acknowledged) if the upload fails.
 func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -243,6 +243,8 @@ func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 	if w.closed {
 		return fmt.Errorf("wal: closed")
 	}
+	rollbackSize := w.active.Size()
+	rollbackEntryCount := w.active.EntryCount()
 	for _, e := range entries {
 		if err := w.active.AppendNoSync(e); err != nil {
 			return err
@@ -252,10 +254,7 @@ func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 		return err
 	}
 	if w.syncUpload && w.uploader != nil {
-		// Seal current segment and upload synchronously before acknowledging.
-		// The mutex is released during the upload to avoid blocking concurrent
-		// readers, then reacquired; the deferred Unlock is still valid.
-		if err := w.rotateSyncLocked(ctx); err != nil {
+		if err := w.rotateSyncLocked(rollbackSize, rollbackEntryCount); err != nil {
 			return err
 		}
 	} else if w.active.Size() >= w.segMaxSize {
@@ -264,48 +263,43 @@ func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 	return nil
 }
 
-// rotateSyncLocked seals the active segment, opens a new one, and uploads the
-// sealed segment to object storage synchronously. The mutex is released during
-// the upload and reacquired before returning, so the deferred Unlock in
-// AppendBatch remains correct.
+// rotateSyncLocked uploads the active segment to object storage synchronously.
+// The segment is only sealed and rotated after the upload succeeds. If the
+// upload fails, the just-appended batch is truncated away so local replay cannot
+// later expose a write that was never acknowledged.
 //
 // The upload uses w.uploadCtx (derived from the WAL's Start context) rather
 // than the per-batch ctx so that a per-request deadline cannot cancel the
-// upload mid-way. A cancelled upload would leave a sealed segment on disk that
-// is not yet in S3; on restart replayLocal would apply those entries as ghost
-// data even though the write had returned an error to the caller.
+// upload mid-way.
 //
 // Must be called with w.mu held; returns with w.mu held.
-func (w *WAL) rotateSyncLocked(_ context.Context) error {
+func (w *WAL) rotateSyncLocked(rollbackSize int64, rollbackEntryCount int) error {
 	seg := w.active
 	if seg == nil || seg.EntryCount() == 0 {
 		return nil
 	}
 	nextRev := seg.FirstRev() + int64(seg.EntryCount())
-	if err := seg.Seal(); err != nil {
-		return fmt.Errorf("wal: seal segment: %w", err)
-	}
 	objKey := ObjectKey(seg.Term(), seg.FirstRev())
 	localPath := seg.Path()
 
+	uploadErr := w.uploader(w.uploadCtx, localPath, objKey)
+	if uploadErr != nil {
+		w.log.Errorf("wal: sync upload %q → %q: %v", localPath, objKey, uploadErr)
+		if rollbackErr := seg.rollback(rollbackSize, rollbackEntryCount); rollbackErr != nil {
+			return fmt.Errorf("wal: sync upload failed and rollback failed: upload: %w; rollback: %v", uploadErr, rollbackErr)
+		}
+		return uploadErr
+	}
+
+	if err := seg.Seal(); err != nil {
+		return fmt.Errorf("wal: seal segment after sync upload: %w", err)
+	}
 	sw, err := OpenSegmentWriter(w.dir, w.term, nextRev)
 	if err != nil {
 		return fmt.Errorf("wal: open segment after sync rotate: %w", err)
 	}
 	w.active = sw
-
-	// Release the lock during the upload so concurrent reads/checks are not
-	// blocked by the S3 round-trip (~50–200 ms). The new active segment is
-	// already in place, so any concurrent AppendBatch will wait on the mutex
-	// and write to the new segment after we reacquire.
-	w.mu.Unlock()
-	uploadErr := w.uploader(w.uploadCtx, localPath, objKey)
-	w.mu.Lock()
-
-	if uploadErr != nil {
-		w.log.Errorf("wal: sync upload %q → %q: %v", localPath, objKey, uploadErr)
-	}
-	return uploadErr
+	return nil
 }
 
 // rotateLocked seals the active segment and opens a fresh one.

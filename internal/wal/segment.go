@@ -116,6 +116,21 @@ func (sw *SegmentWriter) Sync() error {
 	return sw.f.Sync()
 }
 
+func (sw *SegmentWriter) rollback(size int64, entryCount int) error {
+	if err := sw.f.Truncate(size); err != nil {
+		return fmt.Errorf("wal: truncate segment rollback: %w", err)
+	}
+	if _, err := sw.f.Seek(size, io.SeekStart); err != nil {
+		return fmt.Errorf("wal: seek segment rollback: %w", err)
+	}
+	if err := sw.f.Sync(); err != nil {
+		return fmt.Errorf("wal: fsync segment rollback: %w", err)
+	}
+	sw.size = size
+	sw.entryCount = entryCount
+	return nil
+}
+
 // Close closes the underlying file without sealing.
 // Call this only when the segment will not be uploaded (e.g. on error).
 func (sw *SegmentWriter) Close() error { return sw.f.Close() }

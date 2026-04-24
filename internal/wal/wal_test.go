@@ -2,6 +2,7 @@ package wal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -173,5 +174,48 @@ func TestObjectKey(t *testing.T) {
 	want := "wal/0000000001/00000000000000000042"
 	if k != want {
 		t.Errorf("ObjectKey: want %q got %q", want, k)
+	}
+}
+
+type recordingRecoveryStore struct {
+	entries []Entry
+}
+
+func (r *recordingRecoveryStore) Recover(entries []Entry) error {
+	r.entries = append(r.entries, entries...)
+	return nil
+}
+
+func TestWALSyncUploadFailureDoesNotReplayFailedBatch(t *testing.T) {
+	dir := t.TempDir()
+	uploadErr := errors.New("injected sync upload failure")
+	uploader := func(_ context.Context, _, _ string) error { return uploadErr }
+
+	w, err := Open(dir, 1, 1, WithUploader(uploader), WithSyncUpload())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w.Start(ctx)
+
+	err = w.AppendBatch(ctx, makeEntries(1, 1, 1))
+	if !errors.Is(err, uploadErr) {
+		t.Fatalf("AppendBatch: want upload error, got %v", err)
+	}
+	cancel()
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close after failed sync upload: %v", err)
+	}
+
+	reopened, err := Open(dir, 1, 1)
+	if err != nil {
+		t.Fatalf("reopen WAL: %v", err)
+	}
+	recovered := &recordingRecoveryStore{}
+	if err := reopened.ReplayLocal(recovered, 0); err != nil {
+		t.Fatalf("ReplayLocal: %v", err)
+	}
+	if got := len(recovered.entries); got != 0 {
+		t.Fatalf("ReplayLocal recovered %d entries from failed sync upload, want 0", got)
 	}
 }
