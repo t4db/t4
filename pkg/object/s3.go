@@ -13,6 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
+const defaultS3EndpointRegion = "us-east-1"
+
 // S3Store implements Store backed by an AWS S3 bucket.
 type S3Store struct {
 	client *s3.Client
@@ -39,7 +41,8 @@ type S3Config struct {
 	// automatically. Empty means the standard AWS endpoint.
 	Endpoint string
 
-	// Region overrides the AWS region.
+	// Region overrides the AWS region. When Endpoint is set and Region is
+	// empty, t4 uses us-east-1 as the signing region for S3-compatible stores.
 	Region string
 
 	// Profile selects a named profile from the shared AWS config/credentials
@@ -97,10 +100,20 @@ func s3LoadOptions(cfg S3Config) []func(*awsconfig.LoadOptions) error {
 	if cfg.Endpoint != "" {
 		optFns = append(optFns, awsconfig.WithBaseEndpoint(cfg.Endpoint))
 	}
-	if cfg.Region != "" {
-		optFns = append(optFns, awsconfig.WithRegion(cfg.Region))
+	if region := effectiveS3Region(cfg); region != "" {
+		optFns = append(optFns, awsconfig.WithRegion(region))
 	}
 	return optFns
+}
+
+func effectiveS3Region(cfg S3Config) string {
+	if cfg.Region != "" {
+		return cfg.Region
+	}
+	if cfg.Endpoint != "" {
+		return defaultS3EndpointRegion
+	}
+	return ""
 }
 
 func (s *S3Store) key(k string) string {
