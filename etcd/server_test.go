@@ -45,6 +45,9 @@ func TestRangeSingleKey(t *testing.T) {
 	if err != nil || len(r.Kvs) != 0 {
 		t.Fatalf("expected empty: err=%v kvs=%v", err, r.Kvs)
 	}
+	if r.Header.Revision == 0 {
+		t.Fatal("empty range returned revision 0")
+	}
 
 	put(t, srv, "/k", "v")
 
@@ -63,6 +66,35 @@ func TestRangeSingleKey(t *testing.T) {
 	}
 	if r.Kvs[0].CreateRevision == 0 {
 		t.Error("CreateRevision should be set")
+	}
+}
+
+// TestRangeHeaderMatchesKvRevision guards the wire-revision shift: the header
+// revision returned on a Range must equal the ModRevision on the kv that was
+// just written, and the same for CreateRevision on first write. If a future
+// change adds a new revision-emitting path and forgets toEtcdRevision, the two
+// numbers drift apart and clients (notably kube-apiserver's cacher) break.
+func TestRangeHeaderMatchesKvRevision(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	putRev := put(t, srv, "/rev-match", "v")
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/rev-match")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Kvs) != 1 {
+		t.Fatalf("want 1 kv, got %d", len(r.Kvs))
+	}
+	if r.Header.Revision != putRev {
+		t.Errorf("header revision %d != put revision %d", r.Header.Revision, putRev)
+	}
+	if r.Kvs[0].ModRevision != r.Header.Revision {
+		t.Errorf("ModRevision %d != header %d", r.Kvs[0].ModRevision, r.Header.Revision)
+	}
+	if r.Kvs[0].CreateRevision != r.Header.Revision {
+		t.Errorf("CreateRevision %d != header %d on first write", r.Kvs[0].CreateRevision, r.Header.Revision)
 	}
 }
 

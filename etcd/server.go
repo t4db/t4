@@ -77,22 +77,49 @@ func (s *Server) Register(srv *grpc.Server) {
 }
 
 // header builds a ResponseHeader from the current node state.
+//
+// Revision is the wire revision, not the internal t4 clock: see toEtcdRevision.
+// Any new RPC that exposes a revision on the wire must go through toEtcdRevision
+// (outgoing) or fromEtcdRevision (incoming) to stay consistent with this header.
 func (s *Server) header() *etcdserverpb.ResponseHeader {
 	return &etcdserverpb.ResponseHeader{
 		ClusterId: 1,
 		MemberId:  1,
-		Revision:  s.node.CurrentRevision(),
+		Revision:  toEtcdRevision(s.node.CurrentRevision()),
 		RaftTerm:  1,
 	}
 }
 
+// toEtcdRevision maps t4's internal revision clock to the etcd wire revision.
+//
+// T4's native store starts at revision 0. Kubernetes rejects list responses with
+// resourceVersion=0, while etcd presents a non-zero revision even before user
+// writes. Keep the native clock unchanged and shift only the etcd API surface.
+func toEtcdRevision(rev int64) int64 {
+	return rev + 1
+}
+
+// fromEtcdRevision maps non-zero etcd wire revisions back to t4's internal
+// revision clock. Revision 0 is a sentinel in etcd comparisons for absent keys,
+// not a real storage revision, so it stays 0.
+func fromEtcdRevision(rev int64) int64 {
+	if rev <= 0 {
+		return 0
+	}
+	return rev - 1
+}
+
 // kvToProto converts a t4 KeyValue to the etcd wire format.
+//
+// ModRevision and CreateRevision are wire revisions (see toEtcdRevision); they
+// must match the header revision produced by header() for the same underlying
+// state so that clients comparing header rev to KV rev see a consistent world.
 func kvToProto(kv *t4.KeyValue) *mvccpb.KeyValue {
 	return &mvccpb.KeyValue{
 		Key:            []byte(kv.Key),
 		Value:          kv.Value,
-		ModRevision:    kv.Revision,
-		CreateRevision: kv.CreateRevision,
+		ModRevision:    toEtcdRevision(kv.Revision),
+		CreateRevision: toEtcdRevision(kv.CreateRevision),
 		Lease:          kv.Lease,
 		Version:        1,
 	}
@@ -156,12 +183,13 @@ func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcd
 	if s.node.IsLeader() {
 		leader = 1
 	}
+	etcdRev := toEtcdRevision(rev)
 	return &etcdserverpb.StatusResponse{
 		Header:           s.header(),
 		Version:          "t4",
 		Leader:           leader,
-		RaftIndex:        uint64(rev),
-		RaftAppliedIndex: uint64(rev),
+		RaftIndex:        uint64(etcdRev),
+		RaftAppliedIndex: uint64(etcdRev),
 		RaftTerm:         1,
 	}, nil
 }

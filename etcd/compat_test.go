@@ -268,7 +268,7 @@ func TestCompatKVCompactError(t *testing.T) {
 	cli.Put(ctx, "/compat/compact/k", "v2")
 	compactRev := r1.Header.Revision
 
-	if err := node.Compact(ctx, compactRev); err != nil {
+	if err := node.Compact(ctx, compactRev-1); err != nil {
 		t.Fatalf("Compact(%d): %v", compactRev, err)
 	}
 

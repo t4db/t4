@@ -84,7 +84,7 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 			}
 
 			go func(watchID int64, startRev int64) {
-				events, err := s.node.Watch(wctx, string(cr.Key), startRev)
+				events, err := s.node.Watch(wctx, string(cr.Key), fromEtcdRevision(startRev))
 				if errors.Is(err, t4.ErrCompacted) {
 					// Remove the watch first, but do not cancel wctx before sending
 					// the compacted response: that races the select below and can
@@ -96,7 +96,7 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 						WatchId:         watchID,
 						Canceled:        true,
 						CancelReason:    "mvcc: required revision has been compacted",
-						CompactRevision: s.node.CompactRevision(),
+						CompactRevision: toEtcdRevision(s.node.CompactRevision()),
 					}:
 					case <-ctx.Done():
 					}

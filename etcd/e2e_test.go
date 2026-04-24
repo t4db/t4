@@ -289,7 +289,7 @@ func TestE2EThreeNode(t *testing.T) {
 		if node == leader {
 			continue
 		}
-		if err := node.WaitForRevision(ctx, writtenRev); err != nil {
+		if err := node.WaitForRevision(ctx, writtenRev-1); err != nil {
 			t.Fatalf("node-%d WaitForRevision(%d): %v", i, writtenRev, err)
 		}
 		resp, err := newEtcdClient(t, endpoints[i]).Get(ctx, "/cluster/replicated")
@@ -318,7 +318,7 @@ func TestE2EThreeNode(t *testing.T) {
 	fwdRev := fwdResp.Header.Revision
 
 	// Wait for the write to replicate and verify on the leader.
-	if err := leader.WaitForRevision(ctx, fwdRev); err != nil {
+	if err := leader.WaitForRevision(ctx, fwdRev-1); err != nil {
 		t.Fatalf("leader WaitForRevision(%d): %v", fwdRev, err)
 	}
 	gr, err := leaderCli.Get(ctx, "/cluster/forwarded")
