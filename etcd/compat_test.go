@@ -31,7 +31,7 @@ func newCompatNode(t *testing.T) (*t4.Node, *clientv3.Client) {
 	if err != nil {
 		t.Fatalf("t4.Open: %v", err)
 	}
-	t.Cleanup(func() { node.Close() })
+	t.Cleanup(func() { _ = node.Close() })
 	endpoint := startEtcdServer(t, node)
 	cli := newEtcdClient(t, endpoint)
 	return node, cli

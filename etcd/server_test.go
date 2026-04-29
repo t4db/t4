@@ -19,7 +19,7 @@ func newServer(t *testing.T) *t4etcd.Server {
 	if err != nil {
 		t.Fatalf("t4.Open: %v", err)
 	}
-	t.Cleanup(func() { node.Close() })
+	t.Cleanup(func() { _ = node.Close() })
 	return t4etcd.New(node, nil, nil)
 }
 

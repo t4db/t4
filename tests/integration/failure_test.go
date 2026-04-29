@@ -169,7 +169,7 @@ func openCluster(t *testing.T, count int, store object.Store) []*t4.Node {
 		if err != nil {
 			t.Fatalf("open node-%d: %v", i, err)
 		}
-		t.Cleanup(func() { node.Close() })
+		t.Cleanup(func() { _ = node.Close() })
 		nodes[i] = node
 	}
 	return nodes
@@ -494,7 +494,7 @@ func TestLeaderCrashBeforeWALFlush(t *testing.T) {
 		if err != nil {
 			t.Fatalf("node %d: %v", i, err)
 		}
-		t.Cleanup(func() { node.Close() })
+		t.Cleanup(func() { _ = node.Close() })
 		nodes[i] = node
 	}
 

@@ -249,7 +249,7 @@ func TestE2EThreeNode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("node %d: %v", i, err)
 		}
-		t.Cleanup(func() { node.Close() })
+		t.Cleanup(func() { _ = node.Close() })
 		nodes[i] = node
 	}
 

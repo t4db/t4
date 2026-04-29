@@ -188,7 +188,7 @@ func TestE2EOffline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("t4.Open: %v", err)
 	}
-	t.Cleanup(func() { node.Close() })
+	t.Cleanup(func() { _ = node.Close() })
 
 	endpoint := startEtcdServer(t, node)
 	cli := newEtcdClient(t, endpoint)
@@ -234,7 +234,7 @@ func TestE2ESingleNodeS3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second open: %v", err)
 	}
-	t.Cleanup(func() { node.Close() })
+	t.Cleanup(func() { _ = node.Close() })
 
 	endpoint := startEtcdServer(t, node)
 	cli := newEtcdClient(t, endpoint)
@@ -277,7 +277,7 @@ func TestE2EThreeNode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("node %d: %v", i, err)
 		}
-		t.Cleanup(func() { node.Close() })
+		t.Cleanup(func() { _ = node.Close() })
 		endpoints[i] = startEtcdServer(t, node)
 		nodes[i] = node
 	}

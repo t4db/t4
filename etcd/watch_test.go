@@ -348,7 +348,7 @@ func TestWatchCreateResponsePrecedesReplayedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("t4.Open: %v", err)
 	}
-	t.Cleanup(func() { node.Close() })
+	t.Cleanup(func() { _ = node.Close() })
 	endpoint := startEtcdServer(t, node)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -364,7 +364,7 @@ func TestWatchCreateResponsePrecedesReplayedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grpc client: %v", err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	stream, err := etcdserverpb.NewWatchClient(conn).Watch(ctx)
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
@@ -550,7 +550,7 @@ func newWatchNode(t *testing.T) (*t4.Node, *clientv3.Client) {
 	if err != nil {
 		t.Fatalf("t4.Open: %v", err)
 	}
-	t.Cleanup(func() { node.Close() })
+	t.Cleanup(func() { _ = node.Close() })
 	endpoint := startEtcdServer(t, node)
 	cli := newEtcdClient(t, endpoint)
 	return node, cli
