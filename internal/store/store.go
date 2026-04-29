@@ -547,6 +547,12 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 // List returns all live keys with the given prefix, sorted lexicographically.
 // If prefix is empty, all keys are returned.
 func (s *Store) List(prefix string) ([]*KeyValue, error) {
+	return s.ListLimit(prefix, 0)
+}
+
+// ListLimit returns up to limit live keys with the given prefix. A limit <= 0
+// returns all matching keys.
+func (s *Store) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
 	lower := idxKey(prefix)
 	upper := idxKeyUpper(prefix)
 
@@ -561,6 +567,9 @@ func (s *Store) List(prefix string) ([]*KeyValue, error) {
 
 	var out []*KeyValue
 	for iter.First(); iter.Valid(); iter.Next() {
+		if limit > 0 && int64(len(out)) >= limit {
+			break
+		}
 		k := string(iter.Key()[1:]) // strip 'i' prefix
 		rev := decodeRev(iter.Value())
 		kv, err := s.getLogEntry(k, rev)

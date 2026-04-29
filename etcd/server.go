@@ -10,6 +10,7 @@ package etcd
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 
@@ -25,6 +26,13 @@ import (
 
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/etcd/auth"
+)
+
+const (
+	defaultMaxConcurrentStreams = math.MaxUint32
+	defaultMaxRequestBytes      = int(1.5 * 1024 * 1024)
+	grpcOverheadBytes           = 512 * 1024
+	maxSendBytes                = math.MaxInt32
 )
 
 // Server implements the etcd v3 gRPC protocol on top of a t4 Node.
@@ -91,7 +99,10 @@ func DefaultKeepaliveOptions() KeepaliveOptions {
 type Option func(*serverConfig)
 
 type serverConfig struct {
-	keepalive KeepaliveOptions
+	keepalive            KeepaliveOptions
+	maxConcurrentStreams uint32
+	maxRecvMsgSize       int
+	maxSendMsgSize       int
 }
 
 // WithKeepalive sets the keepalive enforcement policy and server ping params.
@@ -101,13 +112,34 @@ func WithKeepalive(k KeepaliveOptions) Option {
 	return func(c *serverConfig) { c.keepalive = k }
 }
 
+// WithGRPCLimits sets etcd-style gRPC transport limits. Zero values keep the
+// default for that field.
+func WithGRPCLimits(maxConcurrentStreams uint32, maxRecvMsgSize, maxSendMsgSize int) Option {
+	return func(c *serverConfig) {
+		if maxConcurrentStreams != 0 {
+			c.maxConcurrentStreams = maxConcurrentStreams
+		}
+		if maxRecvMsgSize != 0 {
+			c.maxRecvMsgSize = maxRecvMsgSize
+		}
+		if maxSendMsgSize != 0 {
+			c.maxSendMsgSize = maxSendMsgSize
+		}
+	}
+}
+
 // NewServerOptions returns the gRPC server options needed to host the
 // etcd v3 surface: auth interceptors (when authStore is non-nil) and a
 // keepalive enforcement policy compatible with etcd v3 clients.
 //
 // Defaults come from DefaultKeepaliveOptions; pass WithKeepalive to override.
 func NewServerOptions(authStore *auth.Store, tokens *auth.TokenStore, opts ...Option) []grpc.ServerOption {
-	cfg := serverConfig{keepalive: DefaultKeepaliveOptions()}
+	cfg := serverConfig{
+		keepalive:            DefaultKeepaliveOptions(),
+		maxConcurrentStreams: defaultMaxConcurrentStreams,
+		maxRecvMsgSize:       defaultMaxRequestBytes + grpcOverheadBytes,
+		maxSendMsgSize:       maxSendBytes,
+	}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -120,6 +152,9 @@ func NewServerOptions(authStore *auth.Store, tokens *auth.TokenStore, opts ...Op
 			Time:    cfg.keepalive.Time,
 			Timeout: cfg.keepalive.Timeout,
 		}),
+		grpc.MaxConcurrentStreams(cfg.maxConcurrentStreams),
+		grpc.MaxRecvMsgSize(cfg.maxRecvMsgSize),
+		grpc.MaxSendMsgSize(cfg.maxSendMsgSize),
 	}
 	if authStore != nil {
 		unary, stream := auth.Interceptors(authStore, tokens)

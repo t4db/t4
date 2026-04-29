@@ -179,7 +179,12 @@ func TestCompatKVGetLimit(t *testing.T) {
 	if len(resp.Kvs) != 3 {
 		t.Errorf("want 3 kvs, got %d", len(resp.Kvs))
 	}
-	// Note: t4 does not set the More flag in paginated responses.
+	if resp.Count != 5 {
+		t.Errorf("want total count 5, got %d", resp.Count)
+	}
+	if !resp.More {
+		t.Error("want More=true for truncated response")
+	}
 }
 
 // TestCompatKVGetSortedAscend verifies ascending key order from WithPrefix.
