@@ -51,7 +51,8 @@ jobs:
         env:
           SITE: ${{ steps.pages.outputs.origin || 'https://t4db.github.io' }}
           BASE_PATH: ${{ steps.pages.outputs.base_path || '/t4' }}
-          PUBLIC_GA_MEASUREMENT_ID: ${{ vars.PUBLIC_GA_MEASUREMENT_ID }}
+          PUBLIC_POSTHOG_KEY: ${{ vars.PUBLIC_POSTHOG_KEY }}
+          PUBLIC_POSTHOG_HOST: ${{ vars.PUBLIC_POSTHOG_HOST }}
 
       - uses: actions/upload-pages-artifact@v3
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
