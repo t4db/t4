@@ -27,19 +27,19 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		}
 		if r.CountOnly {
 			var (
-				kv  *t4.KeyValue
-				err error
+				exists bool
+				err    error
 			)
 			if linearizable {
-				kv, err = s.node.LinearizableGet(ctx, key)
+				exists, err = s.node.LinearizableExists(ctx, key)
 			} else {
-				kv, err = s.node.Get(key)
+				exists, err = s.node.Exists(key)
 			}
 			if err != nil {
 				return nil, err
 			}
 			count := int64(0)
-			if kv != nil {
+			if exists {
 				count = 1
 			}
 			return &etcdserverpb.RangeResponse{Header: s.header(), Count: count}, nil
@@ -64,23 +64,20 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		return resp, nil
 	}
 
-	// Range / prefix scan.
-	// Key is the prefix; rangeEnd = "\x00" means "all keys ≥ Key".
-	prefix := key
-	if key == "\x00" {
-		prefix = ""
-	}
+	// Range / prefix scan. rangeEnd = "\x00" means "all keys >= key",
+	// not "keys with key as a prefix".
+	scanPrefix := rangeScanPrefix(key, rangeEnd)
 
 	if r.CountOnly {
-		if canCountPrefixFast(key, rangeEnd) {
+		if isExactPrefixRange(key, rangeEnd) {
 			var (
 				count int64
 				err   error
 			)
 			if linearizable {
-				count, err = s.node.LinearizableCount(ctx, prefix)
+				count, err = s.node.LinearizableCount(ctx, scanPrefix)
 			} else {
-				count, err = s.node.Count(prefix)
+				count, err = s.node.Count(scanPrefix)
 			}
 			if err != nil {
 				return nil, err
@@ -93,17 +90,16 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			err error
 		)
 		if linearizable {
-			all, err = s.node.LinearizableList(ctx, prefix)
+			all, err = s.node.LinearizableList(ctx, scanPrefix)
 		} else {
-			all, err = s.node.List(prefix)
+			all, err = s.node.List(scanPrefix)
 		}
 		if err != nil {
 			return nil, err
 		}
-		all = userKeyValues(all)
 		var count int64
 		for _, kv := range all {
-			if rangeEnd != "\x00" && kv.Key >= rangeEnd {
+			if !matchRange(kv, key, rangeEnd) {
 				continue
 			}
 			count++
@@ -115,20 +111,20 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		all []*t4.KeyValue
 		err error
 	)
-	if canCountPrefixFast(key, rangeEnd) && r.Limit > 0 {
+	if isExactPrefixRange(key, rangeEnd) && r.Limit > 0 {
 		var total int64
 		if linearizable {
-			total, err = s.node.LinearizableCount(ctx, prefix)
+			total, err = s.node.LinearizableCount(ctx, scanPrefix)
 		} else {
-			total, err = s.node.Count(prefix)
+			total, err = s.node.Count(scanPrefix)
 		}
 		if err != nil {
 			return nil, err
 		}
 		if linearizable {
-			all, err = s.node.LinearizableListLimit(ctx, prefix, r.Limit)
+			all, err = s.node.LinearizableListLimit(ctx, scanPrefix, r.Limit)
 		} else {
-			all, err = s.node.ListLimit(prefix, r.Limit)
+			all, err = s.node.ListLimit(scanPrefix, r.Limit)
 		}
 		if err != nil {
 			return nil, err
@@ -146,19 +142,18 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	}
 
 	if linearizable {
-		all, err = s.node.LinearizableList(ctx, prefix)
+		all, err = s.node.LinearizableList(ctx, scanPrefix)
 	} else {
-		all, err = s.node.List(prefix)
+		all, err = s.node.List(scanPrefix)
 	}
 	if err != nil {
 		return nil, err
 	}
-	all = userKeyValues(all)
 
 	total := int64(0)
 	var kvs []*mvccpb.KeyValue
 	for _, kv := range all {
-		if rangeEnd != "\x00" && kv.Key >= rangeEnd {
+		if !matchRange(kv, key, rangeEnd) {
 			continue
 		}
 		total++
@@ -245,19 +240,15 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 	// Range / prefix delete: list all keys in range and delete them in atomic
 	// Txn batches. This is O(1) WAL entries per batch instead of O(n), and each
 	// batch commits at a single revision.
-	prefix := key
-	if key == "\x00" {
-		prefix = ""
-	}
-	all, err := s.node.List(prefix)
+	scanPrefix := rangeScanPrefix(key, rangeEnd)
+	all, err := s.node.List(scanPrefix)
 	if err != nil {
 		return nil, err
 	}
-	all = userKeyValues(all)
 
 	matched := all[:0]
 	for _, kv := range all {
-		if rangeEnd != "\x00" && kv.Key >= rangeEnd {
+		if !matchRange(kv, key, rangeEnd) {
 			continue
 		}
 		matched = append(matched, kv)
@@ -512,11 +503,28 @@ func kvToProtoForRange(kv *t4.KeyValue, keysOnly bool) *mvccpb.KeyValue {
 	return pb
 }
 
-func canCountPrefixFast(key, rangeEnd string) bool {
+func isExactPrefixRange(key, rangeEnd string) bool {
 	if key == "" || key[0] == '\x00' {
 		return false
 	}
-	return rangeEnd == "\x00" || isPrefixRangeEnd(key, rangeEnd)
+	return isPrefixRangeEnd(key, rangeEnd)
+}
+
+func rangeScanPrefix(key, rangeEnd string) string {
+	if isPrefixRangeEnd(key, rangeEnd) {
+		return key
+	}
+	return ""
+}
+
+func matchRange(kv *t4.KeyValue, key, rangeEnd string) bool {
+	if kv == nil || isInternalKey(kv.Key) {
+		return false
+	}
+	if rangeEnd == "\x00" {
+		return kv.Key >= key
+	}
+	return kv.Key >= key && kv.Key < rangeEnd
 }
 
 // validateTxnOpLeases checks that every Put op in ops that carries a non-zero

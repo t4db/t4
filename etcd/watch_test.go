@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/t4db/t4"
 )
@@ -337,6 +340,56 @@ func TestWatchFromRevision(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("timeout: got %d/2 events", received)
 		}
+	}
+}
+
+func TestWatchCreateResponsePrecedesReplayedEvents(t *testing.T) {
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("t4.Open: %v", err)
+	}
+	t.Cleanup(func() { node.Close() })
+	endpoint := startEtcdServer(t, node)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for i := 0; i < 256; i++ {
+		key := fmt.Sprintf("/created-first/%03d", i)
+		if _, err := node.Put(ctx, key, []byte("v"), 0); err != nil {
+			t.Fatalf("Put(%q): %v", key, err)
+		}
+	}
+
+	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc client: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	stream, err := etcdserverpb.NewWatchClient(conn).Watch(ctx)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if err := stream.Send(&etcdserverpb.WatchRequest{
+		RequestUnion: &etcdserverpb.WatchRequest_CreateRequest{
+			CreateRequest: &etcdserverpb.WatchCreateRequest{
+				Key:           []byte("/created-first/"),
+				RangeEnd:      []byte(clientv3.GetPrefixRangeEnd("/created-first/")),
+				StartRevision: 2,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("send create: %v", err)
+	}
+
+	resp, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("recv create response: %v", err)
+	}
+	if !resp.Created {
+		t.Fatalf("first watch response should be Created, got created=%v events=%d", resp.Created, len(resp.Events))
+	}
+	if len(resp.Events) != 0 {
+		t.Fatalf("created response should not include replay events, got %d", len(resp.Events))
 	}
 }
 

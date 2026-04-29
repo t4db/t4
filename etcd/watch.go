@@ -24,8 +24,9 @@ const watchMaxBatch = 64
 //
 // One stream multiplexes many watches. gRPC requires that Send on a stream is
 // not invoked concurrently, so all responses funnel through sendCh. Each
-// watch runs in its own goroutine (runWatch) that drains events from the
-// underlying t4.Node.Watch channel into batched WatchResponses.
+// watch runs in its own goroutine that drains events from the underlying
+// t4.Node.Watch channel into batched WatchResponses after the watch creation
+// response has been queued.
 func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 	ctx := stream.Context()
 
@@ -78,11 +79,11 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 
 			wctx, cancel := context.WithCancel(ctx)
 
-			// runWatch subscribes synchronously and spawns its own drain
-			// goroutine. The only spontaneous failure path is ErrCompacted at
-			// subscribe time; everything else (parent ctx cancel, client
-			// Cancel) flows through wctx and is handled by the parent.
-			err := s.runWatch(wctx, id, cr, sendCh)
+			// Subscribe synchronously so ErrCompacted is reported immediately,
+			// but do not start draining replay events until after the Created
+			// response is queued. Etcd clients expect the create ack to be the
+			// first response for a new watch ID.
+			sub, err := s.subscribeWatch(wctx, cr)
 			if err != nil {
 				cancel()
 				if errors.Is(err, t4.ErrCompacted) {
@@ -106,6 +107,7 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 
 			select {
 			case sendCh <- &etcdserverpb.WatchResponse{Header: s.header(), WatchId: id, Created: true}:
+				go s.drainWatch(wctx, id, sub.progressNotify, sub.events, sub.match, sendCh)
 			case <-ctx.Done():
 				cancel()
 				return nil
@@ -134,11 +136,16 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 	}
 }
 
-// runWatch subscribes to t4.Node.Watch synchronously and, on success, spawns
-// a goroutine that drains events into batched WatchResponse frames. Subscribe
-// errors (ErrCompacted, etc.) are returned to the caller; the drain goroutine
-// then has only two exit paths: wctx cancelled or events channel closed.
-func (s *Server) runWatch(wctx context.Context, watchID int64, cr *etcdserverpb.WatchCreateRequest, sendCh chan<- *etcdserverpb.WatchResponse) error {
+type watchSubscription struct {
+	events         <-chan t4.Event
+	match          func(string) bool
+	progressNotify bool
+}
+
+// subscribeWatch subscribes to t4.Node.Watch synchronously. Subscribe errors
+// (ErrCompacted, etc.) are returned to the caller before the watch is
+// registered on the etcd stream.
+func (s *Server) subscribeWatch(wctx context.Context, cr *etcdserverpb.WatchCreateRequest) (*watchSubscription, error) {
 	scanPrefix, match := watchScan(cr)
 	var watchOpts []t4.WatchOption
 	if cr.PrevKv {
@@ -146,10 +153,13 @@ func (s *Server) runWatch(wctx context.Context, watchID int64, cr *etcdserverpb.
 	}
 	events, err := s.node.Watch(wctx, scanPrefix, fromEtcdRevision(cr.StartRevision), watchOpts...)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	go s.drainWatch(wctx, watchID, cr.ProgressNotify, events, match, sendCh)
-	return nil
+	return &watchSubscription{
+		events:         events,
+		match:          match,
+		progressNotify: cr.ProgressNotify,
+	}, nil
 }
 
 // drainWatch reads events, coalesces them into a single WatchResponse per

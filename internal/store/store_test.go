@@ -155,6 +155,36 @@ func TestGetAfterDelete(t *testing.T) {
 	}
 }
 
+func TestExists(t *testing.T) {
+	s := openMem(t)
+	apply(t, s, createEntry(1, "k", []byte("v")))
+
+	ok, err := s.Exists("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected key to exist")
+	}
+
+	ok, err = s.Exists("missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("missing key exists")
+	}
+
+	apply(t, s, deleteEntry(2, "k", 1, 1))
+	ok, err = s.Exists("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("deleted key exists")
+	}
+}
+
 // ── List ─────────────────────────────────────────────────────────────────────
 
 func TestList(t *testing.T) {

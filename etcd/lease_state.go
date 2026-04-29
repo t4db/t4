@@ -161,16 +161,6 @@ func newLeaseID() (int64, error) {
 	return id, nil
 }
 
-func userKeyValues(kvs []*t4.KeyValue) []*t4.KeyValue {
-	out := make([]*t4.KeyValue, 0, len(kvs))
-	for _, kv := range kvs {
-		if kv != nil && !isInternalKey(kv.Key) {
-			out = append(out, kv)
-		}
-	}
-	return out
-}
-
 func userEvent(e t4.Event) (t4.Event, bool) {
 	if e.KV == nil || isInternalKey(e.KV.Key) {
 		return t4.Event{}, false

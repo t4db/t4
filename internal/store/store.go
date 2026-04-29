@@ -481,6 +481,15 @@ func (s *Store) Get(key string) (*KeyValue, error) {
 	return s.getLogEntry(key, rev)
 }
 
+// Exists reports whether key is currently live without loading its value.
+func (s *Store) Exists(key string) (bool, error) {
+	rev, err := s.getIdxRev(key)
+	if err != nil {
+		return false, err
+	}
+	return rev != 0, nil
+}
+
 func (s *Store) getIdxRev(key string) (int64, error) {
 	v, closer, err := s.db.Get(idxKey(key))
 	if err == pebble.ErrNotFound {

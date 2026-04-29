@@ -752,6 +752,14 @@ func (n *Node) LinearizableGet(ctx context.Context, key string) (*KeyValue, erro
 	return n.Get(key)
 }
 
+// LinearizableExists reports whether key exists with linearizability guaranteed.
+func (n *Node) LinearizableExists(ctx context.Context, key string) (bool, error) {
+	if err := n.syncWithLeader(ctx); err != nil {
+		return false, err
+	}
+	return n.Exists(key)
+}
+
 // LinearizableList returns all keys with the given prefix with linearizability guaranteed.
 func (n *Node) LinearizableList(ctx context.Context, prefix string) ([]*KeyValue, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
@@ -791,6 +799,18 @@ func (n *Node) Get(key string) (*KeyValue, error) {
 		return nil, err
 	}
 	return toKV(sv), nil
+}
+
+func (n *Node) Exists(key string) (bool, error) {
+	if n.closed.Load() {
+		return false, ErrClosed
+	}
+	n.readMu.RLock()
+	defer n.readMu.RUnlock()
+	if n.closed.Load() {
+		return false, ErrClosed
+	}
+	return n.db.Load().Exists(key)
 }
 
 func (n *Node) List(prefix string) ([]*KeyValue, error) {

@@ -126,6 +126,43 @@ func TestDeleteRangePrefixAtomic(t *testing.T) {
 	}
 }
 
+func TestDeleteRangeFromKeyIsNotTreatedAsPrefix(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	for _, k := range []string{"/del-from/a", "/del-from/b", "/del-later/a"} {
+		put(t, srv, k, "v")
+	}
+
+	resp, err := srv.DeleteRange(ctx, &etcdserverpb.DeleteRangeRequest{
+		Key:      []byte("/del-from/b"),
+		RangeEnd: []byte("\x00"),
+	})
+	if err != nil {
+		t.Fatalf("DeleteRange: %v", err)
+	}
+	if resp.Deleted != 2 {
+		t.Fatalf("from-key delete: want 2 deleted got %d", resp.Deleted)
+	}
+
+	for _, key := range []string{"/del-from/b", "/del-later/a"} {
+		r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte(key)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Kvs) != 0 {
+			t.Fatalf("%q should have been deleted, got %v", key, r.Kvs)
+		}
+	}
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/del-from/a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Kvs) != 1 {
+		t.Fatalf("/del-from/a should survive from-key delete, got %v", r.Kvs)
+	}
+}
+
 // TestDeleteRangeEmptyPrefix verifies that DeleteRange over a prefix with no
 // matching keys returns Deleted=0 and no PrevKvs, and does not bump revision.
 func TestDeleteRangeEmptyPrefix(t *testing.T) {

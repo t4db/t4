@@ -3,6 +3,7 @@ package etcd_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -115,6 +116,77 @@ func TestRangePrefix(t *testing.T) {
 	}
 	if len(r.Kvs) != 3 {
 		t.Fatalf("prefix scan: want 3 got %d", len(r.Kvs))
+	}
+}
+
+func TestRangeFromKeyIsNotTreatedAsPrefix(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	for _, k := range []string{"/from/a", "/from/b", "/later/a"} {
+		put(t, srv, k, "v")
+	}
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:      []byte("/from/b"),
+		RangeEnd: []byte("\x00"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, kv := range r.Kvs {
+		keys = append(keys, string(kv.Key))
+	}
+	want := []string{"/from/b", "/later/a"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("from-key range: want %q got %q", want, keys)
+	}
+}
+
+func TestRangeArbitraryInterval(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	for _, k := range []string{"/a", "/b", "/c", "/d"} {
+		put(t, srv, k, "v")
+	}
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:      []byte("/b"),
+		RangeEnd: []byte("/d"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, kv := range r.Kvs {
+		keys = append(keys, string(kv.Key))
+	}
+	want := []string{"/b", "/c"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("interval range: want %q got %q", want, keys)
+	}
+}
+
+func TestRangeCountOnlyFromKeyIsNotTreatedAsPrefix(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	for _, k := range []string{"/count/a", "/count/b", "/z"} {
+		put(t, srv, k, "v")
+	}
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:       []byte("/count/b"),
+		RangeEnd:  []byte("\x00"),
+		CountOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Count != 2 {
+		t.Fatalf("from-key count: want 2 got %d", r.Count)
 	}
 }
 
@@ -239,6 +311,28 @@ func TestRangeCountOnly(t *testing.T) {
 	}
 	if r.Count != 5 {
 		t.Errorf("count: want 5 got %d", r.Count)
+	}
+	if len(r.Kvs) != 0 {
+		t.Error("CountOnly should not return Kvs")
+	}
+}
+
+func TestRangeSingleKeyCountOnly(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	put(t, srv, "/cnt-key", "v")
+	put(t, srv, "/cnt-key/child", "v")
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:       []byte("/cnt-key"),
+		CountOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Count != 1 {
+		t.Errorf("single-key count: want 1 got %d", r.Count)
 	}
 	if len(r.Kvs) != 0 {
 		t.Error("CountOnly should not return Kvs")
