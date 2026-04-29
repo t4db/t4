@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,6 +49,26 @@ func newEtcdClient(tb testing.TB, endpoint string) *clientv3.Client {
 	}
 	tb.Cleanup(func() { cli.Close() })
 	return cli
+}
+
+func TestEtcdServerRejectsOversizedRequest(t *testing.T) {
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("t4.Open: %v", err)
+	}
+	defer func() {
+		_ = node.Close()
+	}()
+
+	endpoint := startEtcdServer(t, node)
+	cli := newEtcdClient(t, endpoint)
+
+	tooLarge := strings.Repeat("x", 2*1024*1024+1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := cli.Put(ctx, "/oversized", tooLarge); err == nil {
+		t.Fatal("expected oversized Put to fail")
+	}
 }
 
 // freeAddr returns a free localhost TCP address.

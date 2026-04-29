@@ -760,6 +760,15 @@ func (n *Node) LinearizableList(ctx context.Context, prefix string) ([]*KeyValue
 	return n.List(prefix)
 }
 
+// LinearizableListLimit returns up to limit keys with the given prefix with
+// linearizability guaranteed. A limit <= 0 returns all matching keys.
+func (n *Node) LinearizableListLimit(ctx context.Context, prefix string, limit int64) ([]*KeyValue, error) {
+	if err := n.syncWithLeader(ctx); err != nil {
+		return nil, err
+	}
+	return n.ListLimit(prefix, limit)
+}
+
 // LinearizableCount returns the count of keys with the given prefix with linearizability guaranteed.
 func (n *Node) LinearizableCount(ctx context.Context, prefix string) (int64, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
@@ -785,6 +794,12 @@ func (n *Node) Get(key string) (*KeyValue, error) {
 }
 
 func (n *Node) List(prefix string) ([]*KeyValue, error) {
+	return n.ListLimit(prefix, 0)
+}
+
+// ListLimit returns up to limit keys with the given prefix. A limit <= 0 returns
+// all matching keys.
+func (n *Node) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -793,7 +808,7 @@ func (n *Node) List(prefix string) ([]*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	svs, err := n.db.Load().List(prefix)
+	svs, err := n.db.Load().ListLimit(prefix, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -137,6 +137,88 @@ func TestRangeLimit(t *testing.T) {
 	if len(r.Kvs) != 3 {
 		t.Fatalf("limit: want 3 got %d", len(r.Kvs))
 	}
+	if r.Count != 10 {
+		t.Fatalf("limit count: want total 10 got %d", r.Count)
+	}
+	if !r.More {
+		t.Fatal("limit: expected More=true")
+	}
+}
+
+func TestRangeLimitNoMoreWhenExhausted(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		put(t, srv, fmt.Sprintf("/lim-done/%02d", i), "v")
+	}
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:      []byte("/lim-done/"),
+		RangeEnd: []byte("/lim-done0"),
+		Limit:    3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Kvs) != 3 {
+		t.Fatalf("limit: want 3 got %d", len(r.Kvs))
+	}
+	if r.Count != 3 {
+		t.Fatalf("limit count: want total 3 got %d", r.Count)
+	}
+	if r.More {
+		t.Fatal("limit: expected More=false")
+	}
+}
+
+func TestRangeKeysOnly(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	put(t, srv, "/keys-only/1", "secret")
+	put(t, srv, "/keys-only/2", "secret")
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:      []byte("/keys-only/"),
+		RangeEnd: []byte("/keys-only0"),
+		KeysOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Kvs) != 2 {
+		t.Fatalf("keys only: want 2 got %d", len(r.Kvs))
+	}
+	for _, kv := range r.Kvs {
+		if len(kv.Value) != 0 {
+			t.Fatalf("keys only returned value for %q: %q", kv.Key, kv.Value)
+		}
+		if len(kv.Key) == 0 || kv.ModRevision == 0 || kv.CreateRevision == 0 {
+			t.Fatalf("keys only lost metadata: %+v", kv)
+		}
+	}
+}
+
+func TestRangeSingleKeyKeysOnly(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	put(t, srv, "/keys-only/single", "secret")
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:      []byte("/keys-only/single"),
+		KeysOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Kvs) != 1 {
+		t.Fatalf("keys only: want 1 got %d", len(r.Kvs))
+	}
+	if len(r.Kvs[0].Value) != 0 {
+		t.Fatalf("keys only returned value: %q", r.Kvs[0].Value)
+	}
 }
 
 func TestRangeCountOnly(t *testing.T) {

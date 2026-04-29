@@ -58,7 +58,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		}
 		resp := &etcdserverpb.RangeResponse{Header: s.header()}
 		if kv != nil {
-			resp.Kvs = []*mvccpb.KeyValue{kvToProto(kv)}
+			resp.Kvs = []*mvccpb.KeyValue{kvToProtoForRange(kv, r.KeysOnly)}
 			resp.Count = 1
 		}
 		return resp, nil
@@ -72,6 +72,22 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	}
 
 	if r.CountOnly {
+		if canCountPrefixFast(key, rangeEnd) {
+			var (
+				count int64
+				err   error
+			)
+			if linearizable {
+				count, err = s.node.LinearizableCount(ctx, prefix)
+			} else {
+				count, err = s.node.Count(prefix)
+			}
+			if err != nil {
+				return nil, err
+			}
+			return &etcdserverpb.RangeResponse{Header: s.header(), Count: count}, nil
+		}
+
 		var (
 			all []*t4.KeyValue
 			err error
@@ -99,6 +115,36 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		all []*t4.KeyValue
 		err error
 	)
+	if canCountPrefixFast(key, rangeEnd) && r.Limit > 0 {
+		var total int64
+		if linearizable {
+			total, err = s.node.LinearizableCount(ctx, prefix)
+		} else {
+			total, err = s.node.Count(prefix)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if linearizable {
+			all, err = s.node.LinearizableListLimit(ctx, prefix, r.Limit)
+		} else {
+			all, err = s.node.ListLimit(prefix, r.Limit)
+		}
+		if err != nil {
+			return nil, err
+		}
+		kvs := make([]*mvccpb.KeyValue, 0, len(all))
+		for _, kv := range all {
+			kvs = append(kvs, kvToProtoForRange(kv, r.KeysOnly))
+		}
+		return &etcdserverpb.RangeResponse{
+			Header: s.header(),
+			Kvs:    kvs,
+			Count:  total,
+			More:   total > r.Limit,
+		}, nil
+	}
+
 	if linearizable {
 		all, err = s.node.LinearizableList(ctx, prefix)
 	} else {
@@ -109,22 +155,24 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	}
 	all = userKeyValues(all)
 
+	total := int64(0)
 	var kvs []*mvccpb.KeyValue
 	for _, kv := range all {
 		if rangeEnd != "\x00" && kv.Key >= rangeEnd {
 			continue
 		}
-		kvs = append(kvs, kvToProto(kv))
-	}
-
-	if r.Limit > 0 && int64(len(kvs)) > r.Limit {
-		kvs = kvs[:r.Limit]
+		total++
+		if r.Limit > 0 && int64(len(kvs)) >= r.Limit {
+			continue
+		}
+		kvs = append(kvs, kvToProtoForRange(kv, r.KeysOnly))
 	}
 
 	return &etcdserverpb.RangeResponse{
 		Header: s.header(),
 		Kvs:    kvs,
-		Count:  int64(len(kvs)),
+		Count:  total,
+		More:   r.Limit > 0 && total > r.Limit,
 	}, nil
 }
 
@@ -455,6 +503,21 @@ func (s *Server) Compact(ctx context.Context, r *etcdserverpb.CompactionRequest)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+func kvToProtoForRange(kv *t4.KeyValue, keysOnly bool) *mvccpb.KeyValue {
+	pb := kvToProto(kv)
+	if keysOnly {
+		pb.Value = nil
+	}
+	return pb
+}
+
+func canCountPrefixFast(key, rangeEnd string) bool {
+	if key == "" || key[0] == '\x00' {
+		return false
+	}
+	return rangeEnd == "\x00" || isPrefixRangeEnd(key, rangeEnd)
+}
 
 // validateTxnOpLeases checks that every Put op in ops that carries a non-zero
 // Lease ID refers to an existing lease.  This mirrors the check in standalone
