@@ -1,9 +1,9 @@
 ---
 title: T4
-description: An S3-durable key-value store with etcd v3 compatibility — run as a server or embed in your Go app.
+description: An open-source key-value database built on object storage for durable infrastructure state.
 template: splash
 hero:
-  tagline: S3-durable key-value storage with etcd v3 compatibility. Run as a standalone server or embed directly in Go.
+  tagline: An open-source key-value database built on object storage for durable infrastructure state.
   actions:
     - text: Get Started
       link: /getting-started/
@@ -20,6 +20,11 @@ hero:
 ---
 
 import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
+
+T4 stores infrastructure state locally for fast access and persists WAL segments and checkpoints to S3-compatible object storage for recovery. It includes revisions, watches, leases, transactions, and prefix scans, and it can speak the etcd v3 API when you want to use existing clients and tooling.
+
+Read [Why T4 exists](/why/) for the motivation behind building a key-value database on object storage.
+
 
 <div style="margin: 3rem 0 2rem;">
 
@@ -63,17 +68,20 @@ kv, _  := node.Get("/config/timeout")
 
 </div>
 
-## Why T4?
+## What T4 gives you
 
 <CardGrid stagger>
-  <Card title="etcd v3 compatible" icon="approve-check">
-    The standalone binary speaks the etcd v3 gRPC protocol. Drop in for most cases as an etcd replacement — `etcdctl`, the Go client, and any etcd v3 library work unchanged. See the [compatibility guide](/etcd-migration/) for the supported subset.
-  </Card>
-  <Card title="S3-durable" icon="cloud-upload">
+  <Card title="Built on object storage" icon="cloud-upload">
     WAL segments and checkpoints are uploaded to S3. A node that loses its disk recovers automatically on next boot — no manual intervention.
+  </Card>
+  <Card title="Infrastructure primitives" icon="setting">
+    Revisions, watches, leases, transactions, and prefix scans are built in, so T4 can hold config, coordination data, service metadata, and other control-plane state.
   </Card>
   <Card title="Multi-node clustering" icon="bars">
     Leader election via S3 atomic locks — no Raft, no ZooKeeper, no cluster membership config. Any node can join or leave at any time.
+  </Card>
+  <Card title="etcd v3 compatible" icon="approve-check">
+    The standalone binary speaks the etcd v3 gRPC protocol. Drop in for most cases as an etcd replacement — `etcdctl`, the Go client, and any etcd v3 library work unchanged. See the [compatibility guide](/etcd-migration/) for the supported subset.
   </Card>
   <Card title="Embeddable Go library" icon="puzzle">
     One `t4.Open(cfg)` call. No sidecar process, no daemon. Run the store inside your binary for zero-overhead local reads.

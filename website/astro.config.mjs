@@ -72,6 +72,7 @@ export default defineConfig({
 			},
 			sidebar: [
 				{ label: 'Getting Started', slug: 'getting-started' },
+				{ label: 'Why T4 Exists', slug: 'why' },
 				{
 					label: 'Guides',
 					items: [

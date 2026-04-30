@@ -6,10 +6,21 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-t4db.github.io-green)](https://t4db.github.io/t4/)
 
-An embeddable, S3-durable key-value store for Go, with an etcd-compatible standalone server.
+T4 is an open-source key-value database built on object storage.
 
-- **Embedded-first** — `t4.Open(cfg)` is the entire API. No sidecar, no daemon.
-- **S3-durable** — WAL segments and periodic checkpoints are uploaded to S3. A node that loses its disk recovers automatically.
+It is designed for durable infrastructure state: config, coordination, watches, leases, transactions, recovery, and branching. T4 stores data locally for fast access, persists WAL segments and checkpoints to S3-compatible object storage, and can speak the etcd v3 API for existing infrastructure clients.
+
+## Why T4?
+
+Infrastructure systems often need a small, reliable place to keep control-plane state: configuration, service metadata, locks, leases, and change notifications.
+
+etcd is the standard answer, but operating a consensus cluster is not always the shape you want. For small platforms, edge deployments, development environments, ephemeral nodes, and systems that already trust object storage, a full Raft membership model can be more machinery than the state store deserves.
+
+T4 explores a different tradeoff: keep the familiar key-value and watch primitives, store hot data locally, and use object storage as the durable recovery layer. Nodes can disappear, lose their disks, or be replaced; the database can rebuild from WAL segments and checkpoints in S3-compatible storage.
+
+- **Object-storage durable** — WAL segments and periodic checkpoints are uploaded to S3-compatible object storage. A node that loses its disk recovers automatically.
+- **Infrastructure primitives** — Revisions, watches, leases, transactions, and prefix scans are built in.
+- **Standalone or embedded** — Run `t4` as a server, or call `t4.Open(cfg)` inside a Go process. No sidecar required.
 - **Multi-node** — Leader elected via an S3 lock. Followers stream the WAL in real time and forward writes transparently.
 - **etcd v3 compatible** — The standalone binary speaks the etcd v3 gRPC protocol, including multi-key transactions.
 - **Twelve-factor config** — CLI flags can be supplied through `T4_*` environment variables.
