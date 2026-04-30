@@ -144,7 +144,15 @@ persistence:
 
 ### Client TLS (etcd port)
 
-Create a TLS Secret, then reference it:
+Enable client-facing TLS. If `secretName` is empty, the chart generates a self-signed Secret automatically:
+
+```yaml
+# values.yaml
+tls:
+  enabled: true
+```
+
+To use your own certificate, create a TLS Secret and reference it:
 
 ```bash
 kubectl create secret tls t4-client-tls \
@@ -154,18 +162,25 @@ kubectl create secret tls t4-client-tls \
 ```yaml
 # values.yaml
 tls:
-  client:
-    enabled: true
-    secretName: t4-client-tls
+  enabled: true
+  secretName: t4-client-tls
 ```
 
-To also require client certificates (mTLS), include `ca.crt` in the Secret:
+To also require client certificates (mTLS), include `ca.crt` in the Secret and set `clientCertAuth`:
 
 ```bash
 kubectl create secret generic t4-client-tls \
   --from-file=tls.crt=server.crt \
   --from-file=tls.key=server.key \
   --from-file=ca.crt=ca.crt
+```
+
+```yaml
+# values.yaml
+tls:
+  enabled: true
+  secretName: t4-client-tls
+  clientCertAuth: true
 ```
 
 ### Peer mTLS (inter-node replication)
@@ -256,6 +271,30 @@ proxy:
 ```
 
 Clients connect to the proxy Service (`t4-proxy`) instead of `t4` directly. The proxy detects the leader via the `/healthz/leader` endpoint on each pod.
+
+Client TLS through the proxy is terminated at Envoy so the proxy can inspect gRPC method paths and route writes to the leader. Enable `tls` for this path:
+
+```yaml
+# values.yaml
+proxy:
+  enabled: true
+tls:
+  enabled: true
+```
+
+When `proxy.enabled=true`, `tls.enabled=true` terminates TLS at Envoy and Envoy forwards plaintext gRPC to the T4 pods inside the cluster. When `proxy.enabled=false`, the same setting terminates TLS inside T4.
+
+To require client certificates at the proxy, include `ca.crt` in the Secret and set `clientCertAuth`, or omit `secretName` to use the chart-generated CA:
+
+```yaml
+# values.yaml
+proxy:
+  enabled: true
+tls:
+  enabled: true
+  secretName: t4-client-tls
+  clientCertAuth: true
+```
 
 ---
 

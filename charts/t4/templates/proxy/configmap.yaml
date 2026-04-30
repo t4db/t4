@@ -21,7 +21,27 @@ data:
           address:
             socket_address: { address: 0.0.0.0, port_value: 3379 }
           filter_chains:
-            - filters:
+            - {{- if eq (include "t4.clientFacingTLSEnabled" .) "true" }}
+              transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  common_tls_context:
+                    tls_certificates:
+                      - certificate_chain:
+                          filename: /etc/t4/tls/client/tls.crt
+                        private_key:
+                          filename: /etc/t4/tls/client/tls.key
+                    {{- if eq (include "t4.clientFacingTLSRequireClientCert" .) "true" }}
+                    validation_context:
+                      trusted_ca:
+                        filename: /etc/t4/tls/client/ca.crt
+                    {{- end }}
+                  {{- if eq (include "t4.clientFacingTLSRequireClientCert" .) "true" }}
+                  require_client_certificate: true
+                  {{- end }}
+              {{- end }}
+              filters:
                 - name: envoy.filters.network.http_connection_manager
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager

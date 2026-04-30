@@ -90,13 +90,13 @@ spec:
                 --s3-endpoint={{ $effectiveEndpoint | quote }} \
                 {{- end }}
                 {{- end }}
-                {{- if .Values.tls.client.enabled }}
+                {{- $clientFacingTLSEnabled := eq (include "t4.clientFacingTLSEnabled" .) "true" }}
+                {{- $clientFacingTLSRequireClientCert := eq (include "t4.clientFacingTLSRequireClientCert" .) "true" }}
+                {{- if and $clientFacingTLSEnabled (not .Values.proxy.enabled) }}
                 --client-tls-cert=/etc/t4/tls/client/tls.crt \
                 --client-tls-key=/etc/t4/tls/client/tls.key \
-                {{- if (lookup "v1" "Secret" .Release.Namespace .Values.tls.client.secretName).data }}
-                {{- if index (lookup "v1" "Secret" .Release.Namespace .Values.tls.client.secretName).data "ca.crt" }}
+                {{- if $clientFacingTLSRequireClientCert }}
                 --client-tls-ca=/etc/t4/tls/client/ca.crt \
-                {{- end }}
                 {{- end }}
                 {{- end }}
                 {{- if .Values.tls.peer.enabled }}
@@ -152,7 +152,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.config.dataDir }}
-            {{- if .Values.tls.client.enabled }}
+            {{- $clientFacingTLSEnabled := eq (include "t4.clientFacingTLSEnabled" .) "true" }}
+            {{- if and $clientFacingTLSEnabled (not .Values.proxy.enabled) }}
             - name: tls-client
               mountPath: /etc/t4/tls/client
               readOnly: true
@@ -168,10 +169,11 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
-        {{- if .Values.tls.client.enabled }}
+        {{- $clientFacingTLSEnabled := eq (include "t4.clientFacingTLSEnabled" .) "true" }}
+        {{- if and $clientFacingTLSEnabled (not .Values.proxy.enabled) }}
         - name: tls-client
           secret:
-            secretName: {{ .Values.tls.client.secretName }}
+            secretName: {{ include "t4.clientTLSSecretName" . }}
         {{- end }}
         {{- if .Values.tls.peer.enabled }}
         - name: tls-peer

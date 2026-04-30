@@ -72,12 +72,22 @@ spec:
             - name: config
               mountPath: /etc/envoy
               readOnly: true
+            {{- if eq (include "t4.clientFacingTLSEnabled" .) "true" }}
+            - name: tls-client
+              mountPath: /etc/t4/tls/client
+              readOnly: true
+            {{- end }}
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: config
           configMap:
             name: {{ include "t4.fullname" . }}-proxy
+        {{- if eq (include "t4.clientFacingTLSEnabled" .) "true" }}
+        - name: tls-client
+          secret:
+            secretName: {{ include "t4.clientTLSSecretName" . }}
+        {{- end }}
         - name: tmp
           emptyDir: {}
       {{- with .Values.proxy.nodeSelector }}

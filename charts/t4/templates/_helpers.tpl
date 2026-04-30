@@ -163,3 +163,43 @@ back to the standard s3SecretName helper.
 {{- include "t4.s3SecretName" . }}
 {{- end }}
 {{- end }}
+
+{{/*
+Whether client-facing TLS is enabled. tls.clientFacing and tls.client are
+deprecated aliases.
+*/}}
+{{- define "t4.clientFacingTLSEnabled" -}}
+{{- $clientFacing := get .Values.tls "clientFacing" | default dict -}}
+{{- $client := get .Values.tls "client" | default dict -}}
+{{- or .Values.tls.enabled (get $clientFacing "enabled") (get $client "enabled") }}
+{{- end }}
+
+{{/*
+Name of the Secret that holds client-facing TLS material. If no Secret name is
+provided, the chart creates this Secret. tls.clientFacing and tls.client are
+deprecated aliases.
+*/}}
+{{- define "t4.clientTLSSecretName" -}}
+{{- $clientFacing := get .Values.tls "clientFacing" | default dict -}}
+{{- $client := get .Values.tls "client" | default dict -}}
+{{- default (default (default (printf "%s-client-tls" (include "t4.fullname" .)) (get $client "secretName")) (get $clientFacing "secretName")) .Values.tls.secretName }}
+{{- end }}
+
+{{/*
+Whether the user supplied a Secret name for client-facing TLS.
+*/}}
+{{- define "t4.clientTLSSecretProvided" -}}
+{{- $clientFacing := get .Values.tls "clientFacing" | default dict -}}
+{{- $client := get .Values.tls "client" | default dict -}}
+{{- or .Values.tls.secretName (get $clientFacing "secretName") (get $client "secretName") }}
+{{- end }}
+
+{{/*
+Whether client certificate authentication is required on the client-facing TLS
+endpoint. tls.clientFacing and tls.client are deprecated aliases.
+*/}}
+{{- define "t4.clientFacingTLSRequireClientCert" -}}
+{{- $clientFacing := get .Values.tls "clientFacing" | default dict -}}
+{{- $client := get .Values.tls "client" | default dict -}}
+{{- or .Values.tls.clientCertAuth (get $clientFacing "clientCertAuth") (get $client "clientCertAuth") }}
+{{- end }}

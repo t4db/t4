@@ -98,11 +98,17 @@ s3:
 
 # ── TLS ───────────────────────────────────────────────────────────────────────
 tls:
-  # Client-facing gRPC TLS (termination inside t4).
-  client:
-    enabled: false
-    # Name of a Secret with keys tls.crt, tls.key, and optionally ca.crt.
-    secretName: ""
+  # Client-facing gRPC TLS.
+  # - Without proxy: TLS terminates inside t4.
+  # - With proxy.enabled: TLS terminates at Envoy so it can route gRPC methods.
+  enabled: false
+  # Optional Secret with keys tls.crt and tls.key. When empty and enabled=true,
+  # the chart generates a self-signed Secret. When clientCertAuth is true,
+  # the Secret must also contain ca.crt.
+  secretName: ""
+  # Require clients to present a certificate signed by ca.crt.
+  # Mirrors etcd's --client-cert-auth.
+  clientCertAuth: false
 
   # Peer-to-peer mTLS between t4 nodes.
   peer:
@@ -210,6 +216,8 @@ imagePullSecrets: []
 #
 # Clients connect to the proxy Service instead of t4 directly.
 # Requires replicaCount > 1 and config.metricsAddr to be set.
+# When tls.enabled is true, TLS terminates at Envoy instead of the t4
+# pods so Envoy can still route gRPC methods.
 proxy:
   enabled: false
 
