@@ -434,22 +434,18 @@ kv, err := node.LinearizableGet(ctx, "/data/key")
 
 ## History compaction
 
-T4 keeps the full revision history until you compact. Compact periodically to bound storage growth:
+T4 keeps the full revision history until you compact. Enable time-window autocompaction to retain only recent history:
 
 ```go
-func compactPeriodically(ctx context.Context, node *t4.Node, interval time.Duration) {
-    ticker := time.NewTicker(interval)
-    defer ticker.Stop()
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        case <-ticker.C:
-            rev := node.CurrentRevision()
-            if err := node.Compact(ctx, rev); err != nil {
-                log.Printf("compact error: %v", err)
-            }
-        }
-    }
-}
+node, err := t4.Open(t4.Config{
+    DataDir: "/var/lib/t4",
+
+    // Keep roughly the last week of revision history.
+    AutoCompactMode:           t4.AutoCompactTime,
+    AutoCompactRetention:      7 * 24 * time.Hour,
+    AutoCompactSampleInterval: 24 * time.Hour,
+})
 ```
+
+With daily sampling, T4 retains at least the configured window and up to roughly one extra day of history. For exact
+control, call `node.Compact(ctx, revision)` directly.

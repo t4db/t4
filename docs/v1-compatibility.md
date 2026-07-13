@@ -41,6 +41,11 @@ Default values are part of the v1 contract unless explicitly documented as tunin
 | `WALSyncUpload`       | `true`                                         |
 | `CheckpointInterval`  | 15 min                                         |
 | `CheckpointEntries`   | `0`                                            |
+| `AutoCompactMode`     | inferred; effectively `off` unless retention is set |
+| `AutoCompactRetention` | `0` (disabled)                                |
+| `AutoCompactRevisionRetention` | `0` (disabled)                       |
+| `AutoCompactInterval` | `AutoCompactSampleInterval` when enabled       |
+| `AutoCompactSampleInterval` | clamp(retention/7, 1 min, 24 h) when enabled |
 | `NodeID`              | hostname, or `node-0` if hostname lookup fails |
 | `AdvertisePeerAddr`   | `PeerListenAddr`                               |
 | `LeaderWatchInterval` | 5 min                                          |

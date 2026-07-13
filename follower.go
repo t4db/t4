@@ -50,6 +50,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				if err := n.db.Load().Apply(entries); err != nil {
 					return err
 				}
+				n.maybeRecordRevisionSample(entries)
 				// Track the leader's term so attemptPromotion uses the correct
 				// floorTerm when calling TakeOver.  Without this, n.term stays at
 				// its Open() value and TakeOver backs off because it sees the
@@ -232,6 +233,10 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
 			n.bgWg.Add(1)
 			go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()
+		}
+		if n.autoCompactEnabled() {
+			n.bgWg.Add(1)
+			go func() { defer n.bgWg.Done(); n.autoCompactLoop(bgCtx) }()
 		}
 		// Upload any SSTs that exist on disk but aren't in S3 yet. The
 		// follower didn't run SSTUploader.Start(), so its SSTs were never

@@ -507,6 +507,9 @@ func (n *Node) commitLoop(ctx context.Context) {
 				dbEntries[i] = req.entry
 			}
 			err = n.db.Load().Apply(dbEntries)
+			if err == nil {
+				n.maybeRecordRevisionSample(dbEntries)
+			}
 		}
 
 		// Clear optimistic state before waking callers so a failed batch cannot

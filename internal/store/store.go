@@ -231,6 +231,73 @@ func (s *Store) CompactRevision() int64 { return atomic.LoadInt64(&s.compactRev)
 // CurrentRevision after Compact entries.
 func (s *Store) LastSequence() int64 { return atomic.LoadInt64(&s.lastSeq) }
 
+// RevisionSample records that rev was current at ts. Samples are operational
+// metadata used by time-window autocompaction; they are not part of the WAL
+// data model and are safe to recreate approximately.
+func (s *Store) RevisionSample(rev int64, ts time.Time) error {
+	if rev <= 0 || ts.IsZero() {
+		return nil
+	}
+	if err := s.db.Set(revisionSampleKey(ts.UnixNano()), encodeRev(rev), pebble.NoSync); err != nil {
+		return fmt.Errorf("store: set revision sample rev=%d: %w", rev, err)
+	}
+	return nil
+}
+
+// LatestRevisionSample returns the newest revision/time sample in the store.
+func (s *Store) LatestRevisionSample() (rev int64, ts time.Time, ok bool, err error) {
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: revisionSampleLower,
+		UpperBound: revisionSampleUpper,
+	})
+	if err != nil {
+		return 0, time.Time{}, false, fmt.Errorf("store: latest revision sample iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+	if !iter.Last() {
+		if err := iter.Error(); err != nil {
+			return 0, time.Time{}, false, fmt.Errorf("store: latest revision sample: %w", err)
+		}
+		return 0, time.Time{}, false, nil
+	}
+	return decodeRev(iter.Value()), time.Unix(0, decodeRevisionSampleKey(iter.Key())), true, nil
+}
+
+// RevisionSampleAtOrBefore returns the newest revision/time sample at or
+// before cutoff.
+func (s *Store) RevisionSampleAtOrBefore(cutoff time.Time) (rev int64, ts time.Time, ok bool, err error) {
+	if cutoff.IsZero() {
+		return 0, time.Time{}, false, nil
+	}
+	upper := revisionSampleKey(cutoff.UnixNano() + 1)
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: revisionSampleLower,
+		UpperBound: upper,
+	})
+	if err != nil {
+		return 0, time.Time{}, false, fmt.Errorf("store: revision sample iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+	if !iter.Last() {
+		if err := iter.Error(); err != nil {
+			return 0, time.Time{}, false, fmt.Errorf("store: revision sample: %w", err)
+		}
+		return 0, time.Time{}, false, nil
+	}
+	return decodeRev(iter.Value()), time.Unix(0, decodeRevisionSampleKey(iter.Key())), true, nil
+}
+
+// DeleteRevisionSamplesBefore removes sample metadata older than cutoff.
+func (s *Store) DeleteRevisionSamplesBefore(cutoff time.Time) error {
+	if cutoff.IsZero() {
+		return nil
+	}
+	if err := s.db.DeleteRange(revisionSampleLower, revisionSampleKey(cutoff.UnixNano()), pebble.NoSync); err != nil {
+		return fmt.Errorf("store: delete revision samples: %w", err)
+	}
+	return nil
+}
+
 // Apply applies a batch of WAL entries to the store and notifies watchers.
 // Entries must be ordered by revision. Apply is not safe for concurrent use.
 func (s *Store) Apply(entries []wal.Entry) error {

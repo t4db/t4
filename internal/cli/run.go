@@ -36,6 +36,11 @@ func runCmd() *cobra.Command {
 		segmentMaxAgeSec      int
 		checkpointIntervalMin int
 		checkpointEntries     int64
+		autoCompactMode       string
+		autoCompactRetention  time.Duration
+		autoCompactRevisions  int64
+		autoCompactInterval   time.Duration
+		autoCompactSampleInt  time.Duration
 		readConsistency       string
 		logLevel              string
 		// multi-node
@@ -88,6 +93,17 @@ func runCmd() *cobra.Command {
 			default:
 				return fmt.Errorf("--follower-wait-mode must be one of \"none\", \"quorum\", or \"all\", got %q", followerWaitMode)
 			}
+			switch t4.AutoCompactMode(autoCompactMode) {
+			case "", t4.AutoCompactOff, t4.AutoCompactTime, t4.AutoCompactRevision:
+			default:
+				return fmt.Errorf("--auto-compact-mode must be one of \"off\", \"time\", or \"revision\", got %q", autoCompactMode)
+			}
+			if autoCompactRetention < 0 || autoCompactInterval < 0 || autoCompactSampleInt < 0 {
+				return fmt.Errorf("auto compact durations must be non-negative")
+			}
+			if autoCompactRevisions < 0 {
+				return fmt.Errorf("--auto-compact-retain-revisions must be non-negative")
+			}
 
 			logrus.WithFields(startupLogFields(
 				dataDir,
@@ -108,25 +124,35 @@ func runCmd() *cobra.Command {
 				authEnabled,
 				tokenTTLSec,
 				metricsAddr,
+				autoCompactMode,
+				autoCompactRetention,
+				autoCompactRevisions,
+				autoCompactInterval,
+				autoCompactSampleInt,
 				branchPrefix,
 				branchCheckpoint,
 				enc,
 			)).Info("starting t4 server")
 
 			cfg := t4.Config{
-				DataDir:             dataDir,
-				ReadConsistency:     t4.ReadConsistency(readConsistency),
-				SegmentMaxSize:      segmentMaxSizeMB << 20,
-				SegmentMaxAge:       time.Duration(segmentMaxAgeSec) * time.Second,
-				CheckpointInterval:  time.Duration(checkpointIntervalMin) * time.Minute,
-				CheckpointEntries:   checkpointEntries,
-				NodeID:              nodeID,
-				PeerListenAddr:      peerListenAddr,
-				AdvertisePeerAddr:   advertisePeerAddr,
-				LeaderWatchInterval: time.Duration(leaderWatchIntervalSec) * time.Second,
-				FollowerMaxRetries:  followerMaxRetries,
-				FollowerWaitMode:    t4.FollowerWaitMode(followerWaitMode),
-				WatchSendTimeout:    watchSendTimeout,
+				DataDir:                      dataDir,
+				ReadConsistency:              t4.ReadConsistency(readConsistency),
+				SegmentMaxSize:               segmentMaxSizeMB << 20,
+				SegmentMaxAge:                time.Duration(segmentMaxAgeSec) * time.Second,
+				CheckpointInterval:           time.Duration(checkpointIntervalMin) * time.Minute,
+				CheckpointEntries:            checkpointEntries,
+				AutoCompactMode:              t4.AutoCompactMode(autoCompactMode),
+				AutoCompactRetention:         autoCompactRetention,
+				AutoCompactRevisionRetention: autoCompactRevisions,
+				AutoCompactInterval:          autoCompactInterval,
+				AutoCompactSampleInterval:    autoCompactSampleInt,
+				NodeID:                       nodeID,
+				PeerListenAddr:               peerListenAddr,
+				AdvertisePeerAddr:            advertisePeerAddr,
+				LeaderWatchInterval:          time.Duration(leaderWatchIntervalSec) * time.Second,
+				FollowerMaxRetries:           followerMaxRetries,
+				FollowerWaitMode:             t4.FollowerWaitMode(followerWaitMode),
+				WatchSendTimeout:             watchSendTimeout,
 			}
 			encCfg, err := enc.config()
 			if err != nil {
@@ -277,6 +303,11 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&walSyncUpload, "wal-sync-upload", "", "upload WAL segments synchronously before ack (true/false; default true for safety, set false when local storage is durable) (env: T4_WAL_SYNC_UPLOAD)")
 	cmd.Flags().IntVar(&checkpointIntervalMin, "checkpoint-interval-min", 15, "checkpoint interval in minutes (requires --s3-bucket) (env: T4_CHECKPOINT_INTERVAL_MIN)")
 	cmd.Flags().Int64Var(&checkpointEntries, "checkpoint-entries", 0, "triggers a checkpoint after this many WAL entries regardless of time. 0 means disabled (requires --s3-bucket) (env: T4_CHECKPOINT_ENTRIES)")
+	cmd.Flags().StringVar(&autoCompactMode, "auto-compact-mode", "", "automatic history compaction strategy: off, time, or revision. Empty infers from retention flags (env: T4_AUTO_COMPACT_MODE)")
+	cmd.Flags().DurationVar(&autoCompactRetention, "auto-compact-retention", 0, "time strategy: retain revision history for this duration and compact older changes (env: T4_AUTO_COMPACT_RETENTION)")
+	cmd.Flags().Int64Var(&autoCompactRevisions, "auto-compact-retain-revisions", 0, "revision strategy: retain this many recent revisions and compact older changes (env: T4_AUTO_COMPACT_RETAIN_REVISIONS)")
+	cmd.Flags().DurationVar(&autoCompactInterval, "auto-compact-interval", 0, "how often to check autocompaction; 0 defaults by strategy (env: T4_AUTO_COMPACT_INTERVAL)")
+	cmd.Flags().DurationVar(&autoCompactSampleInt, "auto-compact-sample-interval", 0, "time strategy: revision/time sampling interval; 0 defaults to clamp(retention/7, 1m, 24h) when enabled (env: T4_AUTO_COMPACT_SAMPLE_INTERVAL)")
 	cmd.Flags().StringVar(&readConsistency, "read-consistency", "linearizable", "read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale) (env: T4_READ_CONSISTENCY)")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level (trace/debug/info/warn/error) (env: T4_LOG_LEVEL)")
 	// multi-node
@@ -319,6 +350,11 @@ func runCmd() *cobra.Command {
 			"wal-sync-upload":                      "T4_WAL_SYNC_UPLOAD",
 			"checkpoint-interval-min":              "T4_CHECKPOINT_INTERVAL_MIN",
 			"checkpoint-entries":                   "T4_CHECKPOINT_ENTRIES",
+			"auto-compact-mode":                    "T4_AUTO_COMPACT_MODE",
+			"auto-compact-retention":               "T4_AUTO_COMPACT_RETENTION",
+			"auto-compact-retain-revisions":        "T4_AUTO_COMPACT_RETAIN_REVISIONS",
+			"auto-compact-interval":                "T4_AUTO_COMPACT_INTERVAL",
+			"auto-compact-sample-interval":         "T4_AUTO_COMPACT_SAMPLE_INTERVAL",
 			"read-consistency":                     "T4_READ_CONSISTENCY",
 			"log-level":                            "T4_LOG_LEVEL",
 			"node-id":                              "T4_NODE_ID",
@@ -368,32 +404,42 @@ func startupLogFields(
 	authEnabled bool,
 	tokenTTLSec int,
 	metricsAddr string,
+	autoCompactMode string,
+	autoCompactRetention time.Duration,
+	autoCompactRevisions int64,
+	autoCompactInterval time.Duration,
+	autoCompactSampleInt time.Duration,
 	branchPrefix string,
 	branchCheckpoint string,
 	enc *objectStoreEncryptionFlags,
 ) logrus.Fields {
 	fields := logrus.Fields{
-		"data_dir":                  dataDir,
-		"listen_addr":               listenAddr,
-		"log_level":                 logLevel,
-		"mode":                      runMode(s3.Bucket, peerListenAddr, branchCheckpoint),
-		"node_id":                   resolvedNodeID(nodeID),
-		"read_consistency":          readConsistency,
-		"s3_bucket":                 valueOrDisabled(s3.Bucket),
-		"s3_prefix":                 valueOrNone(s3.Prefix),
-		"s3_endpoint":               valueOrDefault(s3.Endpoint, "aws-default"),
-		"s3_region":                 valueOrDefault(s3.Region, "aws-default"),
-		"s3_credentials":            s3CredentialsMode(s3.AccessKeyID, s3.Profile),
-		"wal_sync_upload":           resolvedWALSyncUpload(walSyncUpload, peerListenAddr),
-		"peer_listen_addr":          valueOrDisabled(peerListenAddr),
-		"advertise_peer_addr":       resolvedAdvertisePeerAddr(peerListenAddr, advertisePeerAddr),
-		"leader_watch_interval_sec": leaderWatchIntervalSec,
-		"follower_max_retries":      followerMaxRetries,
-		"client_tls":                tlsMode(clientTLSCert, clientTLSCA),
-		"peer_tls":                  tlsMode(peerTLSCert, peerTLSCA),
-		"auth":                      authMode(authEnabled, tokenTTLSec),
-		"metrics_addr":              valueOrDisabled(metricsAddr),
-		"object_store_encryption":   enc.enabled(),
+		"data_dir":                      dataDir,
+		"listen_addr":                   listenAddr,
+		"log_level":                     logLevel,
+		"mode":                          runMode(s3.Bucket, peerListenAddr, branchCheckpoint),
+		"node_id":                       resolvedNodeID(nodeID),
+		"read_consistency":              readConsistency,
+		"s3_bucket":                     valueOrDisabled(s3.Bucket),
+		"s3_prefix":                     valueOrNone(s3.Prefix),
+		"s3_endpoint":                   valueOrDefault(s3.Endpoint, "aws-default"),
+		"s3_region":                     valueOrDefault(s3.Region, "aws-default"),
+		"s3_credentials":                s3CredentialsMode(s3.AccessKeyID, s3.Profile),
+		"wal_sync_upload":               resolvedWALSyncUpload(walSyncUpload, peerListenAddr),
+		"peer_listen_addr":              valueOrDisabled(peerListenAddr),
+		"advertise_peer_addr":           resolvedAdvertisePeerAddr(peerListenAddr, advertisePeerAddr),
+		"leader_watch_interval_sec":     leaderWatchIntervalSec,
+		"follower_max_retries":          followerMaxRetries,
+		"client_tls":                    tlsMode(clientTLSCert, clientTLSCA),
+		"peer_tls":                      tlsMode(peerTLSCert, peerTLSCA),
+		"auth":                          authMode(authEnabled, tokenTTLSec),
+		"metrics_addr":                  valueOrDisabled(metricsAddr),
+		"auto_compact_mode":             valueOrDefault(autoCompactMode, "auto"),
+		"auto_compact_retention":        autoCompactRetention.String(),
+		"auto_compact_retain_revisions": autoCompactRevisions,
+		"auto_compact_interval":         autoCompactInterval.String(),
+		"auto_compact_sample_interval":  autoCompactSampleInt.String(),
+		"object_store_encryption":       enc.enabled(),
 	}
 
 	if branchCheckpoint != "" {
