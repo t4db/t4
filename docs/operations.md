@@ -935,6 +935,70 @@ the same logical database as checkpoint SSTs plus retained WAL segments; a singl
 same range as the compacted local DB, while total S3 usage depends on checkpoint retention, WAL retention, and
 branch-pinned SSTs.
 
+### History compaction
+
+History compaction bounds the local revision history kept in Pebble. It removes old overwritten/deleted versions while
+preserving the current value of every live key. This is separate from checkpoints and S3 garbage collection:
+
+- Compaction changes what historical reads and watch replays are available.
+- Checkpoints preserve a restorable current database snapshot.
+- `t4 gc` removes old checkpoint/WAL/SST objects from S3 after they are no longer needed.
+
+After compaction, reads below the compact revision return `ErrCompacted`, and watches starting at or below the compact
+revision receive an etcd-compatible `mvcc: required revision has been compacted` cancellation. Kubernetes-style clients
+recover by relisting and starting a new watch from the fresh list revision.
+
+Automatic compaction is disabled by default. You can enable one of two strategies.
+
+#### Time-window strategy
+
+Use `time` when the operational policy is "keep roughly the last N hours/days of change history":
+
+```bash
+t4 run \
+  --auto-compact-mode time \
+  --auto-compact-retention 168h \
+  --auto-compact-sample-interval 24h
+```
+
+T4 samples the current revision over time, then compacts to the newest sample at or before `now - retention`. With the
+example above, T4 keeps at least one week of history and up to roughly one extra day because samples are daily. If
+`--auto-compact-sample-interval` is omitted, it defaults to `clamp(retention/7, 1m, 24h)`, so a one-week retention
+defaults to daily sampling.
+
+Use a smaller sample interval when the cutoff needs to be tighter; use a larger interval when a little extra retained
+history is acceptable and you want fewer metadata samples.
+
+#### Revision-window strategy
+
+Use `revision` when the operational policy is "keep the last N revisions" regardless of wall-clock time:
+
+```bash
+t4 run \
+  --auto-compact-mode revision \
+  --auto-compact-retain-revisions 100000 \
+  --auto-compact-interval 1m
+```
+
+On each check, T4 compacts to approximately `CurrentRevision - retainRevisions`. This strategy has no timestamp sampling
+and reacts directly to write volume: a busy cluster reaches the compaction horizon quickly, while an idle cluster keeps
+the same history longer in wall-clock time.
+
+#### Choosing a strategy
+
+| Goal | Recommended mode |
+|------|------------------|
+| Keep a human retention window such as 24 hours or 7 days | `time` |
+| Keep replay capacity proportional to write volume | `revision` |
+| Preserve all history until explicit operator/client compaction | `off` |
+
+For Kubernetes/control-plane workloads, avoid compacting too close to HEAD. A wider window reduces relist churn for
+clients that fall behind. A common starting point is `time` mode with at least several hours of retention, or a revision
+window large enough to cover the largest expected watch outage.
+
+You can still call `Node.Compact(ctx, revision)` or the etcd Compact API directly for exact operator-controlled
+compaction.
+
 ### Garbage collection
 
 Old checkpoints and WAL segments accumulate in S3 unless explicitly pruned. Run `t4 gc` periodically (e.g. daily via

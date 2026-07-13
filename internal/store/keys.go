@@ -34,6 +34,10 @@ var (
 	// not a revision).
 	metaLastSeqKey = []byte{prefixMeta, 's', 'e', 'q'}
 
+	revisionSamplePrefix = []byte{prefixMeta, 'r', 't'}
+	revisionSampleLower  = []byte{prefixMeta, 'r', 't'}
+	revisionSampleUpper  = []byte{prefixMeta, 'r', 'u'}
+
 	// Iteration bounds.
 	logLower = []byte{prefixLog, 0, 0, 0, 0, 0, 0, 0, 0}
 	logUpper = []byte{prefixLog + 1}
@@ -119,6 +123,17 @@ func encodeRev(rev int64) []byte {
 
 func decodeRev(b []byte) int64 {
 	return int64(binary.BigEndian.Uint64(b))
+}
+
+func revisionSampleKey(unixNano int64) []byte {
+	k := make([]byte, len(revisionSamplePrefix)+8)
+	copy(k, revisionSamplePrefix)
+	binary.BigEndian.PutUint64(k[len(revisionSamplePrefix):], uint64(unixNano))
+	return k
+}
+
+func decodeRevisionSampleKey(k []byte) int64 {
+	return int64(binary.BigEndian.Uint64(k[len(revisionSamplePrefix):]))
 }
 
 // entryHeaderSizeV1: flags(1) + createRev(8) + prevRev(8) + lease(8) + keyLen(4) = 29

@@ -81,6 +81,45 @@ func TestCurrentRevision(t *testing.T) {
 	}
 }
 
+func TestRevisionSamples(t *testing.T) {
+	s := openMem(t)
+	base := time.Unix(100, 0)
+
+	if err := s.RevisionSample(10, base); err != nil {
+		t.Fatalf("RevisionSample rev=10: %v", err)
+	}
+	if err := s.RevisionSample(20, base.Add(time.Hour)); err != nil {
+		t.Fatalf("RevisionSample rev=20: %v", err)
+	}
+
+	rev, ts, ok, err := s.RevisionSampleAtOrBefore(base.Add(30 * time.Minute))
+	if err != nil {
+		t.Fatalf("RevisionSampleAtOrBefore: %v", err)
+	}
+	if !ok || rev != 10 || !ts.Equal(base) {
+		t.Fatalf("sample before cutoff: rev=%d ts=%s ok=%v", rev, ts, ok)
+	}
+
+	rev, ts, ok, err = s.LatestRevisionSample()
+	if err != nil {
+		t.Fatalf("LatestRevisionSample: %v", err)
+	}
+	if !ok || rev != 20 || !ts.Equal(base.Add(time.Hour)) {
+		t.Fatalf("latest sample: rev=%d ts=%s ok=%v", rev, ts, ok)
+	}
+
+	if err := s.DeleteRevisionSamplesBefore(base.Add(time.Hour)); err != nil {
+		t.Fatalf("DeleteRevisionSamplesBefore: %v", err)
+	}
+	rev, ts, ok, err = s.RevisionSampleAtOrBefore(base.Add(30 * time.Minute))
+	if err != nil {
+		t.Fatalf("RevisionSampleAtOrBefore after delete: %v", err)
+	}
+	if ok {
+		t.Fatalf("old sample survived delete: rev=%d ts=%s", rev, ts)
+	}
+}
+
 func TestClosedStoreRejectsReadyWaitAndWatch(t *testing.T) {
 	s, err := OpenMem()
 	if err != nil {

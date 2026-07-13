@@ -203,6 +203,7 @@ type Node struct {
 	entriesSinceCheckpoint int64
 	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
 	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
+	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample
 
 	// bgCtx is cancelled by cancelBg — either on Close() or when fencedCheck
 	// detects that this node has been superseded as leader. When cancelled with
@@ -641,6 +642,7 @@ func Open(cfg Config) (*Node, error) {
 	n.log = log
 	n.cp = cp
 	n.db.Store(db)
+	n.initRevisionSampler()
 	if cfg.CheckpointEntries > 0 {
 		n.checkpointTriggerC = make(chan struct{}, 1)
 	}
@@ -669,6 +671,10 @@ func Open(cfg Config) (*Node, error) {
 	if n.loadRole() != roleFollower && cfg.ObjectStore != nil && cfg.CheckpointInterval > 0 {
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()
+	}
+	if n.loadRole() != roleFollower && n.autoCompactEnabled() {
+		n.bgWg.Add(1)
+		go func() { defer n.bgWg.Done(); n.autoCompactLoop(bgCtx) }()
 	}
 	if n.loadRole() == roleFollower {
 		n.bgWg.Add(1)

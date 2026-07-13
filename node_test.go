@@ -410,6 +410,89 @@ func TestNodeCompact(t *testing.T) {
 	}
 }
 
+func TestNodeAutoCompactTimeWindow(t *testing.T) {
+	n, err := t4.Open(t4.Config{
+		DataDir:                   t.TempDir(),
+		ObjectStore:               object.NewMem(),
+		AutoCompactRetention:      20 * time.Millisecond,
+		AutoCompactInterval:       5 * time.Millisecond,
+		AutoCompactSampleInterval: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+
+	c := ctx(t)
+	if _, err := n.Put(c, "k", []byte("v1"), 0); err != nil {
+		t.Fatalf("Put v1: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if _, err := n.Put(c, "k", []byte("v2"), 0); err != nil {
+		t.Fatalf("Put v2: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for n.CompactRevision() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	compactRev := n.CompactRevision()
+	if compactRev == 0 {
+		t.Fatal("auto compaction did not advance compact revision")
+	}
+
+	kv, err := n.Get("k")
+	if err != nil {
+		t.Fatalf("Get after auto compact: %v", err)
+	}
+	if kv == nil || string(kv.Value) != "v2" {
+		t.Fatalf("current value after auto compact: got %+v", kv)
+	}
+
+	wctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if _, err := n.Watch(wctx, "k", compactRev); !errors.Is(err, t4.ErrCompacted) {
+		t.Fatalf("Watch at compact revision: got %v, want ErrCompacted", err)
+	}
+}
+
+func TestNodeAutoCompactRevisionWindow(t *testing.T) {
+	n, err := t4.Open(t4.Config{
+		DataDir:                      t.TempDir(),
+		ObjectStore:                  object.NewMem(),
+		AutoCompactMode:              t4.AutoCompactRevision,
+		AutoCompactRevisionRetention: 1,
+		AutoCompactInterval:          5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+
+	c := ctx(t)
+	for _, value := range []string{"v1", "v2", "v3"} {
+		if _, err := n.Put(c, "k", []byte(value), 0); err != nil {
+			t.Fatalf("Put %s: %v", value, err)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for n.CompactRevision() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if compactRev := n.CompactRevision(); compactRev < 2 {
+		t.Fatalf("auto compaction did not reach revision window target, got compactRev=%d", compactRev)
+	}
+
+	kv, err := n.Get("k")
+	if err != nil {
+		t.Fatalf("Get after auto compact: %v", err)
+	}
+	if kv == nil || string(kv.Value) != "v3" {
+		t.Fatalf("current value after auto compact: got %+v", kv)
+	}
+}
+
 func TestNodeCompactDoesNotReuseWALSequenceAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	c := ctx(t)

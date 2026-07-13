@@ -53,6 +53,20 @@ const (
 	FollowerWaitAll FollowerWaitMode = "all"
 )
 
+// AutoCompactMode selects the automatic history compaction strategy.
+type AutoCompactMode string
+
+const (
+	// AutoCompactOff disables automatic history compaction.
+	AutoCompactOff AutoCompactMode = "off"
+
+	// AutoCompactTime keeps history newer than AutoCompactRetention.
+	AutoCompactTime AutoCompactMode = "time"
+
+	// AutoCompactRevision keeps the last AutoCompactRevisionRetention revisions.
+	AutoCompactRevision AutoCompactMode = "revision"
+)
+
 // WAL is the write-ahead log implementation used by Node. The default opens
 // T4's filesystem WAL. Advanced embedders can provide an alternate
 // implementation for constrained runtimes such as browser WASM demos.
@@ -143,6 +157,35 @@ type Config struct {
 	// CheckpointEntries triggers a checkpoint after this many WAL entries
 	// regardless of time. 0 means disabled.
 	CheckpointEntries int64
+
+	// AutoCompactMode selects the automatic history compaction strategy.
+	// Empty means infer from the retention fields: time when
+	// AutoCompactRetention > 0, revision when AutoCompactRevisionRetention > 0,
+	// otherwise off.
+	AutoCompactMode AutoCompactMode
+
+	// AutoCompactRetention configures time-window autocompaction. The leader
+	// periodically compacts history older than this duration while preserving
+	// current key values.
+	// Default: 0 (disabled).
+	AutoCompactRetention time.Duration
+
+	// AutoCompactRevisionRetention enables revision-window autocompaction when
+	// AutoCompactMode is revision. The leader keeps approximately this many
+	// recent revisions and compacts older history.
+	// Default: 0 (disabled).
+	AutoCompactRevisionRetention int64
+
+	// AutoCompactInterval controls how often the leader checks whether the
+	// autocompaction watermark can advance. Defaults to AutoCompactSampleInterval
+	// in time mode and 1 minute in revision mode.
+	AutoCompactInterval time.Duration
+
+	// AutoCompactSampleInterval controls how often T4 records revision/time
+	// samples used to map a retention cutoff to a revision. Coarser values
+	// retain up to roughly this much extra history. Default:
+	// clamp(AutoCompactRetention/7, 1 minute, 24 hours).
+	AutoCompactSampleInterval time.Duration
 
 	// ── Multi-node (leader election + replication) ────────────────────────────
 	//
@@ -254,6 +297,29 @@ func (c *Config) setDefaults() {
 	if c.CheckpointInterval == 0 {
 		c.CheckpointInterval = 15 * time.Minute
 	}
+	if c.AutoCompactMode == "" {
+		switch {
+		case c.AutoCompactRetention > 0:
+			c.AutoCompactMode = AutoCompactTime
+		case c.AutoCompactRevisionRetention > 0:
+			c.AutoCompactMode = AutoCompactRevision
+		default:
+			c.AutoCompactMode = AutoCompactOff
+		}
+	}
+	switch c.AutoCompactMode {
+	case AutoCompactTime:
+		if c.AutoCompactSampleInterval <= 0 {
+			c.AutoCompactSampleInterval = defaultAutoCompactSampleInterval(c.AutoCompactRetention)
+		}
+		if c.AutoCompactInterval <= 0 {
+			c.AutoCompactInterval = c.AutoCompactSampleInterval
+		}
+	case AutoCompactRevision:
+		if c.AutoCompactInterval <= 0 {
+			c.AutoCompactInterval = time.Minute
+		}
+	}
 	if c.WALSyncUpload == nil {
 		t := true
 		c.WALSyncUpload = &t // default: sync for single-node safety
@@ -286,4 +352,15 @@ func (c *Config) setDefaults() {
 	if c.Logger == nil {
 		c.Logger = defaultLogger()
 	}
+}
+
+func defaultAutoCompactSampleInterval(retention time.Duration) time.Duration {
+	interval := retention / 7
+	if interval < time.Minute {
+		return time.Minute
+	}
+	if interval > 24*time.Hour {
+		return 24 * time.Hour
+	}
+	return interval
 }
