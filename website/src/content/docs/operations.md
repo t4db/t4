@@ -712,11 +712,11 @@ the same history longer in wall-clock time.
 
 #### Choosing a strategy
 
-| Goal | Recommended mode |
-|------|------------------|
-| Keep a human retention window such as 24 hours or 7 days | `time` |
-| Keep replay capacity proportional to write volume | `revision` |
-| Preserve all history until explicit operator/client compaction | `off` |
+| Goal                                                           | Recommended mode |
+|----------------------------------------------------------------|------------------|
+| Keep a human retention window such as 24 hours or 7 days       | `time`           |
+| Keep replay capacity proportional to write volume              | `revision`       |
+| Preserve all history until explicit operator/client compaction | `off`            |
 
 For Kubernetes/control-plane workloads, avoid compacting too close to HEAD. A wider window reduces relist churn for
 clients that fall behind. A common starting point is `time` mode with at least several hours of retention, or a revision
@@ -817,18 +817,18 @@ branchStore := object.NewS3Store(object.S3Config{Bucket: "my-bucket", Prefix: "t
 // Register and get the checkpoint key.
 cpKey, err := t4.Fork(ctx, sourceStore, "my-branch")
 if err != nil {
-log.Fatal(err)
+    log.Fatal(err)
 }
 
 // Start the branch node.
 node, err := t4.Open(t4.Config{
-DataDir:       "/var/lib/t4-branch",
-ObjectStore:   branchStore,
-AncestorStore: sourceStore,
-BranchPoint: &t4.BranchPoint{
-SourceStore:   sourceStore,
-CheckpointKey: cpKey,
-},
+    DataDir:       "/var/lib/t4-branch",
+    ObjectStore:   branchStore,
+    AncestorStore: sourceStore,
+    BranchPoint: &t4.BranchPoint{
+        SourceStore:   sourceStore,
+        CheckpointKey: cpKey,
+    },
 })
 ```
 
@@ -851,8 +851,9 @@ import "github.com/t4db/t4/internal/checkpoint"
 
 cpKey := "checkpoint/0000000001/00000000000000000050/manifest.json"
 if err := checkpoint.RegisterBranch(ctx, sourceStore, "my-branch", cpKey); err != nil {
-log.Fatal(err)
+    log.Fatal(err)
 }
+```
 
 ### Removing a branch
 
@@ -867,7 +868,7 @@ t4 branch unfork \
 
 ```go
 if err := t4.Unfork(ctx, sourceStore, "my-branch"); err != nil {
-log.Fatal(err)
+    log.Fatal(err)
 }
 ```
 
