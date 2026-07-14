@@ -661,7 +661,7 @@ the same logical database as checkpoint SSTs plus retained WAL segments; a singl
 same range as the compacted local DB, while total S3 usage depends on checkpoint retention, WAL retention, and
 branch-pinned SSTs.
 
-b### History compaction
+### History compaction
 
 History compaction bounds the local revision history kept in Pebble. It removes old overwritten/deleted versions while
 preserving the current value of every live key. This is separate from checkpoints and S3 garbage collection:
