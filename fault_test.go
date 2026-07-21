@@ -230,6 +230,45 @@ func TestCommitLoopDeathUnblocksWrites(t *testing.T) {
 	}
 }
 
+// TestCanceledWriteDoesNotConsumeWALSequence guards the recovery failure seen
+// under large Kubernetes loads: a request timeout used to abandon its already
+// allocated sequence, so the next committed WAL entry skipped an ID and strict
+// follower/S3 replay treated the legitimate cancellation as data loss.
+func TestCanceledWriteDoesNotConsumeWALSequence(t *testing.T) {
+	n, err := Open(Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = n.Close()
+	}()
+
+	ctx := context.Background()
+	if _, err := n.Put(ctx, "/gap/seed", []byte("seed"), 0); err != nil {
+		t.Fatalf("seed Put: %v", err)
+	}
+
+	fw := newFakeWAL(n)
+	fw.setBlockChan(make(chan struct{}))
+	cancelCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if _, err := n.Put(cancelCtx, "/gap/canceled", []byte("no"), 0); err == nil {
+		t.Fatal("blocked Put unexpectedly succeeded")
+	}
+	fw.setBlockChan(nil)
+
+	if _, err := n.Put(ctx, "/gap/after", []byte("yes"), 0); err != nil {
+		t.Fatalf("Put after canceled batch: %v", err)
+	}
+
+	if got := n.db.Load().LastSequence(); got != 2 {
+		t.Fatalf("LastSequence after seed/cancel/commit = %d, want 2", got)
+	}
+	if got := n.db.Load().CurrentRevision(); got != 3 {
+		t.Fatalf("CurrentRevision after seed/cancel/commit = %d, want 3", got)
+	}
+}
+
 func TestClearPendingBatchRemovesOnlyMatchingRevisions(t *testing.T) {
 	n := &Node{
 		pending: map[string]pendingKV{

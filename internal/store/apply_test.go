@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/t4db/t4/internal/wal"
@@ -151,6 +152,43 @@ func TestCompactDeletedKeyIsRemoved(t *testing.T) {
 	}
 	if kv == nil || string(kv.Value) != "v" {
 		t.Errorf("live key must survive compaction, got %v", kv)
+	}
+}
+
+// TestCompactHighCardinalityHistory exercises the workload shape that made
+// the former quadratic compaction implementation stall: many distinct keys
+// with a second version near the compaction boundary.
+func TestCompactHighCardinalityHistory(t *testing.T) {
+	s := openMem(t)
+	const keys = 10_000
+
+	entries := make([]wal.Entry, 0, keys*2)
+	for i := 0; i < keys; i++ {
+		key := fmt.Sprintf("/registry/nodes/node-%05d", i)
+		entries = append(entries, createEntry(int64(i+1), key, []byte("v1")))
+	}
+	for i := 0; i < keys; i++ {
+		key := fmt.Sprintf("/registry/nodes/node-%05d", i)
+		entries = append(entries, updateEntry(int64(keys+i+1), key, []byte("v2"), int64(i+1), int64(i+1)))
+	}
+	apply(t, s, entries...)
+
+	apply(t, s, wal.Entry{
+		Revision:     keys*2 + 1,
+		Term:         1,
+		Op:           wal.OpCompact,
+		PrevRevision: keys * 2,
+	})
+
+	for _, i := range []int{0, keys / 2, keys - 1} {
+		key := fmt.Sprintf("/registry/nodes/node-%05d", i)
+		kv, err := s.GetAt(key, keys*2)
+		if err != nil {
+			t.Fatalf("GetAt(%q): %v", key, err)
+		}
+		if kv == nil || string(kv.Value) != "v2" {
+			t.Fatalf("GetAt(%q): got %+v, want v2", key, kv)
+		}
 	}
 }
 

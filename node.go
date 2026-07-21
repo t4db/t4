@@ -176,9 +176,9 @@ type Node struct {
 	// on the write path so that in-flight entries have distinct revisions.
 	nextRev int64
 
-	// nextSeq is the last WAL/peer-stream identity assigned to any entry.
-	// Unlike nextRev, metadata-only entries such as Compact consume a sequence
-	// number without consuming a user-visible revision.
+	// nextSeq is the last WAL/peer-stream identity committed by this node.
+	// The commit loop assigns IDs immediately before WAL append and advances it
+	// only after successful apply, so canceled requests cannot create holes.
 	nextSeq int64
 
 	// pending holds in-flight writes that have been assigned a revision but
