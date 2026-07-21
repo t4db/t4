@@ -510,32 +510,31 @@ func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
 		return err
 	}
 	lo := logKey(atomic.LoadInt64(&s.compactRev))
-	hi := logKey(compactRev)
+	hi := logKey(compactRev + 1)
 
-	// Scan old compacted log entries and delete only versions that have a
-	// later version at or before the new compact watermark. The newest entry at
-	// or before compactRev for each key must be preserved: it is still visible
-	// to reads just after the compacted range until that key changes again.
+	// Walk the compacted history backwards. The first record seen for a key is
+	// its newest version at or before compactRev and must be retained as the
+	// anchor for historical reads at and immediately after the watermark. Any
+	// earlier record for the same key can be removed.
+	//
+	// This is deliberately a single O(entries) pass. The old implementation
+	// scanned the remaining history for every entry to find a later version,
+	// which made compaction O(entries^2) for high-cardinality workloads.
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 	if err != nil {
 		return fmt.Errorf("store: compact iter: %w", err)
 	}
 	defer func() { _ = iter.Close() }()
 
-	for iter.First(); iter.Valid(); iter.Next() {
+	seen := make(map[string]struct{})
+	for iter.Last(); iter.Valid(); iter.Prev() {
 		entryRev := decodeLogKey(iter.Key())
 		r, err := unmarshalRecord(iter.Value())
 		if err != nil {
 			return fmt.Errorf("store: compact decode rev=%d: %w", entryRev, err)
 		}
-		hasLater, err := s.hasLaterRevisionAtOrBefore(r.key, entryRev, compactRev)
-		if err != nil {
-			return err
-		}
-		if !hasLater {
-			// Keep the newest entry at or before compactRev for each key. It is
-			// still needed to reconstruct reads at revisions after compactRev
-			// until that key changes again.
+		if _, ok := seen[r.key]; !ok {
+			seen[r.key] = struct{}{}
 			continue
 		}
 		if err := b.Delete(iter.Key(), pebble.NoSync); err != nil {
@@ -548,30 +547,6 @@ func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
 
 	atomic.StoreInt64(&s.compactRev, compactRev)
 	return nil
-}
-
-func (s *Store) hasLaterRevisionAtOrBefore(key string, afterRev, beforeOrEqualRev int64) (bool, error) {
-	if afterRev >= beforeOrEqualRev {
-		return false, nil
-	}
-	iter, err := s.db.NewIter(&pebble.IterOptions{
-		LowerBound: logKey(afterRev + 1),
-		UpperBound: logKey(beforeOrEqualRev + 1),
-	})
-	if err != nil {
-		return false, fmt.Errorf("store: compact later-revision iter: %w", err)
-	}
-	defer func() { _ = iter.Close() }()
-	for iter.First(); iter.Valid(); iter.Next() {
-		r, err := unmarshalRecord(iter.Value())
-		if err != nil {
-			return false, fmt.Errorf("store: compact later-revision decode: %w", err)
-		}
-		if r.key == key {
-			return true, nil
-		}
-	}
-	return false, iter.Error()
 }
 
 // broadcast replaces the notify channel, waking all current waiters.
