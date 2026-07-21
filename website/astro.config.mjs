@@ -86,6 +86,12 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Tutorials',
+					items: [
+						{ label: 'Use T4 with k0s and kine', slug: 'tutorials/k0s-kine' },
+					],
+				},
+				{
 					label: 'Deployment',
 					items: [
 						{ label: 'Kubernetes', slug: 'deployment/kubernetes' },
