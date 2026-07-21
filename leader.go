@@ -442,61 +442,59 @@ func (n *Node) commitLoop(ctx context.Context) {
 			}
 		}
 
-		// Build a context that's cancelled when any batch caller gives up.
-		// This lets the WAL abort early (in tests / context-aware WALs) if
-		// all callers have abandoned the batch. Real fsyncs complete normally.
+		// Cancel the WAL attempt only after every caller in this group has
+		// abandoned it. One short request deadline must not abort unrelated
+		// writes that happened to be drained into the same group-commit batch.
 		batchCtx, batchCancel := context.WithCancel(ctx)
+		var abandoned atomic.Int32
 		for _, req := range batch {
 			r := req
 			go func() {
 				select {
 				case <-r.ctx.Done():
-					batchCancel()
+					if abandoned.Add(1) == int32(len(batch)) {
+						batchCancel()
+					}
 				case <-batchCtx.Done():
 				}
 			}()
 		}
 
-		// Write all entries to WAL with one fsync.
+		// Assign sequence IDs only to the batch currently being attempted. The
+		// IDs are based on the last applied sequence and are not published to
+		// followers until WAL append succeeds. A canceled batch can therefore
+		// reuse the same IDs without leaving a hole or stale staged entries.
+		baseSeq := n.db.Load().LastSequence()
 		entries := make([]*wal.Entry, len(batch))
 		for i, req := range batch {
+			req.entry.ID = baseSeq + int64(i) + 1
 			entries[i] = &req.entry
 		}
 
-		var err error
-		if n.peerSrv != nil {
-			// Pipeline: overlap network delivery to followers with the leader's
-			// own WAL fsync, but do not let followers make entries durable or
-			// visible until the leader has fsynced successfully. Followers stage
-			// entry messages in memory and wait for BroadcastCommit before
-			// appending/applying the batch locally.
-			walErrC := make(chan error, 1)
-			go func() { walErrC <- n.wal.AppendBatch(batchCtx, entries) }()
-
+		// Append locally before exposing IDs or payloads to followers. This
+		// sacrifices a small amount of fsync/network overlap, but ensures failed
+		// attempts never enter the peer replay buffer under reusable IDs.
+		err := n.wal.AppendBatch(batchCtx, entries)
+		if err == nil && n.peerSrv != nil {
 			for _, req := range batch {
 				n.peerSrv.Broadcast(&req.entry)
 			}
 
 			startRev := batch[0].entry.Sequence()
 			maxRev := batch[len(batch)-1].entry.Sequence()
-			err = <-walErrC
-			if err == nil {
-				n.peerSrv.BroadcastCommit(startRev, maxRev)
+			n.peerSrv.BroadcastCommit(startRev, maxRev)
 
-				// Wait for follower ACKs according to the configured policy.
-				// Use the commit loop's own context (node lifetime), NOT batchCtx:
-				// batchCtx is cancelled after AppendBatch returns and passing it
-				// here would cause WaitForFollowers to return instantly.
-				//
-				// Availability policy: if all followers disconnect mid-wait, we
-				// proceed anyway — the entry is already durable in the leader's
-				// WAL and will be replayed by followers when they reconnect.
-				if waitErr := n.peerSrv.WaitForFollowers(ctx, maxRev, peer.WaitMode(n.cfg.FollowerWaitMode)); waitErr != nil {
-					err = waitErr
-				}
+			// Wait for follower ACKs according to the configured policy.
+			// Use the commit loop's own context (node lifetime), NOT batchCtx:
+			// batchCtx is cancelled after AppendBatch returns and passing it
+			// here would cause WaitForFollowers to return instantly.
+			//
+			// Availability policy: if all followers disconnect mid-wait, we
+			// proceed anyway — the entry is already durable in the leader's
+			// WAL and will be replayed by followers when they reconnect.
+			if waitErr := n.peerSrv.WaitForFollowers(ctx, maxRev, peer.WaitMode(n.cfg.FollowerWaitMode)); waitErr != nil {
+				err = waitErr
 			}
-		} else {
-			err = n.wal.AppendBatch(batchCtx, entries)
 		}
 		batchCancel() // release watcher goroutines
 
@@ -508,6 +506,9 @@ func (n *Node) commitLoop(ctx context.Context) {
 			}
 			err = n.db.Load().Apply(dbEntries)
 			if err == nil {
+				n.mu.Lock()
+				n.nextSeq = dbEntries[len(dbEntries)-1].Sequence()
+				n.mu.Unlock()
 				n.maybeRecordRevisionSample(dbEntries)
 			}
 		}
