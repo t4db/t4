@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -575,6 +576,81 @@ func TestWatchCancelStopsChannel(t *testing.T) {
 	}
 }
 
+func TestWatchReplayLiveHandoffHasNoGapsOrDuplicates(t *testing.T) {
+	s := openMem(t)
+
+	initial := make([]wal.Entry, 1000)
+	for i := range initial {
+		rev := int64(i + 1)
+		initial[i] = createEntry(rev, fmt.Sprintf("/handoff/%04d", rev), nil)
+	}
+	apply(t, s, initial...)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ch, err := s.Watch(ctx, "/handoff/", 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// These revisions race with the historical scan. Depending on timing they
+	// are delivered by the handoff-gap scan or the live dispatcher, but never
+	// by both and never by neither.
+	live := make([]wal.Entry, 100)
+	for i := range live {
+		rev := int64(len(initial) + i + 1)
+		live[i] = createEntry(rev, fmt.Sprintf("/handoff/%04d", rev), nil)
+	}
+	apply(t, s, live...)
+
+	for wantRev := int64(1); wantRev <= 1100; wantRev++ {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("watch closed before revision %d", wantRev)
+			}
+			if ev.KV.Revision != wantRev {
+				t.Fatalf("watch revision: want %d got %d", wantRev, ev.KV.Revision)
+			}
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for revision %d", wantRev)
+		}
+	}
+}
+
+func TestWatchLiveTxnFanout(t *testing.T) {
+	s := openMem(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	ch, err := s.Watch(ctx, "/txn/", 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := wal.Entry{
+		Revision: 1,
+		Term:     1,
+		Op:       wal.OpTxn,
+		Value: wal.EncodeTxnOps([]wal.TxnSubOp{
+			{Op: wal.OpCreate, Key: "/txn/a", Value: []byte("a"), CreateRevision: 1},
+			{Op: wal.OpCreate, Key: "/other/b", Value: []byte("b"), CreateRevision: 1},
+			{Op: wal.OpCreate, Key: "/txn/c", Value: []byte("c"), CreateRevision: 1},
+		}),
+	}
+	apply(t, s, entry)
+
+	for _, wantKey := range []string{"/txn/a", "/txn/c"} {
+		select {
+		case ev := <-ch:
+			if ev.KV.Key != wantKey || ev.KV.Revision != 1 {
+				t.Fatalf("watch txn event: want key=%q rev=1 got key=%q rev=%d", wantKey, ev.KV.Key, ev.KV.Revision)
+			}
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for txn key %q", wantKey)
+		}
+	}
+}
+
 func TestWatchMetrics(t *testing.T) {
 	metrics.Register(prometheus.NewRegistry())
 	s := openMem(t)
@@ -595,6 +671,8 @@ func TestWatchMetrics(t *testing.T) {
 	if got := testutil.ToFloat64(metrics.WatchActivePrefixes); got != 1 {
 		t.Fatalf("active watch prefixes: want 1 got %v", got)
 	}
+	beforeScanned := testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("scanned"))
+	beforeMatched := testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("matched"))
 
 	apply(t, s,
 		createEntry(1, "/metrics/a", []byte("1")),
@@ -611,10 +689,18 @@ func TestWatchMetrics(t *testing.T) {
 
 	waitForMetric(t, func() float64 {
 		return testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("scanned"))
-	}, func(v float64) bool { return v > 0 }, "scanned watch entries")
+	}, func(v float64) bool { return v-beforeScanned >= 2 }, "shared live scan metrics")
 	waitForMetric(t, func() float64 {
 		return testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("matched"))
-	}, func(v float64) bool { return v > 0 }, "matched watch entries")
+	}, func(v float64) bool { return v-beforeMatched >= 2 }, "shared live match metrics")
+	afterScanned := testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("scanned"))
+	afterMatched := testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("matched"))
+	if delta := afterScanned - beforeScanned; delta != 2 {
+		t.Fatalf("live scan amplification: want 2 decoded entries once, got %v", delta)
+	}
+	if delta := afterMatched - beforeMatched; delta != 2 {
+		t.Fatalf("live matched deliveries: want 2 (one event to two watches), got %v", delta)
+	}
 
 	cancel()
 	waitForMetric(t, func() float64 {

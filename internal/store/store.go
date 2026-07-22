@@ -56,6 +56,15 @@ type Store struct {
 	watcherWg sync.WaitGroup // tracks active watchLoop goroutines
 
 	watchPrefixes map[string]int
+
+	// watchHubMu protects the live-watch registry. Live revisions are decoded
+	// once after Apply and fanned out in memory instead of making every watch
+	// rescan the Pebble revision log.
+	watchHubMu   sync.Mutex
+	watchers     map[uint64]*watchSubscription
+	nextWatchID  uint64
+	dispatchOnce sync.Once
+	dispatchWg   sync.WaitGroup
 }
 
 // lockRetryTimeout is how long Open retries when another process holds the
@@ -210,6 +219,7 @@ func (s *Store) Close() error {
 	s.SignalClose()
 	s.watchMu.Unlock()
 	s.watcherWg.Wait()
+	s.dispatchWg.Wait()
 	return s.db.Close()
 }
 
@@ -936,6 +946,16 @@ func (s *Store) Changes(prefix string, fromRev, toRev int64) ([]Event, error) {
 
 // --- Watch ---
 
+const watchLiveBatchBuffer = 1024
+
+type watchSubscription struct {
+	id         uint64
+	prefix     string
+	withPrevKV bool
+	nextRev    int64
+	live       chan []Event
+}
+
 // EventType classifies a watch event.
 type EventType int
 
@@ -973,9 +993,47 @@ func (s *Store) Watch(ctx context.Context, prefix string, startRev int64, withPr
 	}
 	ch := make(chan Event, 64)
 	unregister := s.registerWatch(prefix)
+	sub := &watchSubscription{
+		prefix:     prefix,
+		withPrevKV: withPrevKV,
+		live:       make(chan []Event, watchLiveBatchBuffer),
+	}
+
+	// Most Kubernetes watches start at the store's current revision. Register
+	// those synchronously so an Apply immediately following Watch cannot turn
+	// into a separate historical scan. Watches starting behind currentRev use
+	// the replay/handoff path in watchLoop.
+	s.watchHubMu.Lock()
+	boundary := atomic.LoadInt64(&s.currentRev)
+	registered := startRev >= boundary
+	if registered {
+		s.addWatchSubscriptionLocked(sub, startRev+1)
+	}
+	s.watchHubMu.Unlock()
+	s.startWatchDispatcher(boundary + 1)
+
 	s.watcherWg.Add(1)
-	go s.watchLoop(ctx, prefix, startRev, withPrevKV, ch, unregister)
+	go s.watchLoop(ctx, prefix, startRev, withPrevKV, boundary, registered, ch, sub, unregister)
 	return ch, nil
+}
+
+func (s *Store) addWatchSubscriptionLocked(sub *watchSubscription, nextRev int64) {
+	if s.watchers == nil {
+		s.watchers = make(map[uint64]*watchSubscription)
+	}
+	s.nextWatchID++
+	sub.id = s.nextWatchID
+	sub.nextRev = nextRev
+	s.watchers[sub.id] = sub
+}
+
+func (s *Store) removeWatchSubscription(sub *watchSubscription) {
+	s.watchHubMu.Lock()
+	if current, ok := s.watchers[sub.id]; ok && current == sub {
+		delete(s.watchers, sub.id)
+		close(sub.live)
+	}
+	s.watchHubMu.Unlock()
 }
 
 func (s *Store) registerWatch(prefix string) func() {
@@ -1009,37 +1067,174 @@ func (s *Store) registerWatch(prefix string) func() {
 	}
 }
 
-func (s *Store) watchLoop(ctx context.Context, prefix string, startRev int64, withPrevKV bool, ch chan<- Event, unregister func()) {
+func (s *Store) watchLoop(
+	ctx context.Context,
+	prefix string,
+	startRev int64,
+	withPrevKV bool,
+	boundary int64,
+	registered bool,
+	ch chan<- Event,
+	sub *watchSubscription,
+	unregister func(),
+) {
 	defer s.watcherWg.Done()
 	defer unregister()
 	defer close(ch)
+	defer s.removeWatchSubscription(sub)
 
-	nextRev := startRev + 1
-	for {
-		// Wait until we have entries at or beyond nextRev.
+	if !registered {
+		nextRev := startRev + 1
 		if err := s.WaitForRevision(ctx, nextRev); err != nil {
 			return
 		}
-		curRev := atomic.LoadInt64(&s.currentRev)
+		if boundary < nextRev {
+			boundary = atomic.LoadInt64(&s.currentRev)
+		}
 
-		// Scan the log for events in [nextRev, curRev].
+		replay, ok := s.scanWatchRange(prefix, nextRev, boundary, withPrevKV)
+		if !ok {
+			return
+		}
+
+		// Atomically choose a handoff revision and register only for later
+		// revisions. The small gap is replayed below; concurrent Apply calls
+		// queue revisions after handoff in sub.live, so there is no gap or
+		// duplicate at the replay/live boundary.
+		s.watchHubMu.Lock()
+		handoff := atomic.LoadInt64(&s.currentRev)
+		s.addWatchSubscriptionLocked(sub, handoff+1)
+		s.watchHubMu.Unlock()
+
+		gap, ok := s.scanWatchRange(prefix, boundary+1, handoff, withPrevKV)
+		if !ok || !s.sendWatchEvents(ctx, ch, replay) || !s.sendWatchEvents(ctx, ch, gap) {
+			return
+		}
+	}
+
+	for {
+		select {
+		case events, ok := <-sub.live:
+			if !ok || !s.sendWatchEvents(ctx, ch, events) {
+				return
+			}
+		case <-s.closed:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *Store) scanWatchRange(prefix string, fromRev, toRev int64, withPrevKV bool) ([]Event, bool) {
+	if toRev < fromRev {
+		return nil, true
+	}
+	start := time.Now()
+	events, scanned, err := s.scanLog(prefix, fromRev, toRev, withPrevKV)
+	if err != nil {
+		return nil, false
+	}
+	recordWatchScanMetrics(time.Since(start), fromRev, toRev, scanned, len(events))
+	return events, true
+}
+
+func (s *Store) sendWatchEvents(ctx context.Context, ch chan<- Event, events []Event) bool {
+	for _, ev := range events {
+		select {
+		case ch <- ev:
+		case <-s.closed:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Store) startWatchDispatcher(nextRev int64) {
+	s.dispatchOnce.Do(func() {
+		s.dispatchWg.Add(1)
+		go s.watchDispatchLoop(nextRev)
+	})
+}
+
+// watchDispatchLoop is the single live revision-log scanner for this Store.
+// It is deliberately asynchronous from Apply: commits only wake the loop, and
+// watch decoding, PrevKV reconstruction, and slow-consumer handling never add
+// latency to WAL apply or follower acknowledgement.
+func (s *Store) watchDispatchLoop(nextRev int64) {
+	defer s.dispatchWg.Done()
+	ctx := context.Background()
+
+	for {
+		s.watchHubMu.Lock()
+		hasWatchers := len(s.watchers) > 0
+		s.watchHubMu.Unlock()
+		if !hasWatchers {
+			// No subscriber needs the intervening history. A later historical
+			// watch replays its own requested range before joining live delivery.
+			nextRev = atomic.LoadInt64(&s.currentRev) + 1
+		}
+		if err := s.WaitForRevision(ctx, nextRev); err != nil {
+			return
+		}
+		toRev := atomic.LoadInt64(&s.currentRev)
 		start := time.Now()
-		events, scanned, err := s.scanLog(prefix, nextRev, curRev, withPrevKV)
+		events, scanned, err := s.scanLog("", nextRev, toRev, false)
 		if err != nil {
 			return
 		}
-		recordWatchScanMetrics(time.Since(start), nextRev, curRev, scanned, len(events))
-		for _, ev := range events {
-			select {
-			case ch <- ev:
-			case <-s.closed:
-				return
-			case <-ctx.Done():
-				return
-			}
-		}
-		nextRev = curRev + 1
+		matched := s.dispatchWatchEvents(events)
+		recordWatchScanMetrics(time.Since(start), nextRev, toRev, scanned, matched)
+		nextRev = toRev + 1
 	}
+}
+
+// dispatchWatchEvents fans one shared decoded batch out in memory. A slow
+// consumer cannot block other watches: when its bounded queue fills, that
+// watch is closed and can reconnect from its last delivered revision.
+func (s *Store) dispatchWatchEvents(events []Event) int {
+	type prevKey struct {
+		key string
+		rev int64
+	}
+	prevCache := make(map[prevKey]*KeyValue)
+	matched := 0
+
+	s.watchHubMu.Lock()
+	for id, sub := range s.watchers {
+		var batch []Event
+		for i := range events {
+			ev := events[i]
+			if ev.KV.Revision < sub.nextRev ||
+				(sub.prefix != "" && !strings.HasPrefix(ev.KV.Key, sub.prefix)) {
+				continue
+			}
+			if sub.withPrevKV && ev.KV.PrevRevision > 0 {
+				pk := prevKey{key: ev.KV.Key, rev: ev.KV.PrevRevision}
+				prev, found := prevCache[pk]
+				if !found {
+					prev, _ = s.getLogEntry(pk.key, pk.rev)
+					prevCache[pk] = prev
+				}
+				ev.PrevKV = prev
+			}
+			batch = append(batch, ev)
+		}
+		if len(batch) == 0 {
+			continue
+		}
+		matched += len(batch)
+		select {
+		case sub.live <- batch:
+		default:
+			delete(s.watchers, id)
+			close(sub.live)
+		}
+	}
+	s.watchHubMu.Unlock()
+	return matched
 }
 
 func recordWatchScanMetrics(d time.Duration, fromRev, toRev int64, scanned, matched int) {
