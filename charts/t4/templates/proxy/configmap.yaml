@@ -81,8 +81,12 @@ data:
       clusters:
         # Leader cluster: only the current leader passes /healthz/leader.
         - name: t4_leader
-          type: STATIC
+          type: STRICT_DNS
           lb_policy: ROUND_ROBIN
+          # Exactly one of N replicas is healthy by design. Disable Envoy's
+          # default 50% panic threshold or it will route writes to followers.
+          common_lb_config:
+            healthy_panic_threshold: { value: 0.0 }
           typed_extension_protocol_options:
             envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
               "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -111,7 +115,7 @@ data:
 
         # All-nodes cluster: reads are spread across every healthy pod.
         - name: t4_all
-          type: STATIC
+          type: STRICT_DNS
           lb_policy: {{ .Values.proxy.lbPolicy }}
           typed_extension_protocol_options:
             envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -141,5 +145,6 @@ data:
 
     admin:
       address:
-        socket_address: { address: 127.0.0.1, port_value: 9901 }
+        # Kubelet HTTP probes target the Pod IP, not its loopback interface.
+        socket_address: { address: 0.0.0.0, port_value: 9901 }
 {{- end }}
