@@ -79,14 +79,14 @@ var (
 	// metric cardinality bounded under Kubernetes workloads.
 	WatchActivePrefixes prometheus.Gauge
 
-	// WatchScanDuration measures time spent scanning revision logs for watches.
+	// WatchScanDuration measures time spent processing live or replay watch batches.
 	WatchScanDuration prometheus.Histogram
 
-	// WatchScanRevisionSpan measures the revision span scanned by watch loops.
+	// WatchScanRevisionSpan measures the revision span processed by watch delivery.
 	WatchScanRevisionSpan prometheus.Histogram
 
-	// WatchScanEntriesTotal counts revision-log entries scanned by watch loops
-	// and entries that matched the watch prefix.
+	// WatchScanEntriesTotal counts records decoded once by live dispatch or
+	// replay scans, plus matching deliveries to watch subscribers.
 	WatchScanEntriesTotal *prometheus.CounterVec
 )
 
@@ -216,19 +216,19 @@ func Register(reg prometheus.Registerer) {
 
 		WatchScanDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "t4_watch_scan_duration_seconds",
-			Help:    "Duration of revision-log scans performed by watch loops.",
+			Help:    "Duration of live dispatch or replay processing for watch batches.",
 			Buckets: []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
 		})
 
 		WatchScanRevisionSpan = prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "t4_watch_scan_revision_span",
-			Help:    "Number of revisions covered by each watch-loop scan.",
+			Help:    "Number of revisions covered by each watch delivery batch.",
 			Buckets: []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
 		})
 
 		WatchScanEntriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "t4_watch_scan_entries_total",
-			Help: "Revision-log entries scanned by watch loops, labelled by scanned or matched.",
+			Help: "Watch records decoded or delivered, labelled by scanned or matched.",
 		}, []string{"result"})
 
 		reg.MustRegister(
