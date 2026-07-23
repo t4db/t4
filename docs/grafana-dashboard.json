@@ -3,7 +3,7 @@
   "uid": "t4-overview",
   "description": "Cluster health, write performance, replication lag, WAL/checkpoint activity, and S3 object store metrics for a T4 node or cluster.",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 2,
   "tags": [
     "t4"
   ],
@@ -1693,6 +1693,268 @@
         },
         {
           "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "id": 65,
+      "title": "Transactions",
+      "type": "row"
+    },
+    {
+      "id": 66,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "type": "timeseries",
+      "title": "Transaction Rate by Kind & Result",
+      "description": "Txn requests/sec by resolved write shape and result (committed/noop/error). Splits out traffic that t4_writes_total lumps as op=\"txn\".",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (kind, result) (rate(t4_txn_requests_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "legendFormat": "{{kind}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 67,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 73
+      },
+      "type": "timeseries",
+      "title": "Transaction Sub-Operation Rate",
+      "description": "Committed txn sub-operations/sec by resolved op type.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (op) (rate(t4_txn_suboperations_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 68,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 81
+      },
+      "type": "timeseries",
+      "title": "Txn Lock Wait (p50 / p95 / p99)",
+      "description": "Time spent waiting to enter the serialized write-preparation section.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_txn_lock_wait_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_txn_lock_wait_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_txn_lock_wait_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 69,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 81
+      },
+      "type": "timeseries",
+      "title": "Txn Prepare Duration (p50 / p95 / p99)",
+      "description": "Condition evaluation and WAL preparation while holding the write mutex (all kinds combined).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_txn_prepare_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_txn_prepare_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_txn_prepare_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }

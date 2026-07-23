@@ -3,12 +3,17 @@
   "uid": "t4-overview",
   "description": "Cluster health, write performance, replication lag, WAL/checkpoint activity, and S3 object store metrics for a T4 node or cluster.",
   "schemaVersion": 38,
-  "version": 1,
-  "tags": ["t4"],
+  "version": 2,
+  "tags": [
+    "t4"
+  ],
   "timezone": "browser",
   "graphTooltip": 1,
   "editable": true,
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "refresh": "30s",
   "fiscalYearStartMonth": 0,
   "links": [],
@@ -16,7 +21,10 @@
     "list": [
       {
         "builtIn": 1,
-        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -40,7 +48,10 @@
       },
       {
         "current": {},
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "definition": "label_values(t4_current_revision, job)",
         "hide": 0,
         "includeAll": false,
@@ -53,14 +64,33 @@
       },
       {
         "current": {},
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "definition": "label_values(t4_current_revision{job=\"$job\"}, instance)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(t4_current_revision{job=\"$job\"}, app_kubernetes_io_instance)",
+        "hide": 0,
+        "includeAll": false,
+        "name": "cluster",
+        "query": "label_values(t4_current_revision{job=\"$job\"}, app_kubernetes_io_instance)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query",
+        "label": "Cluster"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(t4_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\"}, instance)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
         "multi": true,
         "name": "instance",
-        "query": "label_values(t4_current_revision{job=\"$job\"}, instance)",
+        "query": "label_values(t4_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\"}, instance)",
         "refresh": 2,
         "sort": 1,
         "type": "query",
@@ -71,21 +101,34 @@
   "panels": [
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "title": "Cluster Health",
       "type": "row"
     },
     {
       "id": 2,
-      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
       "type": "stat",
       "title": "Leaders",
       "description": "Number of nodes reporting role=leader. Should be exactly 1.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum(t4_role{job=\"$job\", instance=~\"$instance\", role=\"leader\"})",
+          "expr": "sum(t4_role{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", role=\"leader\"})",
           "legendFormat": "leaders",
           "refId": "A"
         }
@@ -95,23 +138,67 @@
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [
-            { "type": "value", "options": { "0": { "color": "red",   "text": "NO LEADER",  "index": 0 } } },
-            { "type": "value", "options": { "1": { "color": "green", "text": "OK (1)",      "index": 1 } } },
-            { "type": "value", "options": { "2": { "color": "orange","text": "SPLIT BRAIN", "index": 2 } } }
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "NO LEADER",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "color": "green",
+                  "text": "OK (1)",
+                  "index": 1
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "2": {
+                  "color": "orange",
+                  "text": "SPLIT BRAIN",
+                  "index": 2
+                }
+              }
+            }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red",    "value": null },
-              { "color": "green",  "value": 1 },
-              { "color": "orange", "value": 2 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              },
+              {
+                "color": "orange",
+                "value": 2
+              }
             ]
           }
         }
@@ -119,14 +206,22 @@
     },
     {
       "id": 3,
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
       "type": "stat",
       "title": "Current Revision",
       "description": "Highest applied revision on this node.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "max(t4_current_revision{job=\"$job\", instance=~\"$instance\"})",
+          "expr": "max(t4_current_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
           "legendFormat": "revision",
           "refId": "A"
         }
@@ -135,26 +230,43 @@
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "center",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
           "unit": "short"
         }
       }
     },
     {
       "id": 4,
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
       "type": "stat",
       "title": "Node Roles",
       "description": "Breakdown of node roles in the cluster.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum by (role) (t4_role{job=\"$job\", instance=~\"$instance\", role!=\"\"})",
+          "expr": "sum by (role) (t4_role{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", role!=\"\"})",
           "legendFormat": "{{role}}",
           "refId": "A"
         }
@@ -164,29 +276,50 @@
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "vertical",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "value_and_name"
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
-            "steps": [{ "color": "green", "value": null }]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           }
         }
       }
     },
     {
       "id": 5,
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
       "type": "stat",
       "title": "Follower Lag (max)",
       "description": "Maximum revision lag across all connected followers.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "max(t4_follower_lag_revisions{job=\"$job\", instance=~\"$instance\"}) or vector(0)",
+          "expr": "max(t4_follower_lag_revisions{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}) or vector(0)",
           "legendFormat": "max lag",
           "refId": "A"
         }
@@ -195,19 +328,36 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "center",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green",  "value": null },
-              { "color": "yellow", "value": 100 },
-              { "color": "red",    "value": 1000 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
             ]
           }
         }
@@ -215,14 +365,22 @@
     },
     {
       "id": 6,
-      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
       "type": "stat",
       "title": "Elections (1h)",
       "description": "Leader elections won in the last hour. Elevated count indicates instability.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "increase(t4_elections_total{job=\"$job\", instance=~\"$instance\", outcome=\"won\"}[1h])",
+          "expr": "increase(t4_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"won\"}[1h])",
           "legendFormat": "won",
           "refId": "A"
         }
@@ -231,19 +389,36 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "center",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green",  "value": null },
-              { "color": "yellow", "value": 3 },
-              { "color": "red",    "value": 10 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 3
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
             ]
           }
         }
@@ -251,14 +426,22 @@
     },
     {
       "id": 7,
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
       "type": "stat",
       "title": "Follower Resyncs (1h)",
       "description": "Full follower resyncs from S3 checkpoint. Should be 0 in normal operation.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "increase(t4_follower_resyncs_total{job=\"$job\", instance=~\"$instance\"}[1h])",
+          "expr": "increase(t4_follower_resyncs_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[1h])",
           "legendFormat": "resyncs",
           "refId": "A"
         }
@@ -267,82 +450,275 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "center",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green",  "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "red",    "value": 5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           }
         }
       }
     },
     {
+      "id": 8,
+      "type": "stat",
+      "title": "Compact Revision",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(t4_compact_revision{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "WAL GC Segments (1h)",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(increase(t4_wal_gc_segments_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[1h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 50,
+      "type": "stat",
+      "title": "Auth Failures (1h)",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(increase(t4_auth_attempts_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=~\"fail|locked\"}[1h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      }
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
       "id": 10,
       "title": "Write Performance",
       "type": "row"
     },
     {
       "id": 11,
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 11
+      },
       "type": "timeseries",
       "title": "Write Throughput",
       "description": "Successful write operations per second by op type.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum by (op) (rate(t4_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "ops"
         }
       }
     },
     {
       "id": 12,
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 11
+      },
       "type": "timeseries",
       "title": "Write Error Rate",
       "description": "Write errors as a fraction of total write attempts.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum by (op) (rate(t4_write_errors_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n/ (\n  sum by (op) (rate(t4_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n  + sum by (op) (rate(t4_write_errors_total{job=\"$job\", instance=~\"$instance\"}[2m]))\n)",
+          "expr": "sum by (op) (rate(t4_write_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n/ (\n  sum by (op) (rate(t4_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n  + sum by (op) (rate(t4_write_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n)",
           "legendFormat": "error rate ({{op}})",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10,
-            "thresholdsStyle": { "mode": "line" }
+            "thresholdsStyle": {
+              "mode": "line"
+            }
           },
           "unit": "percentunit",
           "min": 0,
@@ -350,8 +726,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red",   "value": 0.01 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
             ]
           }
         }
@@ -359,66 +741,115 @@
     },
     {
       "id": 13,
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 11
+      },
       "type": "timeseries",
       "title": "Write Latency (p50 / p95 / p99)",
       "description": "WAL write latency percentiles (all op types combined).",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_write_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
           "unit": "s"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "p99" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
         ]
       }
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
       "id": 60,
-      "title": "Watch Performance",
-      "type": "row"
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "type": "row",
+      "title": "Watch Performance"
     },
     {
       "id": 61,
-      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 15 },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 20
+      },
       "type": "stat",
       "title": "Active Watches",
       "description": "Currently active watch subscriptions and distinct watched prefixes.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum(t4_watch_active{job=\"$job\", instance=~\"$instance\"})",
+          "expr": "sum(t4_watch_active{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
           "legendFormat": "watches",
           "refId": "A"
         },
         {
-          "expr": "sum(t4_watch_active_prefixes{job=\"$job\", instance=~\"$instance\"})",
+          "expr": "sum(t4_watch_active_prefixes{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
           "legendFormat": "prefixes",
           "refId": "B"
         }
@@ -427,151 +858,266 @@
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "center",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
           "unit": "short"
         }
       }
     },
     {
       "id": 62,
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 15 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 20
+      },
       "type": "timeseries",
       "title": "Watch Scan Latency (p50 / p95 / p99)",
       "description": "Latency spent scanning revision logs for watch delivery.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_watch_scan_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_watch_scan_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_watch_scan_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_watch_scan_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_watch_scan_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_watch_scan_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
           "unit": "s"
         }
       }
     },
     {
       "id": 63,
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 15 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 20
+      },
       "type": "timeseries",
       "title": "Watch Revision Span (p50 / p95 / p99)",
       "description": "Number of revisions covered by watch scan loops.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_watch_scan_revision_span_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_watch_scan_revision_span_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_watch_scan_revision_span_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_watch_scan_revision_span_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_watch_scan_revision_span_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_watch_scan_revision_span_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
           "unit": "short"
         }
       }
     },
     {
       "id": 64,
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
       "type": "timeseries",
       "title": "Watch Scan Entries",
       "description": "Revision-log entries scanned vs entries matching watch prefixes.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum by (result) (rate(t4_watch_scan_entries_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (result) (rate(t4_watch_scan_entries_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "{{result}}",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "ops"
         }
       }
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
       "id": 20,
       "title": "Replication",
       "type": "row"
     },
     {
       "id": 21,
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 37
+      },
       "type": "timeseries",
       "title": "Follower Lag",
       "description": "Revision lag per connected follower. 0 = fully caught up. Absent = no followers.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "t4_follower_lag_revisions{job=\"$job\", instance=~\"$instance\"}",
+          "expr": "t4_follower_lag_revisions{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}",
           "legendFormat": "{{follower_id}}",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "short",
           "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green",  "value": null },
-              { "color": "yellow", "value": 100 },
-              { "color": "red",    "value": 1000 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
             ]
           }
         }
@@ -579,121 +1125,307 @@
     },
     {
       "id": 22,
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 37
+      },
       "type": "timeseries",
       "title": "Forwarded Writes",
       "description": "Write operations forwarded from follower to leader per second.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum by (op) (rate(t4_forwarded_writes_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_forwarded_writes_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "forwarded ({{op}})",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "ops"
         }
       }
     },
     {
       "id": 23,
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 37
+      },
       "type": "timeseries",
       "title": "Forward Latency (p50 / p95 / p99)",
       "description": "Round-trip latency for writes forwarded from follower to leader.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_forward_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
           "unit": "s"
         }
       }
     },
     {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Election Outcomes",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(t4_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"won\"}[5m])",
+          "legendFormat": "won",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(t4_elections_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", outcome=\"lost\"}[5m])",
+          "legendFormat": "lost",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Follower Resyncs by Reason",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(t4_follower_resyncs_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
       "id": 30,
       "title": "WAL & Checkpoints",
       "type": "row"
     },
     {
       "id": 31,
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 41 },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 55
+      },
       "type": "timeseries",
       "title": "WAL Upload Rate",
       "description": "WAL segments uploaded to S3 per minute.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum(rate(t4_wal_uploads_total{job=\"$job\", instance=~\"$instance\"}[2m])) * 60",
+          "expr": "sum(rate(t4_wal_uploads_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])) * 60",
           "legendFormat": "uploads/min",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean"], "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "blue" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "short"
         }
       }
     },
     {
       "id": 32,
-      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 41 },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 55
+      },
       "type": "timeseries",
       "title": "WAL Upload Errors",
       "description": "Failed WAL segment uploads. Should be 0.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum(rate(t4_wal_upload_errors_total{job=\"$job\", instance=~\"$instance\"}[2m])) * 60",
+          "expr": "sum(rate(t4_wal_upload_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])) * 60",
           "legendFormat": "errors/min",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "red" },
-          "custom": { "lineWidth": 2, "fillOpacity": 20 },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20
+          },
           "unit": "short",
           "min": 0
         }
@@ -701,132 +1433,233 @@
     },
     {
       "id": 33,
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 41 },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 55
+      },
       "type": "timeseries",
       "title": "WAL Upload Duration (p50 / p95 / p99)",
       "description": "Time to upload a WAL segment to S3.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_wal_upload_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
           "unit": "s"
         }
       }
     },
     {
       "id": 34,
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 41 },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 55
+      },
       "type": "timeseries",
       "title": "Checkpoints Written",
       "description": "Leader checkpoints written to S3 (cumulative and rate).",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum(rate(t4_checkpoints_total{job=\"$job\", instance=~\"$instance\"}[5m])) * 3600",
+          "expr": "sum(rate(t4_checkpoints_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[5m])) * 3600",
           "legendFormat": "checkpoints/hr",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean"], "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "purple" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "short"
         }
       }
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
       "id": 40,
       "title": "Object Store (S3)",
       "type": "row"
     },
     {
       "id": 41,
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 50 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 64
+      },
       "type": "timeseries",
       "title": "S3 Operation Rate",
       "description": "Object store operations per second by op type.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", instance=~\"$instance\", result=\"success\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=\"success\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "ops"
         }
       }
     },
     {
       "id": 42,
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 50 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 64
+      },
       "type": "timeseries",
       "title": "S3 Error Rate",
       "description": "Object store errors as a fraction of total S3 operations, by op type.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", instance=~\"$instance\", result=\"error\"}[2m]))\n/ sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", instance=~\"$instance\"}[2m]))",
+          "expr": "sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\", result=\"error\"}[2m]))\n/ sum by (op) (rate(t4_object_store_ops_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10,
-            "thresholdsStyle": { "mode": "line" }
+            "thresholdsStyle": {
+              "mode": "line"
+            }
           },
           "unit": "percentunit",
           "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red",   "value": 0.01 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
             ]
           }
         }
@@ -834,41 +1667,339 @@
     },
     {
       "id": 43,
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 50 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 64
+      },
       "type": "timeseries",
       "title": "S3 Latency (p50 / p95 / p99)",
       "description": "Object store operation latency percentiles (all ops combined).",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_object_store_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
       ],
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
           "unit": "s"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "p99" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "id": 65,
+      "title": "Transactions",
+      "type": "row"
+    },
+    {
+      "id": 66,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "type": "timeseries",
+      "title": "Transaction Rate by Kind & Result",
+      "description": "Txn requests/sec by resolved write shape and result (committed/noop/error). Splits out traffic that t4_writes_total lumps as op=\"txn\".",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (kind, result) (rate(t4_txn_requests_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "legendFormat": "{{kind}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 67,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 73
+      },
+      "type": "timeseries",
+      "title": "Transaction Sub-Operation Rate",
+      "description": "Committed txn sub-operations/sec by resolved op type.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (op) (rate(t4_txn_suboperations_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 68,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 81
+      },
+      "type": "timeseries",
+      "title": "Txn Lock Wait (p50 / p95 / p99)",
+      "description": "Time spent waiting to enter the serialized write-preparation section.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_txn_lock_wait_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_txn_lock_wait_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_txn_lock_wait_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 69,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 81
+      },
+      "type": "timeseries",
+      "title": "Txn Prepare Duration (p50 / p95 / p99)",
+      "description": "Condition evaluation and WAL preparation while holding the write mutex (all kinds combined).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_txn_prepare_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_txn_prepare_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_txn_prepare_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
         ]
       }
     }
