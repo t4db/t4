@@ -62,6 +62,34 @@ func BenchmarkTxnCreate(b *testing.B) {
 	}
 }
 
+// BenchmarkTxnDelete exercises the full etcd RPC shape kube-apiserver uses:
+// compare the object's mod revision, then issue a single-key DeleteRange in
+// the successful transaction branch.
+func BenchmarkTxnDelete(b *testing.B) {
+	_, cli := benchNode(b)
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		key := fmt.Sprintf("/bench/txn-delete/%d", i)
+		putResp, err := cli.Put(ctx, key, "v")
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		resp, err := cli.Txn(ctx).
+			If(clientv3.Compare(clientv3.ModRevision(key), "=", putResp.Header.Revision)).
+			Then(clientv3.OpDelete(key)).
+			Commit()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if !resp.Succeeded {
+			b.Fatal("compare-and-delete transaction did not succeed")
+		}
+	}
+}
+
 func BenchmarkWatch(b *testing.B) {
 	_, cli := benchNode(b)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -22,16 +22,21 @@ import (
 // Re-opens the WAL with an S3 uploader, starts the peer gRPC server,
 // and launches the watchLoop. Must NOT be called with n.mu held.
 func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord) error {
-	_ = n.wal.Close()
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
+	if err := n.recoverLocalWALBeforeLeadership(walDir); err != nil {
+		return err
+	}
 
 	// Upload any local WAL segments that were not yet in S3 before taking on
 	// writes. This covers the same-node re-election case where the previous WAL
 	// had no uploader (follower WAL) or crashed before the upload completed.
 	// After this point, new leader writes are uploaded async (SegmentMaxAge).
 	upCtx, upCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	uploadLocalWALSegments(upCtx, walDir, n.cfg.ObjectStore, n.log)
+	uploadErr := uploadLocalWALSegments(upCtx, walDir, n.cfg.ObjectStore, n.log)
 	upCancel()
+	if uploadErr != nil {
+		return fmt.Errorf("t4: upload committed local WAL before leadership: %w", uploadErr)
+	}
 
 	// Replay any remote WAL entries not yet in our Pebble. A follower that wins
 	// election may be behind the former leader if the former leader committed
@@ -66,17 +71,6 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		wal.WithLogger(n.log),
 	)
 	nextSeq := n.db.Load().LastSequence()
-	if maxSeq, merr := wal.MaxSequence(walDir); maxSeq > nextSeq {
-		// MaxSequence may return a partial max with an error when one local
-		// segment is corrupt. Trust the partial value as a lower bound so the
-		// new leader cannot reuse a sequence that was already present in WAL.
-		nextSeq = maxSeq
-		if merr != nil {
-			n.log.Warnf("t4: scan local WAL sequence before leadership: %v", merr)
-		}
-	} else if merr != nil {
-		n.log.Warnf("t4: scan local WAL sequence before leadership: %v", merr)
-	}
 	if err := w2.Open(walDir, rec.Term, nextSeq+1); err != nil {
 		return fmt.Errorf("t4: open WAL as leader: %w", err)
 	}
@@ -132,6 +126,27 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	metrics.ElectionsTotal.WithLabelValues("won").Inc()
 	n.log.Infof("t4: elected leader (term=%d, peer=%s)", rec.Term, n.cfg.PeerListenAddr)
 	go n.watchLoop(bgCtx, lock, rec.Term)
+	return nil
+}
+
+// recoverLocalWALBeforeLeadership closes the follower WAL, applies every
+// committed local entry to Pebble, and proves that promotion cannot skip a WAL
+// sequence. Followers persist a committed peer batch before acknowledging it,
+// then apply it to Pebble, so WAL can legitimately be ahead after a crash.
+func (n *Node) recoverLocalWALBeforeLeadership(walDir string) error {
+	if err := n.wal.Close(); err != nil {
+		return fmt.Errorf("t4: close follower WAL before leadership: %w", err)
+	}
+	if err := n.wal.ReplayLocal(n.db.Load(), n.db.Load().LastSequence()); err != nil {
+		return fmt.Errorf("t4: replay committed local WAL before leadership: %w", err)
+	}
+	maxSeq, err := wal.MaxSequence(walDir)
+	if err != nil {
+		return fmt.Errorf("t4: scan local WAL sequence before leadership: %w", err)
+	}
+	if appliedSeq := n.db.Load().LastSequence(); maxSeq > appliedSeq {
+		return fmt.Errorf("t4: refusing leadership: local WAL sequence %d is ahead of Pebble sequence %d after replay", maxSeq, appliedSeq)
+	}
 	return nil
 }
 
@@ -565,14 +580,23 @@ func (n *Node) stepDownOnFatalCommitError() {
 // not yet present in S3. This is called when becoming leader so that local
 // entries (recovered via replayLocal) are durable in object storage before
 // followers can bootstrap.
-func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Store, log Logger) {
+func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Store, log Logger) error {
+	if store == nil {
+		return nil
+	}
 	paths, err := wal.LocalSegments(walDir)
-	if err != nil || len(paths) == 0 {
-		return
+	if err != nil {
+		return fmt.Errorf("list local WAL segments: %w", err)
+	}
+	if len(paths) == 0 {
+		return nil
 	}
 
 	// Build set of keys already in S3 to skip redundant uploads.
-	s3Keys, _ := store.List(ctx, "wal/")
+	s3Keys, err := store.List(ctx, "wal/")
+	if err != nil {
+		return fmt.Errorf("list remote WAL segments: %w", err)
+	}
 	inS3 := make(map[string]struct{}, len(s3Keys))
 	for _, k := range s3Keys {
 		inS3[k] = struct{}{}
@@ -589,9 +613,10 @@ func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Sto
 			continue // already uploaded
 		}
 		if err := up(ctx, path, objKey); err != nil {
-			log.Warnf("t4: pre-leader upload %q → %q: %v", path, objKey, err)
+			return fmt.Errorf("upload %q to %q: %w", path, objKey, err)
 		}
 	}
+	return nil
 }
 
 // ── Background checkpoint loop ────────────────────────────────────────────────

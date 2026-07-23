@@ -65,6 +65,10 @@ type Store struct {
 	nextWatchID  uint64
 	dispatchOnce sync.Once
 	dispatchWg   sync.WaitGroup
+	// watcherWake is closed and replaced when a watch registers. The dispatch
+	// loop waits on it while the hub is empty so it goes fully idle instead of
+	// scanning every commit for no subscriber.
+	watcherWake chan struct{}
 }
 
 // lockRetryTimeout is how long Open retries when another process holds the
@@ -1025,6 +1029,21 @@ func (s *Store) addWatchSubscriptionLocked(sub *watchSubscription, nextRev int64
 	sub.id = s.nextWatchID
 	sub.nextRev = nextRev
 	s.watchers[sub.id] = sub
+	// Wake an idle dispatch loop. Close-and-replace so a waiter that captured
+	// the channel before this registration observes the close.
+	if s.watcherWake != nil {
+		close(s.watcherWake)
+		s.watcherWake = nil
+	}
+}
+
+// watcherWakeChanLocked returns the current wake channel, creating it on first
+// use. Callers must hold watchHubMu.
+func (s *Store) watcherWakeChanLocked() chan struct{} {
+	if s.watcherWake == nil {
+		s.watcherWake = make(chan struct{})
+	}
+	return s.watcherWake
 }
 
 func (s *Store) removeWatchSubscription(sub *watchSubscription) {
@@ -1168,14 +1187,26 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 	ctx := context.Background()
 
 	for {
+		// While no watch is subscribed, reset the scan cursor and block until a
+		// watch registers instead of scanning every commit for no consumer. The
+		// check, reset, and wake-channel capture happen under one lock hold: a
+		// watch registers under watchHubMu, so it either predates the check
+		// (map non-empty, no wait) or closes the captured wake channel after it.
+		// A later watch replays its own requested range before joining live
+		// delivery, so skipping the intervening history here loses nothing.
 		s.watchHubMu.Lock()
-		hasWatchers := len(s.watchers) > 0
-		s.watchHubMu.Unlock()
-		if !hasWatchers {
-			// No subscriber needs the intervening history. A later historical
-			// watch replays its own requested range before joining live delivery.
+		for len(s.watchers) == 0 {
 			nextRev = atomic.LoadInt64(&s.currentRev) + 1
+			wake := s.watcherWakeChanLocked()
+			s.watchHubMu.Unlock()
+			select {
+			case <-wake:
+			case <-s.closed:
+				return
+			}
+			s.watchHubMu.Lock()
 		}
+		s.watchHubMu.Unlock()
 		if err := s.WaitForRevision(ctx, nextRev); err != nil {
 			return
 		}
@@ -1194,24 +1225,59 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 // dispatchWatchEvents fans one shared decoded batch out in memory. A slow
 // consumer cannot block other watches: when its bounded queue fills, that
 // watch is closed and can reconnect from its last delivered revision.
+//
+// PrevKV reconstruction reads the Pebble revision log, which can miss the block
+// cache and touch disk. Those reads run between two short watchHubMu holds
+// rather than under one, so a cold lookup never stalls watch registration,
+// teardown, or delivery to other watches. A watch registered after the snapshot
+// has nextRev beyond every revision in this batch (the dispatcher only reaches
+// here after scanning up to the committed revision), so it correctly receives
+// nothing from this batch and joins from the next one.
 func (s *Store) dispatchWatchEvents(events []Event) int {
+	// snap is a copy of a subscription's routing fields plus a pointer back to
+	// the subscription, taken so PrevKV disk reads below run without the lock.
+	type snap struct {
+		w          *watchSubscription
+		id         uint64
+		prefix     string
+		withPrevKV bool
+		nextRev    int64
+	}
+
+	s.watchHubMu.Lock()
+	snaps := make([]snap, 0, len(s.watchers))
+	for id, w := range s.watchers {
+		snaps = append(snaps, snap{
+			w:          w,
+			id:         id,
+			prefix:     w.prefix,
+			withPrevKV: w.withPrevKV,
+			nextRev:    w.nextRev,
+		})
+	}
+	s.watchHubMu.Unlock()
+	if len(snaps) == 0 {
+		return 0
+	}
+
+	// Build each subscriber's batch without holding the hub lock, resolving
+	// PrevKV lookups through a shared cache (this loop runs single-threaded).
 	type prevKey struct {
 		key string
 		rev int64
 	}
 	prevCache := make(map[prevKey]*KeyValue)
+	batches := make([][]Event, len(snaps))
 	matched := 0
-
-	s.watchHubMu.Lock()
-	for id, sub := range s.watchers {
+	for i, sn := range snaps {
 		var batch []Event
-		for i := range events {
-			ev := events[i]
-			if ev.KV.Revision < sub.nextRev ||
-				(sub.prefix != "" && !strings.HasPrefix(ev.KV.Key, sub.prefix)) {
+		for j := range events {
+			ev := events[j]
+			if ev.KV.Revision < sn.nextRev ||
+				(sn.prefix != "" && !strings.HasPrefix(ev.KV.Key, sn.prefix)) {
 				continue
 			}
-			if sub.withPrevKV && ev.KV.PrevRevision > 0 {
+			if sn.withPrevKV && ev.KV.PrevRevision > 0 {
 				pk := prevKey{key: ev.KV.Key, rev: ev.KV.PrevRevision}
 				prev, found := prevCache[pk]
 				if !found {
@@ -1222,15 +1288,28 @@ func (s *Store) dispatchWatchEvents(events []Event) int {
 			}
 			batch = append(batch, ev)
 		}
+		batches[i] = batch
+		matched += len(batch)
+	}
+
+	// Re-acquire only to publish batches and evict slow consumers. Skip any
+	// watch that unsubscribed while batches were being built; IDs are never
+	// reused, so an identity check reliably detects removal and prevents a
+	// send on a closed channel.
+	s.watchHubMu.Lock()
+	for i, sn := range snaps {
+		batch := batches[i]
 		if len(batch) == 0 {
 			continue
 		}
-		matched += len(batch)
+		if current, ok := s.watchers[sn.id]; !ok || current != sn.w {
+			continue
+		}
 		select {
-		case sub.live <- batch:
+		case sn.w.live <- batch:
 		default:
-			delete(s.watchers, id)
-			close(sub.live)
+			delete(s.watchers, sn.id)
+			close(sn.w.live)
 		}
 	}
 	s.watchHubMu.Unlock()
