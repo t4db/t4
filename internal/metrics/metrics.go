@@ -20,6 +20,23 @@ var (
 	// WriteDuration measures the latency of local write operations (WAL + apply).
 	WriteDuration *prometheus.HistogramVec
 
+	// TxnRequestsTotal counts transactions by resolved write shape, compare
+	// outcome, and final result. This separates Kubernetes create/update/delete
+	// traffic that otherwise all appears as op="txn" in WritesTotal.
+	TxnRequestsTotal *prometheus.CounterVec
+
+	// TxnSubOpsTotal counts committed transaction sub-operations by resolved
+	// operation type (create/update/delete).
+	TxnSubOpsTotal *prometheus.CounterVec
+
+	// TxnLockWaitDuration measures time waiting to enter the serialized write
+	// preparation section.
+	TxnLockWaitDuration prometheus.Histogram
+
+	// TxnPrepareDuration measures condition evaluation and WAL preparation while
+	// the transaction holds the write mutex, labelled by resolved write shape.
+	TxnPrepareDuration *prometheus.HistogramVec
+
 	// ForwardedWritesTotal counts writes forwarded from a follower to the leader.
 	ForwardedWritesTotal *prometheus.CounterVec
 
@@ -120,6 +137,28 @@ func Register(reg prometheus.Registerer) {
 			Help:    "Write operation duration (local execution, excluding forwarding).",
 			Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .5},
 		}, []string{"op"})
+
+		TxnRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "t4_txn_requests_total",
+			Help: "Transactions by resolved write shape, compare outcome, and result.",
+		}, []string{"kind", "compare", "result"})
+
+		TxnSubOpsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "t4_txn_suboperations_total",
+			Help: "Committed transaction sub-operations by resolved operation type.",
+		}, []string{"op"})
+
+		TxnLockWaitDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "t4_txn_lock_wait_duration_seconds",
+			Help:    "Time spent waiting for the transaction write-preparation mutex.",
+			Buckets: []float64{.00001, .00005, .0001, .0005, .001, .005, .01, .05, .1, .5},
+		})
+
+		TxnPrepareDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "t4_txn_prepare_duration_seconds",
+			Help:    "Time spent evaluating conditions and preparing a transaction under the write mutex.",
+			Buckets: []float64{.00001, .00005, .0001, .0005, .001, .005, .01, .05, .1, .5},
+		}, []string{"kind"})
 
 		ForwardedWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "t4_forwarded_writes_total",
@@ -235,6 +274,10 @@ func Register(reg prometheus.Registerer) {
 			WritesTotal,
 			WriteErrors,
 			WriteDuration,
+			TxnRequestsTotal,
+			TxnSubOpsTotal,
+			TxnLockWaitDuration,
+			TxnPrepareDuration,
 			ForwardedWritesTotal,
 			ForwardDuration,
 			CurrentRevision,

@@ -330,6 +330,7 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 	// Append calls can race with this replacement.
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	newRev := n.db.Load().CurrentRevision()
+	newSeq := n.db.Load().LastSequence()
 	_ = n.wal.Close()
 	if rerr := os.RemoveAll(walDir); rerr != nil {
 		n.log.Warnf("t4: remove old wal dir during resync: %v", rerr)
@@ -339,7 +340,7 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 		wal.WithLogger(n.log),
 	)
-	if rerr := newWal.Open(walDir, n.term, newRev+1); rerr != nil {
+	if rerr := newWal.Open(walDir, n.term, newSeq+1); rerr != nil {
 		return fmt.Errorf("open new wal after resync: %w", rerr)
 	}
 	newWal.Start(bgCtx)
@@ -347,8 +348,9 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 	n.mu.Lock()
 	n.wal = newWal
 	n.nextRev = newRev
+	n.nextSeq = newSeq
 	n.mu.Unlock()
 
-	n.log.Infof("t4: follower in-place resync complete (rev=%d term=%d)", newRev, n.term)
+	n.log.Infof("t4: follower in-place resync complete (rev=%d seq=%d term=%d)", newRev, newSeq, n.term)
 	return nil
 }

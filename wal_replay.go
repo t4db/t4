@@ -65,17 +65,17 @@ func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, after
 //
 // On success n.db and n.term are updated and the function returns true.
 // Returns (false, nil) when no restore was needed (already at or above
-// the latest checkpoint revision).
+// the latest checkpoint WAL sequence).
 func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	manifest, err := n.cp.ReadManifest(ctx, n.cfg.ObjectStore)
 	if err != nil {
 		return false, fmt.Errorf("read manifest: %w", err)
 	}
-	if manifest == nil || manifest.Revision <= n.db.Load().CurrentRevision() {
+	if manifest == nil || manifest.LastSequence <= n.db.Load().LastSequence() {
 		return false, nil // already at or above checkpoint
 	}
-	n.log.Infof("t4: node at rev=%d is behind checkpoint rev=%d — restoring in place",
-		n.db.Load().CurrentRevision(), manifest.Revision)
+	n.log.Infof("t4: node at rev=%d seq=%d is behind checkpoint rev=%d seq=%d — restoring in place",
+		n.db.Load().CurrentRevision(), n.db.Load().LastSequence(), manifest.Revision, manifest.LastSequence)
 
 	pebbleDir := filepath.Join(n.cfg.DataDir, "db")
 	tmpDir := pebbleDir + ".resync"

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -615,6 +617,95 @@ func TestWatchReplayLiveHandoffHasNoGapsOrDuplicates(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("timeout waiting for revision %d", wantRev)
 		}
+	}
+}
+
+// TestWatchRegisterIntoEmptyHubDeliversAllRevisions churns watches into a hub
+// that repeatedly empties while a commit stream runs, then checks that every
+// watch receives a contiguous run of revisions from its boundary. It exercises
+// the empty-hub reset, registration, dispatch, and slow-consumer eviction paths
+// together under -race. It does not deterministically reproduce the reset race
+// the single-lock check-and-reset guards against — that window is nanoseconds
+// wide — so correctness there rests on holding watchHubMu across the emptiness
+// check and the cursor reset in watchDispatchLoop, not on this test.
+func TestWatchRegisterIntoEmptyHubDeliversAllRevisions(t *testing.T) {
+	s := openMem(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var rev int64
+	commit := func() {
+		r := atomic.AddInt64(&rev, 1)
+		apply(t, s, createEntry(r, fmt.Sprintf("/g/%08d", r), nil))
+	}
+	commit() // seed so the first watch has a non-zero boundary
+
+	commitDone := make(chan struct{})
+	go func() {
+		defer close(commitDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			commit()
+			time.Sleep(50 * time.Microsecond)
+		}
+	}()
+
+	const (
+		registrars = 8
+		perWorker  = 400
+		readPer    = 3
+	)
+	fail := make(chan string, registrars)
+	var wg sync.WaitGroup
+	for w := 0; w < registrars; w++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for iter := 0; iter < perWorker; iter++ {
+				head := atomic.LoadInt64(&s.currentRev)
+				wctx, wcancel := context.WithTimeout(ctx, 2*time.Second)
+				ch, err := s.Watch(wctx, "/g/", head, false)
+				if err != nil {
+					wcancel()
+					return // store closing
+				}
+				want := head + 1
+				for j := 0; j < readPer; j++ {
+					select {
+					case ev, ok := <-ch:
+						if !ok {
+							fail <- fmt.Sprintf("worker %d iter %d: watch closed before revision %d", worker, iter, want)
+							wcancel()
+							return
+						}
+						if ev.KV.Revision != want {
+							fail <- fmt.Sprintf("worker %d iter %d: gap: want revision %d got %d", worker, iter, want, ev.KV.Revision)
+							wcancel()
+							return
+						}
+						want++
+					case <-wctx.Done():
+						fail <- fmt.Sprintf("worker %d iter %d: timeout waiting for revision %d", worker, iter, want)
+						wcancel()
+						return
+					}
+				}
+				wcancel()
+			}
+		}(w)
+	}
+
+	wg.Wait()
+	cancel()
+	<-commitDone
+	select {
+	case msg := <-fail:
+		t.Fatal(msg)
+	default:
 	}
 }
 

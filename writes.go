@@ -377,14 +377,22 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (TxnResponse, error) {
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
 	start := time.Now()
+	lockStart := time.Now()
 	n.mu.Lock()
+	lockWait := time.Since(lockStart)
 	if n.closed.Load() {
 		n.mu.Unlock()
 		return TxnResponse{}, ErrClosed
 	}
-	e, succeeded, deletedKeys, err := n.prepareTxn(req)
+	prepareStart := time.Now()
+	e, succeeded, deletedKeys, stats, err := n.prepareTxn(req)
+	prepareDuration := time.Since(prepareStart)
+	kind := stats.kind()
+	compare := txnCompareLabel(succeeded)
 	if err != nil {
 		n.mu.Unlock()
+		observeTxnPreparation(lockWait, prepareDuration, kind)
+		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
 		return TxnResponse{}, err
 	}
 	if e.Op == 0 {
@@ -393,16 +401,78 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (TxnResponse, error) {
 		// the commit loop has fsynced if concurrent writes are in flight.
 		curRev := n.db.Load().CurrentRevision()
 		n.mu.Unlock()
+		observeTxnPreparation(lockWait, prepareDuration, kind)
+		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
 		return TxnResponse{Succeeded: succeeded, Revision: curRev}, nil
 	}
 	wr := newWriteReq(ctx, e)
 	n.writeC <- wr
 	n.mu.Unlock()
+	observeTxnPreparation(lockWait, prepareDuration, kind)
 	rev, err := n.await(ctx, wr, "txn", start, "", e.Revision)
 	if err != nil {
+		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
 		return TxnResponse{}, err
 	}
+	metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "committed").Inc()
+	stats.observeCommitted()
 	return TxnResponse{Succeeded: succeeded, Revision: rev, DeletedKeys: deletedKeys}, nil
+}
+
+type txnStats struct {
+	creates int
+	updates int
+	deletes int
+}
+
+func (s txnStats) kind() string {
+	types := 0
+	if s.creates > 0 {
+		types++
+	}
+	if s.updates > 0 {
+		types++
+	}
+	if s.deletes > 0 {
+		types++
+	}
+	if types > 1 {
+		return "mixed"
+	}
+	switch {
+	case s.creates > 0:
+		return "create"
+	case s.updates > 0:
+		return "update"
+	case s.deletes > 0:
+		return "delete"
+	default:
+		return "none"
+	}
+}
+
+func (s txnStats) observeCommitted() {
+	if s.creates > 0 {
+		metrics.TxnSubOpsTotal.WithLabelValues("create").Add(float64(s.creates))
+	}
+	if s.updates > 0 {
+		metrics.TxnSubOpsTotal.WithLabelValues("update").Add(float64(s.updates))
+	}
+	if s.deletes > 0 {
+		metrics.TxnSubOpsTotal.WithLabelValues("delete").Add(float64(s.deletes))
+	}
+}
+
+func observeTxnPreparation(lockWait, prepareDuration time.Duration, kind string) {
+	metrics.TxnLockWaitDuration.Observe(lockWait.Seconds())
+	metrics.TxnPrepareDuration.WithLabelValues(kind).Observe(prepareDuration.Seconds())
+}
+
+func txnCompareLabel(succeeded bool) string {
+	if succeeded {
+		return "success"
+	}
+	return "failure"
 }
 
 // txnToForwardRequest converts a TxnRequest into a peer ForwardRequest for
@@ -491,13 +561,19 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 // selected branch. Must be called under n.mu.
 //
 // Returns a zero-valued Entry (Op==0) when the branch has no write ops.
-func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{}, error) {
+func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{}, txnStats, error) {
 	// Evaluate conditions.
 	succeeded := true
+	readCache := make(map[string]*istore.KeyValue, len(req.Conditions))
 	for _, cond := range req.Conditions {
-		existing, err := n.readKey(cond.Key)
-		if err != nil {
-			return wal.Entry{}, false, nil, err
+		existing, ok := readCache[cond.Key]
+		if !ok {
+			var err error
+			existing, err = n.readKey(cond.Key)
+			if err != nil {
+				return wal.Entry{}, false, nil, txnStats{}, err
+			}
+			readCache[cond.Key] = existing
 		}
 		if !txnCondMatches(cond, existing) {
 			succeeded = false
@@ -510,7 +586,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		ops = req.Failure
 	}
 	if len(ops) == 0 {
-		return wal.Entry{}, succeeded, nil, nil
+		return wal.Entry{}, succeeded, nil, txnStats{}, nil
 	}
 
 	// Pre-resolve all ops (read current state) before incrementing nextRev,
@@ -527,9 +603,14 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 	}
 	resolved := make([]resolvedOp, 0, len(ops))
 	for _, op := range ops {
-		existing, err := n.readKey(op.Key)
-		if err != nil {
-			return wal.Entry{}, false, nil, err
+		existing, ok := readCache[op.Key]
+		if !ok {
+			var err error
+			existing, err = n.readKey(op.Key)
+			if err != nil {
+				return wal.Entry{}, false, nil, txnStats{}, err
+			}
+			readCache[op.Key] = existing
 		}
 		switch op.Type {
 		case TxnPut:
@@ -569,17 +650,17 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		}
 	}
 	if len(active) == 0 {
-		return wal.Entry{}, succeeded, nil, nil
+		return wal.Entry{}, succeeded, nil, txnStats{}, nil
 	}
 
 	if len(active) > 65535 {
-		return wal.Entry{}, false, nil, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
+		return wal.Entry{}, false, nil, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
 	}
 
 	seen := make(map[string]struct{}, len(active))
 	for _, r := range active {
 		if _, dup := seen[r.key]; dup {
-			return wal.Entry{}, false, nil, fmt.Errorf("txn: duplicate key %q in branch", r.key)
+			return wal.Entry{}, false, nil, txnStats{}, fmt.Errorf("txn: duplicate key %q in branch", r.key)
 		}
 		seen[r.key] = struct{}{}
 	}
@@ -590,6 +671,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 	seq := n.nextSeq
 
 	var deletedKeys map[string]struct{}
+	stats := txnStats{}
 	subOps := make([]wal.TxnSubOp, len(active))
 	for i, r := range active {
 		cr := r.createRevision
@@ -601,12 +683,18 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 			CreateRevision: cr, PrevRevision: r.prevRevision, Version: r.version,
 		}
 		if r.walOp == wal.OpDelete {
+			stats.deletes++
 			n.pending[r.key] = pendingKV{rev: newRev, deleted: true}
 			if deletedKeys == nil {
 				deletedKeys = make(map[string]struct{})
 			}
 			deletedKeys[r.key] = struct{}{}
 		} else {
+			if r.walOp == wal.OpCreate {
+				stats.creates++
+			} else {
+				stats.updates++
+			}
 			n.pending[r.key] = pendingKV{
 				rev: newRev,
 				kv: &istore.KeyValue{
@@ -624,7 +712,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		Term:     n.term,
 		Op:       wal.OpTxn,
 		Value:    wal.EncodeTxnOps(subOps),
-	}, succeeded, deletedKeys, nil
+	}, succeeded, deletedKeys, stats, nil
 }
 
 func opLabel(op wal.Op) string {

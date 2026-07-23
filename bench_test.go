@@ -106,6 +106,104 @@ func BenchmarkDelete(b *testing.B) {
 	}
 }
 
+// BenchmarkTxnDelete measures the compare-and-delete transaction used by
+// kube-apiserver when deleting an object. The setup Put is intentionally not
+// timed so this can be compared directly with BenchmarkDelete.
+func BenchmarkTxnDelete(b *testing.B) {
+	n := openBenchNode(b)
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		key := fmt.Sprintf("/bench/txn-del/%d", i)
+		rev, err := n.Put(ctx, key, []byte("v"), 0)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		resp, err := n.Txn(ctx, t4.TxnRequest{
+			Conditions: []t4.TxnCondition{{
+				Key: key, Target: t4.TxnCondMod,
+				Result: t4.TxnCondEqual, ModRevision: rev,
+			}},
+			Success: []t4.TxnOp{{Type: t4.TxnDelete, Key: key}},
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if !resp.Succeeded {
+			b.Fatal("compare-and-delete transaction did not succeed")
+		}
+	}
+}
+
+func seedDeleteBenchmark(b *testing.B, n *t4.Node, prefix string) ([]string, []int64) {
+	b.Helper()
+	ctx := context.Background()
+	keys := make([]string, b.N)
+	revisions := make([]int64, b.N)
+	const batchSize = 1000
+	for start := 0; start < b.N; start += batchSize {
+		end := min(start+batchSize, b.N)
+		ops := make([]t4.TxnOp, 0, end-start)
+		for i := start; i < end; i++ {
+			keys[i] = fmt.Sprintf("%s/%d", prefix, i)
+			ops = append(ops, t4.TxnOp{Type: t4.TxnPut, Key: keys[i], Value: []byte("v")})
+		}
+		resp, err := n.Txn(ctx, t4.TxnRequest{Success: ops})
+		if err != nil {
+			b.Fatal(err)
+		}
+		for i := start; i < end; i++ {
+			revisions[i] = resp.Revision
+		}
+	}
+	return keys, revisions
+}
+
+func BenchmarkDeleteParallel(b *testing.B) {
+	n := openBenchNode(b)
+	ctx := context.Background()
+	keys, _ := seedDeleteBenchmark(b, n, "/bench/parallel-del")
+	var next atomic.Int64
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			i := int(next.Add(1) - 1)
+			if _, err := n.Delete(ctx, keys[i]); err != nil {
+				b.Error(err)
+			}
+		}
+	})
+}
+
+func BenchmarkTxnDeleteParallel(b *testing.B) {
+	n := openBenchNode(b)
+	ctx := context.Background()
+	keys, revisions := seedDeleteBenchmark(b, n, "/bench/parallel-txn-del")
+	var next atomic.Int64
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			i := int(next.Add(1) - 1)
+			resp, err := n.Txn(ctx, t4.TxnRequest{
+				Conditions: []t4.TxnCondition{{
+					Key: keys[i], Target: t4.TxnCondMod,
+					Result: t4.TxnCondEqual, ModRevision: revisions[i],
+				}},
+				Success: []t4.TxnOp{{Type: t4.TxnDelete, Key: keys[i]}},
+			})
+			if err != nil {
+				b.Error(err)
+				continue
+			}
+			if !resp.Succeeded {
+				b.Error("compare-and-delete transaction did not succeed")
+			}
+		}
+	})
+}
+
 func BenchmarkList(b *testing.B) {
 	n := openBenchNode(b)
 	ctx := context.Background()
