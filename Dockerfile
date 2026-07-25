@@ -33,6 +33,8 @@ RUN apk add --no-cache ca-certificates \
  && addgroup -g 65532 nonroot \
  && adduser  -u 65532 -G nonroot -s /sbin/nologin -D nonroot
 
+RUN mkdir -p /var/lib/t4 && chown 65532:65532 /var/lib/t4
+
 USER nonroot
 
 COPY --from=builder /t4 /t4
