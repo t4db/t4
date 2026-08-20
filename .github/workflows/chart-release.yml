@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
 
       - name: Extract versions from tag and git
         # Tag format: chart/v1.2.3  →  CHART_VERSION=1.2.3
