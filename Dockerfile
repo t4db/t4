@@ -25,7 +25,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # Alpine is used instead of distroless because the Helm chart builds the
 # command-line dynamically (--advertise-peer uses $MY_POD_NAME) via /bin/sh.
 # The binary is statically linked (CGO_ENABLED=0) so it runs without libc.
-FROM alpine:3.21
+FROM alpine:3.24
 
 # ca-certificates is required for TLS connections to S3 and other HTTPS
 # endpoints. addgroup/adduser mirror the distroless nonroot UID (65532).
