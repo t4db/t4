@@ -1154,6 +1154,11 @@ func WithPrevKV() WatchOption {
 
 // Watch streams prefix-matching events using etcd revision semantics:
 // startRev=0 means "from now"; startRev=N means replay from revision N (inclusive).
+//
+// Compaction boundary: etcd guarantees that any revision >= the compact
+// revision is watchable, so only startRev strictly below CompactRevision is
+// rejected with ErrCompacted. Events at the compact revision itself survive
+// compaction (see internal/store.applyCompact) and are replayed.
 func (n *Node) Watch(ctx context.Context, prefix string, startRev int64, opts ...WatchOption) (<-chan Event, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
@@ -1167,7 +1172,7 @@ func (n *Node) Watch(ctx context.Context, prefix string, startRev int64, opts ..
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if startRev > 0 && startRev <= n.db.Load().CompactRevision() {
+	if startRev > 0 && startRev < n.db.Load().CompactRevision() {
 		return nil, ErrCompacted
 	}
 	// internal/store.Watch uses last-seen revision semantics (start at rev+1),

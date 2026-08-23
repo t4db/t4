@@ -461,9 +461,11 @@ func TestWatchKubeLikeCompactionRecovery(t *testing.T) {
 	}
 
 	// Emulate an apiserver resuming from stale list RV: it watches from rv+1.
-	// Choose staleListRV=externalCompactRev-1 so watch starts at the compacted revision.
+	// Choose staleListRV=externalCompactRev-2 so the watch starts strictly
+	// below the compact revision. Starting exactly at the compact revision is
+	// legal per the etcd contract and is covered by TestWatchAtCompactRevision.
 	externalCompactRev := compactRev + 1
-	staleListRV := externalCompactRev - 1
+	staleListRV := externalCompactRev - 2
 	if staleListRV < 1 {
 		t.Fatalf("unexpected staleListRV=%d", staleListRV)
 	}
@@ -544,6 +546,73 @@ func TestWatchKubeLikeCompactionRecovery(t *testing.T) {
 
 // newWatchNode opens a t4.Node and an etcd client. Returns both so tests
 // can write to the node directly.
+// TestWatchAtCompactRevision pins the etcd compaction contract: a watch
+// starting exactly at the compact revision must be served (not canceled), and
+// must replay the event recorded at that revision. Only revisions strictly
+// below the compact revision are unwatchable.
+func TestWatchAtCompactRevision(t *testing.T) {
+	node, cli := newWatchNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const key = "/registry/pods/default/p1"
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if _, err := node.Put(ctx, key, []byte(v), 0); err != nil {
+			t.Fatalf("Put(%s): %v", v, err)
+		}
+	}
+
+	// Compact at the current revision; its wire form is +1.
+	internalCompactRev := node.CurrentRevision()
+	if err := node.Compact(ctx, internalCompactRev); err != nil {
+		t.Fatalf("Compact(%d): %v", internalCompactRev, err)
+	}
+	compactRev := internalCompactRev + 1
+
+	wctx, wcancel := context.WithCancel(ctx)
+	defer wcancel()
+	wch := cli.Watch(wctx, key, clientv3.WithRev(compactRev))
+	select {
+	case wr, ok := <-wch:
+		if !ok {
+			t.Fatal("watch channel closed at compact revision")
+		}
+		if err := wr.Err(); err != nil {
+			t.Fatalf("watch at compact revision: %v", err)
+		}
+		if wr.Canceled {
+			t.Fatalf("watch at compact revision canceled (compactRev=%d)", wr.CompactRevision)
+		}
+		if len(wr.Events) == 0 {
+			t.Fatal("watch at compact revision replayed no events")
+		}
+		if got := wr.Events[0].Kv.ModRevision; got != compactRev {
+			t.Errorf("replayed event: want ModRevision %d, got %d", compactRev, got)
+		}
+		if got := string(wr.Events[0].Kv.Value); got != "v3" {
+			t.Errorf("replayed event value: want v3, got %q", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for watch at compact revision")
+	}
+
+	// One below the compact revision stays unwatchable.
+	scctx, sccancel := context.WithCancel(ctx)
+	defer sccancel()
+	stale := cli.Watch(scctx, key, clientv3.WithRev(compactRev-1))
+	select {
+	case wr, ok := <-stale:
+		if !ok {
+			t.Fatal("stale watch channel closed without compacted signal")
+		}
+		if wr.Err() == nil && !wr.Canceled {
+			t.Fatalf("watch below compact revision: want compacted, got %+v", wr)
+		}
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for compacted signal below compact revision")
+	}
+}
+
 func newWatchNode(t *testing.T) (*t4.Node, *clientv3.Client) {
 	t.Helper()
 	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})

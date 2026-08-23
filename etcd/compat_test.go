@@ -262,9 +262,9 @@ func TestCompatKVDeleteMissing(t *testing.T) {
 
 // ── KV: Compact ───────────────────────────────────────────────────────────────
 
-// TestCompatKVCompactError verifies that compacting and then trying to Get
-// (or Watch) at the compacted revision returns an appropriate error
-// (mirrors TestKVCompactError / TestKVCompact).
+// TestCompatKVCompactError verifies the compaction watch boundary: a watch
+// below the compact revision fails with ErrCompacted, while a watch at the
+// compact revision itself is served (mirrors TestKVCompactError / TestKVCompact).
 func TestCompatKVCompactError(t *testing.T) {
 	node, cli := newCompatNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -272,23 +272,46 @@ func TestCompatKVCompactError(t *testing.T) {
 
 	// Write some history.
 	r1, _ := cli.Put(ctx, "/compat/compact/k", "v1")
-	cli.Put(ctx, "/compat/compact/k", "v2")
-	compactRev := r1.Header.Revision
+	r2, _ := cli.Put(ctx, "/compat/compact/k", "v2")
+	_, _ = cli.Put(ctx, "/compat/compact/k", "v3")
+	staleRev := r1.Header.Revision
+	compactRev := r2.Header.Revision
 
+	// node.Compact takes the internal revision; the wire revision is +1.
 	if err := node.Compact(ctx, compactRev-1); err != nil {
 		t.Fatalf("Compact(%d): %v", compactRev, err)
 	}
 
-	// A watch starting at the compacted revision must fail with ErrCompacted.
-	wch := cli.Watch(ctx, "/compat/compact/k", clientv3.WithRev(compactRev))
+	// A watch starting below the compact revision must fail with ErrCompacted.
+	wch := cli.Watch(ctx, "/compat/compact/k", clientv3.WithRev(staleRev))
 	select {
 	case wr := <-wch:
 		if wr.Err() == nil {
-			t.Fatal("expected ErrCompacted on watch at compacted revision")
+			t.Fatal("expected ErrCompacted on watch below compacted revision")
 		}
 		// etcd clients surface this as rpctypes.ErrCompacted; just check non-nil.
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for compacted watch error")
+	}
+
+	// A watch at the compact revision is required to work and to replay the
+	// event recorded at that revision.
+	wctx, wcancel := context.WithCancel(ctx)
+	defer wcancel()
+	wch = cli.Watch(wctx, "/compat/compact/k", clientv3.WithRev(compactRev))
+	select {
+	case wr := <-wch:
+		if err := wr.Err(); err != nil {
+			t.Fatalf("watch at compact revision: %v", err)
+		}
+		if len(wr.Events) == 0 {
+			t.Fatal("watch at compact revision: no events replayed")
+		}
+		if got := wr.Events[0].Kv.ModRevision; got != compactRev {
+			t.Errorf("first replayed event: want ModRevision %d, got %d", compactRev, got)
+		}
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for watch at compact revision")
 	}
 }
 
