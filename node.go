@@ -1167,7 +1167,7 @@ func (n *Node) Watch(ctx context.Context, prefix string, startRev int64, opts ..
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if startRev > 0 && startRev <= n.db.Load().CompactRevision() {
+	if startRev > 0 && startRev < n.db.Load().CompactRevision() {
 		return nil, ErrCompacted
 	}
 	// internal/store.Watch uses last-seen revision semantics (start at rev+1),
