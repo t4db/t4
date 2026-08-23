@@ -679,9 +679,8 @@ func (s *Store) resolveReadRevision(revision int64) (int64, error) {
 		return currentRev, nil
 	}
 	// etcd convention: Compact(N) preserves data at rev=N; only reads
-	// strictly below N are rejected. (Distinct from the Watch path, where
-	// startRev == compactRev is also rejected — events at and below
-	// compactRev are not retained.)
+	// strictly below N are rejected. The Watch path uses the same boundary:
+	// events at rev=N survive compaction and remain replayable.
 	if compactRev := atomic.LoadInt64(&s.compactRev); compactRev > 0 && revision < compactRev {
 		return 0, ErrCompacted
 	}

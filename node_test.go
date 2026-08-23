@@ -451,8 +451,14 @@ func TestNodeAutoCompactTimeWindow(t *testing.T) {
 
 	wctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	if _, err := n.Watch(wctx, "k", compactRev); !errors.Is(err, t4.ErrCompacted) {
-		t.Fatalf("Watch at compact revision: got %v, want ErrCompacted", err)
+	// The compact revision itself stays watchable (etcd contract).
+	if _, err := n.Watch(wctx, "k", compactRev); err != nil {
+		t.Fatalf("Watch at compact revision: got %v, want nil", err)
+	}
+	if compactRev > 1 {
+		if _, err := n.Watch(wctx, "k", compactRev-1); !errors.Is(err, t4.ErrCompacted) {
+			t.Fatalf("Watch below compact revision: got %v, want ErrCompacted", err)
+		}
 	}
 }
 
@@ -570,7 +576,7 @@ func TestNodeFlushAfterCompactDoesNotReuseWALSequence(t *testing.T) {
 	}
 }
 
-func TestWatchCompactedRevisionReturnsError(t *testing.T) {
+func TestWatchCompactionBoundary(t *testing.T) {
 	n := openNode(t)
 	c := ctx(t)
 
@@ -589,10 +595,22 @@ func TestWatchCompactedRevisionReturnsError(t *testing.T) {
 		t.Errorf("Watch from deeply compacted rev: want ErrCompacted, got %v", err)
 	}
 
-	// startRev=3 is the compact boundary itself; etcd semantics require ErrCompacted.
-	_, err = n.Watch(c, "k", 3)
-	if !errors.Is(err, t4.ErrCompacted) {
-		t.Errorf("Watch from compact watermark (startRev=compactRev): want ErrCompacted, got %v", err)
+	// startRev=3 is the compact boundary itself; etcd requires it to stay
+	// watchable, and the event at rev 3 must still be replayed.
+	ch3, err := n.Watch(c, "k", 3)
+	if err != nil {
+		t.Fatalf("Watch from compact watermark (startRev=compactRev): want nil, got %v", err)
+	}
+	select {
+	case ev, ok := <-ch3:
+		if !ok {
+			t.Fatalf("watch channel closed before replaying rev 3")
+		}
+		if ev.KV == nil || ev.KV.Revision != 3 {
+			t.Errorf("replayed event at compact watermark: want rev 3, got %+v", ev.KV)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("timeout waiting for replay of rev 3")
 	}
 
 	// startRev=4 (above compact boundary) is always fine.
