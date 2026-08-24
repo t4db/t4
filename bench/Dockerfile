@@ -1,6 +1,6 @@
 # Builds the t4bench binary from the repo root.
 # Run: docker build -f bench/Dockerfile -t t4bench .
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
