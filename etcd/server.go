@@ -38,6 +38,12 @@ const (
 
 // Server implements the etcd v3 gRPC protocol on top of a t4 Node.
 type Server struct {
+	etcdserverpb.UnimplementedKVServer
+	etcdserverpb.UnimplementedWatchServer
+	etcdserverpb.UnimplementedLeaseServer
+	etcdserverpb.UnimplementedClusterServer
+	etcdserverpb.UnimplementedMaintenanceServer
+
 	node          *t4.Node
 	authStore     *auth.Store
 	tokens        *auth.TokenStore
