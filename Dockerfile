@@ -1,6 +1,6 @@
 # Builds the t4 server binary.
 # Run: docker build -t t4 .
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./

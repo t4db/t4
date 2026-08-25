@@ -1,5 +1,5 @@
 # ── Stage 1: build the t4 binary ─────────────────────────────────────────
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./

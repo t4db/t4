@@ -2,6 +2,7 @@
 package testserver
 
 import (
+	"context"
 	"net"
 	"net/url"
 	"os"
@@ -16,7 +17,6 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
-	"google.golang.org/grpc"
 	storagetesting "k8s.io/apiserver/pkg/storage/testing"
 )
 
@@ -28,7 +28,6 @@ func NewTestConfig(t testing.TB) *embed.Config {
 	cfg := embed.NewConfig()
 	cfg.UnsafeNoFsync = true
 	cfg.WatchProgressNotifyInterval = time.Second
-	cfg.ExperimentalWatchProgressNotifyInterval = time.Second
 
 	clientPort, peerPort := freePorts(t, 2)
 	clientURL := url.URL{Scheme: "http", Host: net.JoinHostPort("localhost", strconv.Itoa(clientPort))}
@@ -67,12 +66,12 @@ func RunEtcd(t testing.TB, cfg *embed.Config) *kubernetes.Client {
 		TLS:         tlsConfig,
 		Endpoints:   clientEndpoints(cfg),
 		DialTimeout: 10 * time.Second,
-		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 		Logger:      zaptest.NewLogger(t, zaptest.Level(zapcore.ErrorLevel)).Named("t4-etcd-client"),
 	})
 	if err != nil {
 		t.Fatalf("etcd client: %v", err)
 	}
+	waitReady(t, client)
 	client.KV = storagetesting.NewKVRecorder(client.KV)
 	client.Kubernetes = storagetesting.NewKubernetesRecorder(client.Kubernetes)
 	t.Cleanup(func() {
@@ -80,6 +79,28 @@ func RunEtcd(t testing.TB, cfg *embed.Config) *kubernetes.Client {
 		stopT4(t, cmd)
 	})
 	return client
+}
+
+// waitReady blocks until t4 answers a request. grpc.WithBlock() is a no-op for
+// clients built with grpc.NewClient (which clientv3 uses), so clientv3.New
+// returns before the connection is up: without this, the first RPC of a test
+// races t4's startup and can outlive short test deadlines.
+func waitReady(t testing.TB, client *kubernetes.Client) {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := client.KV.Get(ctx, "/t4-readiness-probe")
+		cancel()
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("t4 not ready: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func startT4(t testing.TB, cfg *embed.Config) *exec.Cmd {
