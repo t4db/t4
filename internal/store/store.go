@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -110,6 +111,19 @@ func sharedBlockCache() *pebble.Cache {
 	return blockCache
 }
 
+// maxCompactions bounds Pebble's compaction concurrency: enough to keep up
+// with a sustained write stream, never more than half the machine.
+func maxCompactions() int {
+	n := runtime.GOMAXPROCS(0) / 2
+	if n < 2 {
+		return 2
+	}
+	if n > 4 {
+		return 4
+	}
+	return n
+}
+
 // defaultPebbleOptions returns the Pebble configuration T4 opens with.
 //
 // A zero pebble.Options is not a reasonable configuration for this workload.
@@ -125,6 +139,24 @@ func sharedBlockCache() *pebble.Cache {
 func defaultPebbleOptions() *pebble.Options {
 	opts := &pebble.Options{
 		Cache: sharedBlockCache(),
+
+		// Pebble's 4 MiB memtable holds only ~1000 Kubernetes-sized values, so
+		// a write-heavy workload flushes ~10 times a second and hands the
+		// compactor a steady stream of tiny L0 files. Profiling attributed
+		// ~25-30% of CPU to compaction at 4 KiB values. A larger memtable cuts
+		// the flush rate proportionally and produces fewer, larger SSTs.
+		MemTableSize: 32 << 20,
+
+		// With a 32 MiB memtable, the default threshold of 2 stalls writes
+		// after 64 MiB in flight. Allowing four absorbs a flush that is slower
+		// than the incoming write rate instead of stopping the commit loop.
+		MemTableStopWritesThreshold: 4,
+
+		// Pebble defaults to a single compaction goroutine, which cannot keep
+		// pace with a sustained write stream and eventually backs up L0 until
+		// writes stop entirely. Scale with the machine, but stay bounded so an
+		// embedded T4 does not take over its host process.
+		MaxConcurrentCompactions: func() int { return maxCompactions() },
 	}
 	opts.EnsureDefaults()
 	for i := range opts.Levels {
