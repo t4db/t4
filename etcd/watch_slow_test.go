@@ -34,7 +34,7 @@ func TestDrainWatchSlowWatcherCancellation(t *testing.T) {
 	wctx, wcancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		srv.drainWatch(wctx, wcancel, 42, false, false, events, func(string) bool { return true }, sendCh)
+		srv.drainWatch(wctx, 42, testSubscription(wcancel, events), sendCh)
 		close(done)
 	}()
 
@@ -104,7 +104,7 @@ func TestDrainWatchTimeoutDisabled(t *testing.T) {
 	wctx, wcancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		srv.drainWatch(wctx, wcancel, 1, false, false, events, func(string) bool { return true }, sendCh)
+		srv.drainWatch(wctx, 1, testSubscription(wcancel, events), sendCh)
 		close(done)
 	}()
 
@@ -126,5 +126,17 @@ func TestDrainWatchTimeoutDisabled(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("drainWatch did not exit after events channel closed")
+	}
+}
+
+// testSubscription builds the minimal watchSubscription drainWatch needs when
+// it is driven directly, without a gRPC stream: no filtering, no fragmentation,
+// no periodic progress.
+func testSubscription(cancel context.CancelFunc, events <-chan t4.Event) *watchSubscription {
+	return &watchSubscription{
+		events:      events,
+		match:       func(string) bool { return true },
+		cancel:      cancel,
+		progressReq: make(chan struct{}, 1),
 	}
 }

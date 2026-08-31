@@ -62,12 +62,12 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 		}
 	}()
 
-	var watches sync.Map // map[int64]context.CancelFunc
+	var watches sync.Map // map[int64]*watchSubscription
 	var nextID int64 = 1
 
 	defer func() {
 		watches.Range(func(_, v any) bool {
-			v.(context.CancelFunc)()
+			v.(*watchSubscription).cancel()
 			return true
 		})
 	}()
@@ -123,11 +123,12 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 				continue
 			}
 
-			watches.Store(id, context.CancelFunc(cancel))
+			sub.cancel = cancel
+			watches.Store(id, sub)
 
 			select {
 			case sendCh <- []*etcdserverpb.WatchResponse{{Header: s.header(), WatchId: id, Created: true}}:
-				go s.drainWatch(wctx, cancel, id, sub.progressNotify, sub.fragment, sub.events, sub.match, sendCh)
+				go s.drainWatch(wctx, id, sub, sendCh)
 			case <-ctx.Done():
 				cancel()
 				return nil
@@ -135,8 +136,8 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 
 		case *etcdserverpb.WatchRequest_CancelRequest:
 			id := v.CancelRequest.WatchId
-			if c, ok := watches.LoadAndDelete(id); ok {
-				c.(context.CancelFunc)()
+			if w, ok := watches.LoadAndDelete(id); ok {
+				w.(*watchSubscription).cancel()
 				select {
 				case sendCh <- []*etcdserverpb.WatchResponse{{Header: s.header(), WatchId: id, Canceled: true}}:
 				case <-ctx.Done():
@@ -144,12 +145,17 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 				}
 			}
 		case *etcdserverpb.WatchRequest_ProgressRequest:
-			watches.Range(func(k, _ any) bool {
-				select {
-				case sendCh <- []*etcdserverpb.WatchResponse{{Header: s.header(), WatchId: k.(int64)}}:
-				case <-ctx.Done():
-					return false
-				}
+			// Ask each drain to emit the notification rather than answering
+			// from here. The revision reported must be the one that watch has
+			// actually delivered, which only its drain goroutine knows;
+			// answering with the live node revision would let apiserver
+			// advance its watchCache past events still queued for delivery.
+			// This is the same invariant the periodic progress ticker holds,
+			// and the guarantee kube-apiserver's consistent-read-from-cache
+			// path is built on: it asks for progress, then serves LISTs from
+			// cache at the revision we report.
+			watches.Range(func(_, v any) bool {
+				v.(*watchSubscription).requestProgress()
 				return true
 			})
 		}
@@ -161,6 +167,27 @@ type watchSubscription struct {
 	match          func(string) bool
 	progressNotify bool
 	fragment       bool
+
+	// cancel tears down the drain goroutine and the upstream Node.Watch.
+	// Set by Watch once the subscription is registered on the stream.
+	cancel context.CancelFunc
+
+	// progressReq carries on-demand progress requests from the stream's
+	// receive loop to the drain goroutine. Depth 1: a request already
+	// pending covers any concurrent one, so requestProgress never blocks
+	// the receive loop behind a slow watch.
+	progressReq chan struct{}
+
+	// startRev is the revision this watch is caught up through before any
+	// event is delivered — the seed for the drain's progress accounting.
+	startRev int64
+}
+
+func (w *watchSubscription) requestProgress() {
+	select {
+	case w.progressReq <- struct{}{}:
+	default:
+	}
 }
 
 // subscribeWatch subscribes to t4.Node.Watch synchronously. Subscribe errors
@@ -168,11 +195,23 @@ type watchSubscription struct {
 // registered on the etcd stream.
 func (s *Server) subscribeWatch(wctx context.Context, cr *etcdserverpb.WatchCreateRequest) (*watchSubscription, error) {
 	scanPrefix, match := watchScan(cr)
+
+	// Sample the revision this watch starts caught up through *before*
+	// subscribing. A replay watch (StartRevision > 0) has delivered nothing
+	// below its start point; a live watch begins after the current revision.
+	// Sampling first means a commit racing the subscribe is under-reported
+	// rather than claimed as delivered — the safe direction.
+	startRev := fromEtcdRevision(cr.StartRevision)
+	lastRev := startRev - 1
+	if startRev == 0 {
+		lastRev = s.node.CurrentRevision()
+	}
+
 	var watchOpts []t4.WatchOption
 	if cr.PrevKv {
 		watchOpts = append(watchOpts, t4.WithPrevKV())
 	}
-	events, err := s.node.Watch(wctx, scanPrefix, fromEtcdRevision(cr.StartRevision), watchOpts...)
+	events, err := s.node.Watch(wctx, scanPrefix, startRev, watchOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +220,8 @@ func (s *Server) subscribeWatch(wctx context.Context, cr *etcdserverpb.WatchCrea
 		match:          match,
 		progressNotify: cr.ProgressNotify,
 		fragment:       cr.Fragment,
+		progressReq:    make(chan struct{}, 1),
+		startRev:       lastRev,
 	}, nil
 }
 
@@ -317,17 +358,18 @@ func (s *Server) sendOrCancelSlow(wctx context.Context, sendCh chan<- []*etcdser
 // drainWatch reads events, coalesces them into a single WatchResponse per
 // burst, and forwards through sendCh until wctx is done or events closes.
 //
-// wcancel is the per-watch context cancel; drainWatch calls it on exit so the
-// upstream Node.Watch goroutine (sitting on a blocked channel send) is
-// released along with this drain.
+// drainWatch calls sub.cancel on exit so the upstream Node.Watch goroutine
+// (sitting on a blocked channel send) is released along with this drain.
 //
-// fragment mirrors WatchCreateRequest.Fragment: when true and a flush would
-// exceed watchFragmentBytes, the batch is split into multiple WatchResponses
-// sharing the same Header.Revision; all but the last carry Fragment=true.
-func (s *Server) drainWatch(wctx context.Context, wcancel context.CancelFunc, watchID int64, progressNotify, fragment bool, events <-chan t4.Event, match func(string) bool, sendCh chan<- []*etcdserverpb.WatchResponse) {
-	defer wcancel()
+// sub.fragment mirrors WatchCreateRequest.Fragment: when true and a flush
+// would exceed watchFragmentBytes, the batch is split into multiple
+// WatchResponses sharing the same Header.Revision; all but the last carry
+// Fragment=true.
+func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubscription, sendCh chan<- []*etcdserverpb.WatchResponse) {
+	defer sub.cancel()
+	events, match, fragment := sub.events, sub.match, sub.fragment
 	var progressC <-chan time.Time
-	if progressNotify {
+	if sub.progressNotify {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
 		progressC = t.C
@@ -339,9 +381,11 @@ func (s *Server) drainWatch(wctx context.Context, wcancel context.CancelFunc, wa
 	// WatchResponse Header.Revision must reflect events included in this frame,
 	// not the live node clock — apiserver uses the header rev to advance its
 	// watchCache, and if it leapfrogs past events that arrive in a later frame,
-	// those events are silently dropped from the cache.
+	// those events are silently dropped from the cache. Seeded from the
+	// subscription's start point for the same reason: a replay watch has not
+	// yet delivered the history between its start revision and the live clock.
 	var batchMaxRev int64
-	progressRev := s.node.CurrentRevision()
+	progressRev := sub.startRev
 	flush := func() bool {
 		if len(batch) == 0 {
 			if batchMaxRev > progressRev {
@@ -372,6 +416,16 @@ func (s *Server) drainWatch(wctx context.Context, wcancel context.CancelFunc, wa
 		}
 		batch = append(batch, eventToProto(ev))
 	}
+	// sendProgress flushes any pending batch, then reports the revision this
+	// watch has actually delivered. Claiming a higher rev — the live node
+	// clock, say — would let apiserver advance its watchCache past events
+	// still queued here and silently drop them.
+	sendProgress := func() bool {
+		if !flush() {
+			return false
+		}
+		return s.sendOrCancelSlow(wctx, sendCh, []*etcdserverpb.WatchResponse{{Header: s.headerAt(progressRev), WatchId: watchID}}, watchID)
+	}
 
 	for {
 		select {
@@ -400,13 +454,11 @@ func (s *Server) drainWatch(wctx context.Context, wcancel context.CancelFunc, wa
 				return
 			}
 		case <-progressC:
-			if !flush() {
+			if !sendProgress() {
 				return
 			}
-			// Pin the progress notification to the rev we have actually
-			// delivered. Claiming a higher rev would let apiserver advance
-			// its watchCache past undelivered events.
-			if !s.sendOrCancelSlow(wctx, sendCh, []*etcdserverpb.WatchResponse{{Header: s.headerAt(progressRev), WatchId: watchID}}, watchID) {
+		case <-sub.progressReq:
+			if !sendProgress() {
 				return
 			}
 		case <-wctx.Done():
