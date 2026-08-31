@@ -10,6 +10,7 @@
 # Environment overrides:
 #   BENCH_TOTAL    total ops per workload (default: 50000)
 #   BENCH_CLIENTS  concurrent clients     (default: 16)
+#   BENCH_VAL_SIZE value size in bytes    (default: 256)
 #   BENCH_WORKLOADS space-separated list  (default: all six)
 set -euo pipefail
 
@@ -20,6 +21,7 @@ mkdir -p "$RESULTS_DIR"
 
 TOTAL="${BENCH_TOTAL:-50000}"
 CLIENTS="${BENCH_CLIENTS:-16}"
+VALSIZE="${BENCH_VAL_SIZE:-256}"
 WORKLOADS="${BENCH_WORKLOADS:-seq-put par-put seq-get par-get mixed watch}"
 JSONL="$RESULTS_DIR/results.jsonl"
 
@@ -70,6 +72,7 @@ run_workloads() {
             --endpoints "$endpoints" \
             --workload   "$wl" \
             --clients    "$CLIENTS" \
+            --val-size   "$VALSIZE" \
             --total      "$TOTAL" \
             --scenario   "$scenario" \
             --system     "$system" \
