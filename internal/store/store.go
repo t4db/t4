@@ -951,10 +951,19 @@ func (s *Store) Changes(prefix string, fromRev, toRev int64) ([]Event, error) {
 
 const watchLiveBatchBuffer = 1024
 
+// watchProgressInterval bounds how often a watch whose prefix saw no events is
+// sent a standalone progress marker. A watch that *did* receive events gets its
+// marker appended to that batch for free, so this only paces the otherwise
+// silent ones. Consumers use progress to answer "how current am I" on roughly
+// a one-second cadence, so pacing markers to match keeps the cost proportional
+// to what is consumed rather than to the write rate.
+const watchProgressInterval = time.Second
+
 type watchSubscription struct {
 	id         uint64
 	prefix     string
 	withPrevKV bool
+	progress   bool
 	nextRev    int64
 	live       chan []Event
 }
@@ -963,8 +972,9 @@ type watchSubscription struct {
 type EventType int
 
 const (
-	EventPut    EventType = iota // create or update
-	EventDelete                  // deletion
+	EventPut      EventType = iota // create or update
+	EventDelete                    // deletion
+	EventProgress                  // no data change; reports how far this watch is synced
 )
 
 // Event is a single watch notification.
@@ -972,12 +982,34 @@ type Event struct {
 	Type   EventType
 	KV     *KeyValue
 	PrevKV *KeyValue // nil for creates
+
+	// Revision is set only on EventProgress, where it reports the revision
+	// through which every matching event has already been delivered on this
+	// channel. Put and Delete leave it zero; their revision is KV.Revision.
+	Revision int64
+}
+
+// WatchOptions configures an optional watch parameter.
+type WatchOptions struct {
+	// PrevKV requests the previous KV on updates and deletes. Off by default:
+	// populating it adds one Pebble lookup per non-create event, which is
+	// significant under high churn.
+	PrevKV bool
+
+	// Progress requests EventProgress markers on the channel. Off by default
+	// so consumers that only switch on Put/Delete never observe an event with
+	// a nil KV.
+	Progress bool
 }
 
 // Watch streams events for keys matching prefix starting from startRev+1.
-// The channel is closed when ctx is cancelled. When withPrevKV is false,
-// emitted events have PrevKV == nil; this avoids one Pebble lookup per
-// non-create event in hot watch paths.
+// The channel is closed when ctx is cancelled.
+//
+// With opts.Progress, the channel also carries EventProgress markers. A marker
+// is emitted in-band, so it can never overtake an undelivered event: on receipt,
+// every matching event at or below its Revision has already been read from this
+// channel. That is what lets a consumer answer "I am synced through R" for a
+// prefix that has seen no writes at all.
 //
 // The channel buffer is intentionally small. Backpressure should flow back to
 // scanLog quickly so a slow consumer doesn't accumulate large amounts of
@@ -985,7 +1017,7 @@ type Event struct {
 // references to old revisions. The etcd handler's drain loop coalesces
 // whatever is immediately available into one WatchResponse, so a small buffer
 // still amortises gRPC Send overhead.
-func (s *Store) Watch(ctx context.Context, prefix string, startRev int64, withPrevKV bool) (<-chan Event, error) {
+func (s *Store) Watch(ctx context.Context, prefix string, startRev int64, opts WatchOptions) (<-chan Event, error) {
 	s.watchMu.Lock()
 	defer s.watchMu.Unlock()
 
@@ -998,7 +1030,8 @@ func (s *Store) Watch(ctx context.Context, prefix string, startRev int64, withPr
 	unregister := s.registerWatch(prefix)
 	sub := &watchSubscription{
 		prefix:     prefix,
-		withPrevKV: withPrevKV,
+		withPrevKV: opts.PrevKV,
+		progress:   opts.Progress,
 		live:       make(chan []Event, watchLiveBatchBuffer),
 	}
 
@@ -1016,7 +1049,7 @@ func (s *Store) Watch(ctx context.Context, prefix string, startRev int64, withPr
 	s.startWatchDispatcher(boundary + 1)
 
 	s.watcherWg.Add(1)
-	go s.watchLoop(ctx, prefix, startRev, withPrevKV, boundary, registered, ch, sub, unregister)
+	go s.watchLoop(ctx, prefix, startRev, opts.PrevKV, boundary, registered, ch, sub, unregister)
 	return ch, nil
 }
 
@@ -1184,6 +1217,12 @@ func (s *Store) startWatchDispatcher(nextRev int64) {
 func (s *Store) watchDispatchLoop(nextRev int64) {
 	defer s.dispatchWg.Done()
 	ctx := context.Background()
+	// Pacing state for standalone markers: the revision last announced to
+	// otherwise-silent watches, and when.
+	var (
+		lastMarkerRev int64
+		lastMarkerAt  time.Time
+	)
 
 	for {
 		// While no watch is subscribed, reset the scan cursor and block until a
@@ -1215,7 +1254,23 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 		if err != nil {
 			return
 		}
-		matched := s.dispatchWatchEvents(events)
+		// Standalone markers go to watches that matched nothing; watches that
+		// did receive events carry their marker in the same batch for free and
+		// are never gated here.
+		//
+		// Pacing bounds the cost under sustained writes, but it must never be
+		// what leaves the newest revision unannounced: once the loop catches
+		// up it blocks until the next commit, so a marker suppressed here
+		// would have no later iteration to correct it and silent watches would
+		// stay stale for as long as the store is quiet. Hence "paced, or
+		// caught up".
+		caughtUp := atomic.LoadInt64(&s.currentRev) <= toRev
+		standalone := toRev > lastMarkerRev &&
+			(caughtUp || time.Since(lastMarkerAt) >= watchProgressInterval)
+		if standalone {
+			lastMarkerRev, lastMarkerAt = toRev, time.Now()
+		}
+		matched := s.dispatchWatchEvents(events, toRev, standalone)
 		recordWatchScanMetrics(time.Since(start), nextRev, toRev, scanned, matched)
 		nextRev = toRev + 1
 	}
@@ -1232,7 +1287,7 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 // has nextRev beyond every revision in this batch (the dispatcher only reaches
 // here after scanning up to the committed revision), so it correctly receives
 // nothing from this batch and joins from the next one.
-func (s *Store) dispatchWatchEvents(events []Event) int {
+func (s *Store) dispatchWatchEvents(events []Event, toRev int64, standalone bool) int {
 	// snap is a copy of a subscription's routing fields plus a pointer back to
 	// the subscription, taken so PrevKV disk reads below run without the lock.
 	type snap struct {
@@ -1240,6 +1295,7 @@ func (s *Store) dispatchWatchEvents(events []Event) int {
 		id         uint64
 		prefix     string
 		withPrevKV bool
+		progress   bool
 		nextRev    int64
 	}
 
@@ -1251,6 +1307,7 @@ func (s *Store) dispatchWatchEvents(events []Event) int {
 			id:         id,
 			prefix:     w.prefix,
 			withPrevKV: w.withPrevKV,
+			progress:   w.progress,
 			nextRev:    w.nextRev,
 		})
 	}
@@ -1270,11 +1327,15 @@ func (s *Store) dispatchWatchEvents(events []Event) int {
 	matched := 0
 	for i, sn := range snaps {
 		var batch []Event
+		var batchRev int64
 		for j := range events {
 			ev := events[j]
 			if ev.KV.Revision < sn.nextRev ||
 				(sn.prefix != "" && !strings.HasPrefix(ev.KV.Key, sn.prefix)) {
 				continue
+			}
+			if ev.KV.Revision > batchRev {
+				batchRev = ev.KV.Revision
 			}
 			if sn.withPrevKV && ev.KV.PrevRevision > 0 {
 				pk := prevKey{key: ev.KV.Key, rev: ev.KV.PrevRevision}
@@ -1287,8 +1348,23 @@ func (s *Store) dispatchWatchEvents(events []Event) int {
 			}
 			batch = append(batch, ev)
 		}
-		batches[i] = batch
 		matched += len(batch)
+		// A watch that received events carries its marker in the same batch —
+		// the slice is already allocated — but only when the batch does not
+		// already reach toRev. A watch that matched the newest revision learns
+		// its position from the event itself, which is the common case on a
+		// busy prefix and the one worth keeping free of extra traffic.
+		if sn.progress && len(batch) > 0 && batchRev < toRev {
+			batch = append(batch, progressEvent(toRev))
+		}
+		batches[i] = batch
+	}
+
+	// Watches that matched nothing share one marker slice; every consumer only
+	// reads it, so this is a single allocation for the whole fan-out.
+	var silent []Event
+	if standalone {
+		silent = []Event{progressEvent(toRev)}
 	}
 
 	// Re-acquire only to publish batches and evict slow consumers. Skip any
@@ -1298,8 +1374,12 @@ func (s *Store) dispatchWatchEvents(events []Event) int {
 	s.watchHubMu.Lock()
 	for i, sn := range snaps {
 		batch := batches[i]
+		markerOnly := false
 		if len(batch) == 0 {
-			continue
+			if silent == nil || !sn.progress {
+				continue
+			}
+			batch, markerOnly = silent, true
 		}
 		if current, ok := s.watchers[sn.id]; !ok || current != sn.w {
 			continue
@@ -1307,12 +1387,25 @@ func (s *Store) dispatchWatchEvents(events []Event) int {
 		select {
 		case sn.w.live <- batch:
 		default:
+			// A full queue means this consumer is too slow for the event
+			// stream, so it is evicted and can reconnect from its last
+			// delivered revision. A marker is advisory and the next one
+			// supersedes it, so dropping one must not cost a watch its
+			// subscription — otherwise a watch on a quiet prefix could be
+			// evicted by progress traffic alone.
+			if markerOnly {
+				continue
+			}
 			delete(s.watchers, sn.id)
 			close(sn.w.live)
 		}
 	}
 	s.watchHubMu.Unlock()
 	return matched
+}
+
+func progressEvent(rev int64) Event {
+	return Event{Type: EventProgress, Revision: rev}
 }
 
 func recordWatchScanMetrics(d time.Duration, fromRev, toRev int64, scanned, matched int) {

@@ -1142,7 +1142,8 @@ func (n *Node) Flush() error {
 type WatchOption func(*watchOpts)
 
 type watchOpts struct {
-	prevKV bool
+	prevKV   bool
+	progress bool
 }
 
 // WithPrevKV requests that emitted events include the previous KV for updates
@@ -1150,6 +1151,19 @@ type watchOpts struct {
 // non-create event, which is significant under high churn.
 func WithPrevKV() WatchOption {
 	return func(o *watchOpts) { o.prevKV = true }
+}
+
+// WithProgressNotify requests EventProgress notifications on the watch
+// channel. Off by default, because such an event carries no KV and consumers
+// that only switch on EventPut/EventDelete would have to guard against it.
+//
+// A progress event reports the revision through which every matching event has
+// already been delivered on this channel — including revisions that produced
+// no event for this prefix. Without it a watcher cannot distinguish "nothing
+// has happened under my prefix" from "I have fallen behind", because both look
+// like silence.
+func WithProgressNotify() WatchOption {
+	return func(o *watchOpts) { o.progress = true }
 }
 
 // Watch streams prefix-matching events using etcd revision semantics:
@@ -1181,7 +1195,10 @@ func (n *Node) Watch(ctx context.Context, prefix string, startRev int64, opts ..
 	if startRev == 0 {
 		storeStartRev = n.db.Load().CurrentRevision()
 	}
-	ch, err := n.db.Load().Watch(ctx, prefix, storeStartRev, o.prevKV)
+	ch, err := n.db.Load().Watch(ctx, prefix, storeStartRev, istore.WatchOptions{
+		PrevKV:   o.prevKV,
+		Progress: o.progress,
+	})
 	if err != nil {
 		if errors.Is(err, istore.ErrClosed) {
 			return nil, ErrClosed

@@ -207,7 +207,11 @@ func (s *Server) subscribeWatch(wctx context.Context, cr *etcdserverpb.WatchCrea
 		lastRev = s.node.CurrentRevision()
 	}
 
-	var watchOpts []t4.WatchOption
+	// Progress markers are always requested: they are what lets an on-demand
+	// or periodic progress notification report a current revision for a prefix
+	// that has seen no writes, which is the guarantee apiserver's
+	// consistent-read-from-cache path waits on.
+	watchOpts := []t4.WatchOption{t4.WithProgressNotify()}
 	if cr.PrevKv {
 		watchOpts = append(watchOpts, t4.WithPrevKV())
 	}
@@ -384,24 +388,45 @@ func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubsc
 	// those events are silently dropped from the cache. Seeded from the
 	// subscription's start point for the same reason: a replay watch has not
 	// yet delivered the history between its start revision and the live clock.
-	var batchMaxRev int64
+	// syncedRev is the revision reported by the most recent progress marker:
+	// how far this watch is caught up including revisions that produced no
+	// event under its prefix. Without it an idle watch could never advance,
+	// because it would have no event to learn the revision from.
+	var batchMaxRev, syncedRev int64
 	progressRev := sub.startRev
+	// advance moves progressRev to the highest revision this watch can honestly
+	// claim delivered. Markers are applied here rather than on arrival because
+	// the batch may still hold events at or below the marker's revision.
+	advance := func() {
+		if batchMaxRev > progressRev {
+			progressRev = batchMaxRev
+		}
+		if syncedRev > progressRev {
+			progressRev = syncedRev
+		}
+		batchMaxRev, syncedRev = 0, 0
+	}
 	flush := func() bool {
 		if len(batch) == 0 {
-			if batchMaxRev > progressRev {
-				progressRev = batchMaxRev
-			}
-			batchMaxRev = 0
+			advance()
 			return true
 		}
 		toSend := batch
 		rev := batchMaxRev
 		batch = make([]*mvccpb.Event, 0, watchMaxBatch)
-		progressRev = rev
-		batchMaxRev = 0
+		advance()
 		return s.sendEvents(wctx, sendCh, watchID, toSend, rev, fragment)
 	}
 	appendEvent := func(e t4.Event) {
+		if e.Type == t4.EventProgress {
+			// Delivered in-band, so every matching event at or below this
+			// revision has already been read off the channel — but some may
+			// still be sitting in batch, so only record it here.
+			if e.Revision > syncedRev {
+				syncedRev = e.Revision
+			}
+			return
+		}
 		// Track every observed revision, even ones we filter out, so the
 		// header rev reflects how far this watch has actually scanned.
 		if e.KV != nil && e.KV.Revision > batchMaxRev {
