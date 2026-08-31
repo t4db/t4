@@ -61,43 +61,36 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		return resp, nil
 	}
 
-	// Range / prefix scan. rangeEnd = "\x00" means "all keys >= key",
-	// not "keys with key as a prefix".
-	scanPrefix := rangeScanPrefix(key, rangeEnd)
+	// Range / prefix scan. When the range is prefix-shaped it is served by an
+	// index seek scoped to [key, rangeEnd); otherwise fall back to listing the
+	// whole keyspace and filtering with matchRange.
+	if scanPrefix, ok := rangeScan(key, rangeEnd); ok {
+		// FromKey pins the scan to the continuation point, so Count is the
+		// number of keys remaining in the range — which is what Count and
+		// More must report, and what apiserver surfaces as
+		// RemainingItemCount.
+		seek := []t4.ReadOption{t4.WithRevision(readRev), t4.WithFromKey(key)}
 
-	if r.CountOnly {
-		if isExactPrefixRange(key, rangeEnd) {
-			count, err := s.rangeCount(ctx, linearizable, scanPrefix, t4.WithRevision(readRev))
+		if r.CountOnly {
+			count, err := s.rangeCount(ctx, linearizable, scanPrefix, seek...)
 			if err != nil {
 				return nil, kvError(err)
 			}
 			return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
 		}
 
-		all, err := s.rangeList(ctx, linearizable, scanPrefix, t4.WithRevision(readRev))
-		if err != nil {
-			return nil, kvError(err)
-		}
-		var count int64
-		for _, kv := range all {
-			if !matchRange(kv, key, rangeEnd) {
-				continue
+		// An unlimited read already materializes the whole range, so its
+		// count comes from the result rather than a second scan.
+		var total int64
+		if r.Limit > 0 {
+			count, err := s.rangeCount(ctx, linearizable, scanPrefix, seek...)
+			if err != nil {
+				return nil, kvError(err)
 			}
-			count++
+			total = count
 		}
-		return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
-	}
 
-	var (
-		all []*t4.KeyValue
-		err error
-	)
-	if isExactPrefixRange(key, rangeEnd) && r.Limit > 0 {
-		total, cerr := s.rangeCount(ctx, linearizable, scanPrefix, t4.WithRevision(readRev))
-		if cerr != nil {
-			return nil, kvError(cerr)
-		}
-		all, err = s.rangeList(ctx, linearizable, scanPrefix, t4.WithLimit(r.Limit), t4.WithRevision(readRev))
+		all, err := s.rangeList(ctx, linearizable, scanPrefix, append(seek, t4.WithLimit(r.Limit))...)
 		if err != nil {
 			return nil, kvError(err)
 		}
@@ -105,17 +98,30 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		for _, kv := range all {
 			kvs = append(kvs, kvToProtoForRange(kv, r.KeysOnly))
 		}
+		if r.Limit <= 0 {
+			total = int64(len(kvs))
+		}
 		return &etcdserverpb.RangeResponse{
 			Header: header(),
 			Kvs:    kvs,
 			Count:  total,
-			More:   total > r.Limit,
+			More:   r.Limit > 0 && total > r.Limit,
 		}, nil
 	}
 
-	all, err = s.rangeList(ctx, linearizable, scanPrefix, t4.WithRevision(readRev))
+	all, err := s.rangeList(ctx, linearizable, "", t4.WithRevision(readRev))
 	if err != nil {
 		return nil, kvError(err)
+	}
+
+	if r.CountOnly {
+		var count int64
+		for _, kv := range all {
+			if matchRange(kv, key, rangeEnd) {
+				count++
+			}
+		}
+		return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
 	}
 
 	total := int64(0)
@@ -208,8 +214,13 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 	// Range / prefix delete: list all keys in range and delete them in atomic
 	// Txn batches. This is O(1) WAL entries per batch instead of O(n), and each
 	// batch commits at a single revision.
-	scanPrefix := rangeScanPrefix(key, rangeEnd)
-	all, err := s.node.List(scanPrefix)
+	var all []*t4.KeyValue
+	var err error
+	if scanPrefix, ok := rangeScan(key, rangeEnd); ok {
+		all, err = s.node.List(scanPrefix, t4.WithFromKey(key))
+	} else {
+		all, err = s.node.List("")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -512,18 +523,39 @@ func kvToProtoForRange(kv *t4.KeyValue, keysOnly bool) *mvccpb.KeyValue {
 	return pb
 }
 
-func isExactPrefixRange(key, rangeEnd string) bool {
-	if key == "" || key[0] == '\x00' {
-		return false
+// rangeScan maps an etcd [key, rangeEnd) range onto a t4 prefix scan seeked
+// to key.
+//
+// Whenever rangeEnd is the exclusive upper bound of some prefix P — that is,
+// P with its last byte incremented — the keys in [key, rangeEnd) are exactly
+// the keys under P that are >= key. Such a range can be served by seeking
+// into P's index (Node.List with WithFromKey/WithLimit) instead of listing
+// the whole keyspace and filtering in memory.
+//
+// Kubernetes paginated LISTs have precisely this shape: the first page sends
+// key == P, and every continuation page repeats the same rangeEnd with key
+// advanced to the continue token. Without the seek, page two onwards would
+// scan every object in the database.
+//
+// ok is false for ranges that are not prefix-shaped (rangeEnd == "\x00",
+// explicit non-prefix bounds, key below the prefix) and for the reserved
+// internal keyspace; those callers fall back to a full scan filtered by
+// matchRange.
+func rangeScan(key, rangeEnd string) (prefix string, ok bool) {
+	if key == "" || key[0] == '\x00' || rangeEnd == "" {
+		return "", false
 	}
-	return isPrefixRangeEnd(key, rangeEnd)
-}
-
-func rangeScanPrefix(key, rangeEnd string) string {
-	if isPrefixRangeEnd(key, rangeEnd) {
-		return key
+	// Invert prefixRangeEnd. A trailing 0x00 has no predecessor, so such an
+	// end (notably "\x00", meaning "all keys >= key") is not prefix-shaped.
+	last := rangeEnd[len(rangeEnd)-1]
+	if last == 0 {
+		return "", false
 	}
-	return ""
+	prefix = rangeEnd[:len(rangeEnd)-1] + string([]byte{last - 1})
+	if key < prefix {
+		return "", false
+	}
+	return prefix, true
 }
 
 func matchRange(kv *t4.KeyValue, key, rangeEnd string) bool {

@@ -624,3 +624,57 @@ func newWatchNode(t *testing.T) (*t4.Node, *clientv3.Client) {
 	cli := newEtcdClient(t, endpoint)
 	return node, cli
 }
+
+// TestWatchRequestProgressReportsDeliveredRevision drives RequestProgress
+// through the real gRPC stream — the path kube-apiserver uses to learn how
+// far its watchCache may advance before serving a LIST from cache. The
+// reported revision must be the one this watch has been delivered, so a
+// progress notification following an event reports that event's revision.
+func TestWatchRequestProgressReportsDeliveredRevision(t *testing.T) {
+	node, cli := newWatchNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	wch := cli.Watch(ctx, "/wp/", clientv3.WithPrefix())
+
+	if _, err := node.Put(ctx, "/wp/a", []byte("v"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var eventRev int64
+	select {
+	case wr := <-wch:
+		if len(wr.Events) == 0 {
+			t.Fatal("expected an event")
+		}
+		eventRev = wr.Header.Revision
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for watch event")
+	}
+
+	// Writes outside the watched prefix advance the node clock but are never
+	// delivered to this watch, so progress must not jump to them.
+	if _, err := node.Put(ctx, "/elsewhere/k", []byte("v"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if err := cli.RequestProgress(ctx); err != nil {
+		t.Fatalf("RequestProgress: %v", err)
+	}
+
+	for {
+		select {
+		case wr := <-wch:
+			if !wr.IsProgressNotify() {
+				t.Fatalf("unexpected non-progress response with %d events", len(wr.Events))
+			}
+			if wr.Header.Revision != eventRev {
+				t.Errorf("progress revision = %d, want %d (the delivered event's revision)",
+					wr.Header.Revision, eventRev)
+			}
+			return
+		case <-ctx.Done():
+			t.Fatal("timeout waiting for progress notification")
+		}
+	}
+}
