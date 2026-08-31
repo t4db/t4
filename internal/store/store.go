@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/bloom"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/wal"
@@ -79,6 +80,59 @@ const lockRetryTimeout = 30 * time.Second
 // PebbleOption is a functional option for configuring pebble.Options.
 type PebbleOption = func(*pebble.Options)
 
+// defaultBlockCacheSize is the Pebble block cache T4 opens with. Pebble's own
+// default is 8 MiB, which is far too small for a database serving a working
+// set of live keys: nearly every read misses and pays a disk read plus block
+// decompression. 64 MiB is a compromise for an embeddable store — large enough
+// that hot keys stay resident, small enough not to surprise a process that
+// embeds T4 alongside other work. Override via Config.PebbleOptions on a
+// dedicated node.
+const defaultBlockCacheSize = 64 << 20
+
+var (
+	blockCacheOnce sync.Once
+	blockCache     *pebble.Cache
+)
+
+// sharedBlockCache returns the process-wide Pebble block cache.
+//
+// The cache is shared across every Store rather than allocated per Open, which
+// is what Pebble intends. A process that opens several databases — a test
+// binary, a multi-node embedding, or the resync path opening a replacement DB
+// alongside the old one — would otherwise multiply the cache by the number of
+// open stores.
+//
+// The initial reference is held for the process lifetime. Each pebble.Open
+// takes its own reference and releases it on Close, so the cache correctly
+// outlives any individual Store.
+func sharedBlockCache() *pebble.Cache {
+	blockCacheOnce.Do(func() { blockCache = pebble.NewCache(defaultBlockCacheSize) })
+	return blockCache
+}
+
+// defaultPebbleOptions returns the Pebble configuration T4 opens with.
+//
+// A zero pebble.Options is not a reasonable configuration for this workload.
+// It leaves FilterPolicy nil — so Pebble cannot answer "key absent" from a
+// filter and must read and decompress index and data blocks from every
+// candidate SST — and caps the block cache at 8 MiB. Every T4 write performs a
+// read-before-write to find the previous revision, so both defaults land
+// directly on the write path: profiling a 4 KiB write workload attributed
+// ~9% of total CPU to snappy decompression inside that single lookup.
+//
+// Bloom filters matter most for the negative lookups, which are not the rare
+// case here: every write of a new key (Kubernetes Events, new Pods) is a miss.
+func defaultPebbleOptions() *pebble.Options {
+	opts := &pebble.Options{
+		Cache: sharedBlockCache(),
+	}
+	opts.EnsureDefaults()
+	for i := range opts.Levels {
+		opts.Levels[i].FilterPolicy = bloom.FilterPolicy(10)
+	}
+	return opts
+}
+
 // Open opens (or creates) the Pebble database at dir and returns a Store.
 // The caller should call Recover to replay WAL entries before serving requests.
 //
@@ -86,7 +140,7 @@ type PebbleOption = func(*pebble.Options)
 // lockRetryTimeout before returning an error. This handles the Kubernetes pod
 // replacement race where the old instance has not yet released the lock.
 func Open(dir string, log logger, extraOpts ...func(*pebble.Options)) (*Store, error) {
-	opts := &pebble.Options{}
+	opts := defaultPebbleOptions()
 	for _, fn := range extraOpts {
 		fn(opts)
 	}
