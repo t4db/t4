@@ -10,8 +10,9 @@ type KeyValue = istore.KeyValue
 type EventType = istore.EventType
 
 const (
-	EventPut    = istore.EventPut
-	EventDelete = istore.EventDelete
+	EventPut      = istore.EventPut
+	EventDelete   = istore.EventDelete
+	EventProgress = istore.EventProgress
 )
 
 // Event is a single watch notification.

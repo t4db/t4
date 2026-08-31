@@ -625,12 +625,18 @@ func newWatchNode(t *testing.T) (*t4.Node, *clientv3.Client) {
 	return node, cli
 }
 
-// TestWatchRequestProgressReportsDeliveredRevision drives RequestProgress
-// through the real gRPC stream — the path kube-apiserver uses to learn how
-// far its watchCache may advance before serving a LIST from cache. The
-// reported revision must be the one this watch has been delivered, so a
-// progress notification following an event reports that event's revision.
-func TestWatchRequestProgressReportsDeliveredRevision(t *testing.T) {
+// TestWatchRequestProgressBoundedByDelivery drives RequestProgress through the
+// real gRPC stream — the path kube-apiserver uses to learn how far its
+// watchCache may advance before serving a LIST from cache.
+//
+// The reported revision is bounded on both sides: at least the last event
+// delivered to this watch (never regress), and never beyond the store's
+// current revision (never claim a revision that does not exist). Progress may
+// legitimately sit above the last event and below the clock — a marker can
+// confirm the watch is synced past revisions that produced no event for its
+// prefix. That progress never outruns *undelivered* events is pinned by
+// TestDrainWatchProgressPinsToDeliveredRevision, which blocks delivery outright.
+func TestWatchRequestProgressBoundedByDelivery(t *testing.T) {
 	node, cli := newWatchNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -652,8 +658,6 @@ func TestWatchRequestProgressReportsDeliveredRevision(t *testing.T) {
 		t.Fatal("timeout waiting for watch event")
 	}
 
-	// Writes outside the watched prefix advance the node clock but are never
-	// delivered to this watch, so progress must not jump to them.
 	if _, err := node.Put(ctx, "/elsewhere/k", []byte("v"), 0); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -668,13 +672,73 @@ func TestWatchRequestProgressReportsDeliveredRevision(t *testing.T) {
 			if !wr.IsProgressNotify() {
 				t.Fatalf("unexpected non-progress response with %d events", len(wr.Events))
 			}
-			if wr.Header.Revision != eventRev {
-				t.Errorf("progress revision = %d, want %d (the delivered event's revision)",
+			if wr.Header.Revision < eventRev {
+				t.Errorf("progress revision = %d, regressed below the delivered event at %d",
 					wr.Header.Revision, eventRev)
+			}
+			if current := toEtcdRev(node.CurrentRevision()); wr.Header.Revision > current {
+				t.Errorf("progress revision = %d, beyond the store's current revision %d",
+					wr.Header.Revision, current)
 			}
 			return
 		case <-ctx.Done():
 			t.Fatal("timeout waiting for progress notification")
+		}
+	}
+}
+
+// toEtcdRev mirrors the server's internal-to-wire revision mapping.
+func toEtcdRev(rev int64) int64 { return rev + 1 }
+
+// TestWatchProgressAdvancesOnIdlePrefix is the acceptance test for progress
+// markers, and the guarantee kube-apiserver's consistent-read-from-cache path
+// waits on: a watch whose own prefix is idle must still report a current
+// revision, so the watchCache can reach the revision a LIST requires.
+//
+// Before markers this was impossible — the drain's only source of revision
+// truth was its own events, so an idle prefix reported its start revision
+// forever and apiserver would wait until it gave up.
+func TestWatchProgressAdvancesOnIdlePrefix(t *testing.T) {
+	node, cli := newWatchNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	wch := cli.Watch(ctx, "/idle/", clientv3.WithPrefix())
+
+	// Commit only outside the watched prefix. This watch sees no events.
+	var lastRev int64
+	for i := 0; i < 3; i++ {
+		resp, err := cli.Put(ctx, fmt.Sprintf("/busy/k%d", i), "v")
+		if err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		lastRev = resp.Header.Revision
+	}
+	_ = node
+
+	// Markers are paced, so poll progress until the watch reports it is caught
+	// up past writes it never received.
+	deadline := time.After(15 * time.Second)
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case wr := <-wch:
+			if err := wr.Err(); err != nil {
+				t.Fatalf("watch error: %v", err)
+			}
+			if len(wr.Events) > 0 {
+				t.Fatalf("idle watch received %d events", len(wr.Events))
+			}
+			if wr.Header.Revision >= lastRev {
+				return
+			}
+		case <-tick.C:
+			if err := cli.RequestProgress(ctx); err != nil {
+				t.Fatalf("RequestProgress: %v", err)
+			}
+		case <-deadline:
+			t.Fatalf("idle watch never reported progress reaching revision %d", lastRev)
 		}
 	}
 }

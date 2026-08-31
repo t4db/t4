@@ -136,7 +136,7 @@ func TestClosedStoreRejectsReadyWaitAndWatch(t *testing.T) {
 	if err := s.WaitForRevision(context.Background(), 1); !errors.Is(err, ErrClosed) {
 		t.Fatalf("WaitForRevision after close = %v, want ErrClosed", err)
 	}
-	if _, err := s.Watch(context.Background(), "", 0, false); !errors.Is(err, ErrClosed) {
+	if _, err := s.Watch(context.Background(), "", 0, WatchOptions{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Watch after close = %v, want ErrClosed", err)
 	}
 }
@@ -504,7 +504,7 @@ func TestWatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	ch, err := s.Watch(ctx, "/w/", 0, false)
+	ch, err := s.Watch(ctx, "/w/", 0, WatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +545,7 @@ func TestWatchPrevKV(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	ch, _ := s.Watch(ctx, "k", 1, true)
+	ch, _ := s.Watch(ctx, "k", 1, WatchOptions{PrevKV: true})
 
 	go func() {
 		apply(t, s, updateEntry(2, "k", []byte("new"), 1, 1))
@@ -562,7 +562,7 @@ func TestWatchPrevKV(t *testing.T) {
 func TestWatchCancelStopsChannel(t *testing.T) {
 	s := openMem(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, _ := s.Watch(ctx, "", 0, false)
+	ch, _ := s.Watch(ctx, "", 0, WatchOptions{})
 	cancel()
 
 	// Channel must close shortly after cancel.
@@ -590,7 +590,7 @@ func TestWatchReplayLiveHandoffHasNoGapsOrDuplicates(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	ch, err := s.Watch(ctx, "/handoff/", 0, false)
+	ch, err := s.Watch(ctx, "/handoff/", 0, WatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -668,7 +668,7 @@ func TestWatchRegisterIntoEmptyHubDeliversAllRevisions(t *testing.T) {
 			for iter := 0; iter < perWorker; iter++ {
 				head := atomic.LoadInt64(&s.currentRev)
 				wctx, wcancel := context.WithTimeout(ctx, 2*time.Second)
-				ch, err := s.Watch(wctx, "/g/", head, false)
+				ch, err := s.Watch(wctx, "/g/", head, WatchOptions{})
 				if err != nil {
 					wcancel()
 					return // store closing
@@ -714,7 +714,7 @@ func TestWatchLiveTxnFanout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	ch, err := s.Watch(ctx, "/txn/", 0, false)
+	ch, err := s.Watch(ctx, "/txn/", 0, WatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -747,11 +747,11 @@ func TestWatchMetrics(t *testing.T) {
 	s := openMem(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ch1, err := s.Watch(ctx, "/metrics/", 0, false)
+	ch1, err := s.Watch(ctx, "/metrics/", 0, WatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch2, err := s.Watch(ctx, "/metrics/", 0, false)
+	ch2, err := s.Watch(ctx, "/metrics/", 0, WatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
