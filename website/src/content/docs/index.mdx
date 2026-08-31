@@ -92,6 +92,9 @@ kv, _  := node.Get("/config/timeout")
   <Card title="Prometheus metrics" icon="information">
     Built-in `/metrics`, `/healthz`, and `/readyz` endpoints. Drop into your existing observability stack.
   </Card>
+  <Card title="Distributed tracing" icon="information">
+    OpenTelemetry spans across the write path — forward, WAL append, quorum wait — so a slow write can be attributed to a phase, not just a histogram.
+  </Card>
 </CardGrid>
 
 ## Install

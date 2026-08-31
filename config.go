@@ -7,6 +7,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/credentials"
 
 	"github.com/t4db/t4/internal/wal"
@@ -270,6 +271,16 @@ type Config struct {
 	// prometheus.Gatherer; otherwise /metrics falls back to
 	// prometheus.DefaultGatherer.
 	MetricsRegisterer prometheus.Registerer
+
+	// TracerProvider supplies the OpenTelemetry tracer used to span the write
+	// path (forward, WAL append, quorum wait) and linearizable reads. When nil,
+	// otel.GetTracerProvider() is used, which is a no-op unless the embedding
+	// application has configured a global provider. Pass
+	// noop.NewTracerProvider() to opt out explicitly.
+	//
+	// Spans never carry key names — see keyScope in writes.go for what is
+	// recorded instead and why.
+	TracerProvider trace.TracerProvider
 
 	// ObjectStoreEncryption, when non-nil, encrypts all object-store data at
 	// rest using AES-256-GCM. Local Pebble files and local WAL files remain

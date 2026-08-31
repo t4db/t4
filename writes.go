@@ -4,8 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
@@ -13,10 +18,55 @@ import (
 	"github.com/t4db/t4/internal/wal"
 )
 
+// keyScope reduces a key to a low-cardinality prefix that is safe to export.
+//
+// Span attributes are shipped to a collector, indexed, and retained — often in
+// a different trust domain than the cluster. Full keys must never go there: for
+// Kubernetes they are /registry/<resource>/<namespace>/<name>, so exporting
+// them would leak secret names, namespace names, and a complete workload
+// inventory, at unbounded cardinality. The first two path segments give the
+// resource type — which is what latency questions are actually asked about —
+// without any object identity.
+func keyScope(key string) string {
+	slashes := 0
+	for i := 0; i < len(key); i++ {
+		if key[i] != '/' {
+			continue
+		}
+		slashes++
+		if slashes == 3 {
+			return key[:i]
+		}
+	}
+	// Fewer than three separators: drop the trailing component, which is the
+	// part most likely to be an object identity.
+	if i := strings.LastIndexByte(key, '/'); i > 0 {
+		return key[:i]
+	}
+	return ""
+}
+
+// endSpan records err on span and ends it. Every traced entry point defers
+// this, so no return path — including ones added later — can leave a span
+// un-ended. An un-ended parent span is worse than a missing attribute: the
+// whole trace never reaches the exporter, and the paths most likely to be
+// missed are the error paths tracing exists to show.
+func endSpan(span trace.Span, err error) {
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+	}
+	span.End()
+}
+
 // ── Write path (leader / single-node execute; follower forwards) ──────────────
 
 // Put creates or updates key with value. Returns the new revision.
-func (n *Node) Put(ctx context.Context, key string, value []byte, lease int64) (int64, error) {
+func (n *Node) Put(ctx context.Context, key string, value []byte, lease int64) (rev int64, err error) {
+	ctx, span := n.tracer.Start(ctx, "t4.put",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	defer func() { endSpan(span, err) }()
+
 	if n.closed.Load() {
 		return 0, ErrClosed
 	}
@@ -78,7 +128,11 @@ func (n *Node) preparePut(key string, value []byte, lease int64) (wal.Entry, err
 }
 
 // Create creates key only if it does not already exist.
-func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64) (int64, error) {
+func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64) (rev int64, err error) {
+	ctx, span := n.tracer.Start(ctx, "t4.create",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	defer func() { endSpan(span, err) }()
+
 	if n.loadRole() == roleFollower {
 		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardCreate, Key: key, Value: value, Lease: lease})
 		if err != nil {
@@ -123,7 +177,10 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 }
 
 // Update updates key only if its current revision matches (CAS).
-func (n *Node) Update(ctx context.Context, key string, value []byte, revision, lease int64) (int64, *KeyValue, bool, error) {
+func (n *Node) Update(ctx context.Context, key string, value []byte, revision, lease int64) (rev int64, prevKV *KeyValue, ok bool, err error) {
+	ctx, span := n.tracer.Start(ctx, "t4.update",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	defer func() { endSpan(span, err) }()
 	if n.loadRole() == roleFollower {
 		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardUpdate, Key: key, Value: value, Revision: revision, Lease: lease})
 		if err != nil {
@@ -177,7 +234,11 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 }
 
 // Delete removes key unconditionally.
-func (n *Node) Delete(ctx context.Context, key string) (int64, error) {
+func (n *Node) Delete(ctx context.Context, key string) (rev int64, err error) {
+	ctx, span := n.tracer.Start(ctx, "t4.delete",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	defer func() { endSpan(span, err) }()
+
 	if n.loadRole() == roleFollower {
 		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardDeleteIfRevision, Key: key, Revision: 0})
 		if err != nil {
@@ -205,7 +266,11 @@ func (n *Node) Delete(ctx context.Context, key string) (int64, error) {
 }
 
 // DeleteIfRevision deletes key only if its current revision matches (CAS).
-func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64) (int64, *KeyValue, bool, error) {
+func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64) (rev int64, prevKV *KeyValue, ok bool, err error) {
+	ctx, span := n.tracer.Start(ctx, "t4.delete_if_revision",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	defer func() { endSpan(span, err) }()
+
 	if n.loadRole() == roleFollower {
 		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardDeleteIfRevision, Key: key, Revision: revision})
 		if err != nil {
@@ -347,7 +412,10 @@ func txnCondMatches(cond TxnCondition, existing *istore.KeyValue) bool {
 //
 // All write ops within the selected branch share a single revision and are
 // committed to the WAL in one entry, ensuring crash-safe atomicity.
-func (n *Node) Txn(ctx context.Context, req TxnRequest) (TxnResponse, error) {
+func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err error) {
+	ctx, span := n.tracer.Start(ctx, "t4.txn")
+	defer func() { endSpan(span, err) }()
+
 	if n.closed.Load() {
 		return TxnResponse{}, ErrClosed
 	}
@@ -754,6 +822,7 @@ func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.T
 		}
 	}
 	cleanPending()
+	n.recordCommitSpans(ctx, req)
 	if err != nil {
 		metrics.WriteErrors.WithLabelValues(op).Inc()
 		return 0, fmt.Errorf("t4: commit: %w", err)
@@ -769,6 +838,31 @@ func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.T
 		}
 	}
 	return rev, nil
+}
+
+// recordCommitSpans turns the commit loop's phase timings into child spans of
+// the span active on ctx, using the recorded start/end timestamps.
+//
+// The spans are created here rather than in the commit loop so that a span
+// object never crosses the goroutine boundary: the commit loop writes plain
+// timestamps, and the goroutine that owns the parent span is the only one that
+// starts and ends children. Called only after receiving from req.done, which
+// is what makes the timings safe to read.
+func (n *Node) recordCommitSpans(ctx context.Context, req *writeReq) {
+	if req.walStart.IsZero() || !trace.SpanFromContext(ctx).IsRecording() {
+		return
+	}
+	_, walSpan := n.tracer.Start(ctx, "t4.wal.append",
+		trace.WithTimestamp(req.walStart),
+		trace.WithAttributes(attribute.Int("t4.batch_size", req.batchSize)))
+	walSpan.End(trace.WithTimestamp(req.walEnd))
+
+	if req.quorumStart.IsZero() {
+		return
+	}
+	_, quorumSpan := n.tracer.Start(ctx, "t4.peer.wait_quorum",
+		trace.WithTimestamp(req.quorumStart))
+	quorumSpan.End(trace.WithTimestamp(req.quorumEnd))
 }
 
 // clearPendingBatch removes optimistic pending entries for one commit-loop
@@ -800,7 +894,10 @@ func (n *Node) clearPendingBatch(batch []*writeReq) {
 }
 
 // Compact removes log entries at or below revision.
-func (n *Node) Compact(ctx context.Context, revision int64) error {
+func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
+	ctx, span := n.tracer.Start(ctx, "t4.compact",
+		trace.WithAttributes(attribute.Int64("t4.revision", revision)))
+	defer func() { endSpan(span, err) }()
 	if n.loadRole() == roleFollower {
 		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardCompact, Revision: revision})
 		if err != nil {
@@ -823,7 +920,7 @@ func (n *Node) Compact(ctx context.Context, revision int64) error {
 	req := newWriteReq(ctx, e)
 	n.writeC <- req
 	n.mu.Unlock()
-	_, err := n.await(ctx, req, "compact", start, "", e.Revision)
+	_, err = n.await(ctx, req, "compact", start, "", e.Revision)
 	return err
 }
 
