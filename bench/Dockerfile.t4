@@ -1,6 +1,6 @@
 # Minimal T4 image for benchmarking (no SSH, no Jepsen tooling).
 # Run: docker build -f bench/Dockerfile.t4 -t t4-bench .
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
