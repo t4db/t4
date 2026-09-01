@@ -16,6 +16,8 @@ import (
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -140,6 +142,20 @@ func WithGRPCLimits(maxConcurrentStreams uint32, maxRecvMsgSize, maxSendMsgSize 
 // keepalive enforcement policy compatible with etcd v3 clients.
 //
 // Defaults come from DefaultKeepaliveOptions; pass WithKeepalive to override.
+// TracingOptions returns gRPC server options that extract OpenTelemetry trace
+// context from incoming etcd requests, so a client span links to the WAL and
+// quorum spans T4 records for the resulting write.
+//
+// Pass the result to grpc.NewServer alongside NewServerOptions. A nil tp
+// inherits the global provider, which is a no-op when none is configured.
+func TracingOptions(tp trace.TracerProvider) []grpc.ServerOption {
+	var opts []otelgrpc.Option
+	if tp != nil {
+		opts = append(opts, otelgrpc.WithTracerProvider(tp))
+	}
+	return []grpc.ServerOption{grpc.StatsHandler(otelgrpc.NewServerHandler(opts...))}
+}
+
 func NewServerOptions(authStore *auth.Store, tokens *auth.TokenStore, opts ...Option) []grpc.ServerOption {
 	cfg := serverConfig{
 		keepalive:            DefaultKeepaliveOptions(),

@@ -489,7 +489,10 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// Append locally before exposing IDs or payloads to followers. This
 		// sacrifices a small amount of fsync/network overlap, but ensures failed
 		// attempts never enter the peer replay buffer under reusable IDs.
+		walStart := time.Now()
 		err := n.wal.AppendBatch(batchCtx, entries)
+		walEnd := time.Now()
+		var quorumStart, quorumEnd time.Time
 		if err == nil && n.peerSrv != nil {
 			for _, req := range batch {
 				n.peerSrv.Broadcast(&req.entry)
@@ -507,9 +510,11 @@ func (n *Node) commitLoop(ctx context.Context) {
 			// Availability policy: if all followers disconnect mid-wait, we
 			// proceed anyway — the entry is already durable in the leader's
 			// WAL and will be replayed by followers when they reconnect.
+			quorumStart = time.Now()
 			if waitErr := n.peerSrv.WaitForFollowers(ctx, maxRev, peer.WaitMode(n.cfg.FollowerWaitMode)); waitErr != nil {
 				err = waitErr
 			}
+			quorumEnd = time.Now()
 		}
 		batchCancel() // release watcher goroutines
 
@@ -532,8 +537,14 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// leak stale pending revisions into a racing follow-up write.
 		n.clearPendingBatch(batch)
 
-		// Signal all callers.
+		// Signal all callers, stamping the phase timings first. await turns
+		// these into child spans of the caller's span; writing them here and
+		// reading them there is safe because the done send below establishes
+		// the happens-before.
 		for _, req := range batch {
+			req.walStart, req.walEnd = walStart, walEnd
+			req.quorumStart, req.quorumEnd = quorumStart, quorumEnd
+			req.batchSize = len(batch)
 			req.done <- err
 		}
 		if err != nil {

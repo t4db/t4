@@ -46,7 +46,7 @@ func TestStreamDelivery(t *testing.T) {
 	srv := peer.NewServer(1000, nil)
 	addr := startServer(t, srv)
 
-	cli := peer.NewClient(addr, "follower-1", 3, nil, nil)
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -96,7 +96,7 @@ func TestCatchUp(t *testing.T) {
 	}
 	srv.BroadcastCommit(1, 3)
 
-	cli := peer.NewClient(addr, "follower-1", 3, nil, nil)
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -147,7 +147,7 @@ func TestResyncRequired(t *testing.T) {
 	srv.BroadcastCommit(1, 10)
 
 	addr := startServer(t, srv)
-	cli := peer.NewClient(addr, "follower-1", 3, nil, nil)
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -177,7 +177,7 @@ func TestForwardWrite(t *testing.T) {
 	srv.SetForwardHandler(handler)
 	addr := startServer(t, srv)
 
-	cli := peer.NewClient(addr, "follower-1", 3, nil, nil)
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
 	defer cli.Close()
 
 	ctx := t.Context()
@@ -220,7 +220,7 @@ func (h *stubForwardHandler) HandleForward(_ context.Context, req *peer.ForwardR
 // after maxRetries consecutive connection failures.
 func TestLeaderUnreachable(t *testing.T) {
 	// Point at a port where nothing is listening.
-	cli := peer.NewClient("127.0.0.1:19999", "follower-1", 3, nil, nil)
+	cli := peer.NewClient("127.0.0.1:19999", "follower-1", 3, nil, nil, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -244,7 +244,7 @@ func TestMultipleFollowers(t *testing.T) {
 	for i := range received {
 		received[i] = make(chan wal.Entry, 16)
 		ch := received[i]
-		cli := peer.NewClient(addr, fmt.Sprintf("follower-%d", i), 3, nil, nil)
+		cli := peer.NewClient(addr, fmt.Sprintf("follower-%d", i), 3, nil, nil, nil)
 		go cli.Follow(ctx, 1, noopWAL, func(entries []wal.Entry) error {
 			for _, e := range entries {
 				ch <- e
@@ -285,7 +285,7 @@ func TestNoDuplicatesOnCatchUp(t *testing.T) {
 	srv.BroadcastCommit(1, 5)
 
 	addr := startServer(t, srv)
-	cli := peer.NewClient(addr, "follower-1", 3, nil, nil)
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -326,7 +326,7 @@ func TestFollowerAppliesOnlyAfterCommit(t *testing.T) {
 	srv := peer.NewServer(1000, nil)
 	addr := startServer(t, srv)
 
-	cli := peer.NewClient(addr, "follower-1", 3, nil, nil)
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -364,7 +364,7 @@ func TestCommitWithoutStagedEntryTriggersResyncRequired(t *testing.T) {
 	srv := peer.NewServer(1000, nil)
 	addr := startServer(t, srv)
 
-	cli := peer.NewClient(addr, "follower-1", 3, nil, nil)
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -442,7 +442,7 @@ func (s *flakyReplayServer) GoodBye(context.Context, *peer.GoodByeRequest) (*pee
 func TestReconnectReplaysUncommittedEntriesOnlyOnce(t *testing.T) {
 	addr := startServer(t, &flakyReplayServer{})
 
-	cli := peer.NewClient(addr, "follower-1", 3, nil, nil)
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 

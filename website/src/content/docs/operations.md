@@ -541,6 +541,87 @@ The dashboard contains six sections:
 
 ---
 
+### Distributed tracing
+
+T4 emits [OpenTelemetry](https://opentelemetry.io/) spans for the write path and
+for linearizable reads. Metrics tell you that p99 moved; spans tell you *which
+phase* of a specific write was slow — which matters here because group commit
+means a write's latency depends partly on the batch it landed in.
+
+#### Enabling it
+
+The `t4` binary turns tracing on when an OTLP endpoint is configured, using the
+standard environment variables — there are no T4-specific tracing flags:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.monitoring:4317 \
+OTEL_SERVICE_NAME=t4 \
+t4 run --data-dir /var/lib/t4
+```
+
+With no endpoint set, no provider is created and the span machinery is never
+entered.
+
+Traces are exported over **OTLP/gRPC**, which is port `4317` on a default
+collector. `OTEL_EXPORTER_OTLP_PROTOCOL` is not consulted, so pointing the
+endpoint at an OTLP/HTTP port such as `4318` will not work.
+
+Sampling follows `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG`
+(`always_on`, `always_off`, `traceidratio`, and the `parentbased_*` variants),
+defaulting to `parentbased_always_on`. Sample a busy cluster: at full rate every
+write produces a trace. The Helm chart defaults to `parentbased_traceidratio`
+at 1%.
+
+#### Embedded usage
+
+```go
+node, err := t4.Open(t4.Config{
+    // ...
+    TracerProvider: tp, // nil uses otel.GetTracerProvider()
+})
+```
+
+To propagate trace context from etcd clients into T4's spans, add
+`TracingOptions` to the gRPC server:
+
+```go
+grpcOpts := t4etcd.NewServerOptions(authStore, tokens)
+grpcOpts = append(grpcOpts, t4etcd.TracingOptions(tp)...)
+srv := grpc.NewServer(grpcOpts...)
+```
+
+#### Spans
+
+| Span | Emitted by |
+|---|---|
+| `t4.put`, `t4.create`, `t4.update`, `t4.delete`, `t4.delete_if_revision`, `t4.txn`, `t4.compact` | The write entry points |
+| `t4.get`, `t4.exists`, `t4.list`, `t4.count` | Linearizable reads (the span covers the leader round trip) |
+| `t4.wal.append` | Child of a write span: the group-commit WAL append, with `t4.batch_size` |
+| `t4.peer.wait_quorum` | Child of a write span: waiting for follower ACKs; absent in single-node mode |
+
+Only the `Linearizable*` read methods are traced. A plain `Get`, `List`,
+`Exists`, or `Count` is served from the local store without a leader round trip
+and produces no span.
+
+On a follower, a write also produces a client span for the forward to the
+leader, which links to the leader's spans — so one trace covers the whole path.
+
+#### Key names are never recorded
+
+Span attributes are exported to a collector, indexed, and retained, often in a
+different trust domain than the cluster. T4 therefore never records a key in a
+span. Instead the `t4.key_scope` attribute carries the first two path segments:
+
+| Key | `t4.key_scope` |
+|---|---|
+| `/registry/secrets/prod/db-password` | `/registry/secrets` |
+| `/registry/pods/default/nginx-abc123` | `/registry/pods` |
+
+That is enough to attribute latency to a resource type, which is what these
+questions are actually about, without exporting secret names, namespace names,
+or a workload inventory, and without unbounded attribute cardinality.
+
+
 ## Performance
 
 Numbers are from `go test -bench=. -benchtime=5s` on an Apple M4 Pro (12 cores, NVMe SSD). All tests use in-process

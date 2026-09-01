@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -34,6 +36,7 @@ type Client struct {
 	nodeID     string
 	maxRetries int                              // consecutive failures before ErrLeaderUnreachable (0 = unlimited)
 	tlsCreds   credentials.TransportCredentials // nil = plaintext
+	tp         trace.TracerProvider             // nil = inherit the global provider
 
 	connMu sync.Mutex
 	conn   *grpc.ClientConn // lazily initialised; nil after Close
@@ -45,11 +48,14 @@ type Client struct {
 // maxRetries is the number of consecutive connection failures before Follow
 // returns ErrLeaderUnreachable. Use 0 for unlimited retries.
 // tlsCreds may be nil for plaintext (only safe on a trusted network).
-func NewClient(leaderAddr, nodeID string, maxRetries int, tlsCreds credentials.TransportCredentials, log peerLogger) *Client {
+// tp propagates trace context on forwarded writes so a client span connects
+// through to the leader's commit spans; nil inherits the global provider,
+// which is a no-op when none is configured.
+func NewClient(leaderAddr, nodeID string, maxRetries int, tlsCreds credentials.TransportCredentials, log peerLogger, tp trace.TracerProvider) *Client {
 	if log == nil {
 		log = stdlibPeerLogger{}
 	}
-	return &Client{leaderAddr: leaderAddr, nodeID: nodeID, maxRetries: maxRetries, tlsCreds: tlsCreds, log: log}
+	return &Client{leaderAddr: leaderAddr, nodeID: nodeID, maxRetries: maxRetries, tlsCreds: tlsCreds, tp: tp, log: log}
 }
 
 // Close releases the underlying gRPC connection.
@@ -73,10 +79,15 @@ func (c *Client) getConn() (*grpc.ClientConn, error) {
 	if creds == nil {
 		creds = insecure.NewCredentials()
 	}
+	var otelOpts []otelgrpc.Option
+	if c.tp != nil {
+		otelOpts = append(otelOpts, otelgrpc.WithTracerProvider(c.tp))
+	}
 	conn, err := grpc.NewClient(
 		c.leaderAddr,
 		grpc.WithTransportCredentials(creds),
 		grpc.WithDefaultCallOptions(grpc.ForceCodec(Codec{})),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelOpts...)),
 	)
 	if err != nil {
 		return nil, err

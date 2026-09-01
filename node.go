@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -135,6 +138,17 @@ type writeReq struct {
 	entry wal.Entry
 	done  chan error
 	ctx   context.Context
+
+	// Commit-loop phase timings. The commit loop fills these before signalling
+	// done; await reads them only after receiving from done, so the channel
+	// establishes the happens-before and no lock is needed.
+	//
+	// These are plain values, never spans. The spans describing them are built
+	// in await, which owns the parent span, so no span object crosses the
+	// goroutine boundary and none can be left un-ended by a commit-loop path.
+	walStart, walEnd       time.Time
+	quorumStart, quorumEnd time.Time
+	batchSize              int
 }
 
 func newWriteReq(ctx context.Context, e wal.Entry) *writeReq {
@@ -204,6 +218,7 @@ type Node struct {
 	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
 	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
 	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample
+	tracer                 trace.Tracer
 
 	// bgCtx is cancelled by cancelBg — either on Close() or when fencedCheck
 	// detects that this node has been superseded as leader. When cancelled with
@@ -643,6 +658,11 @@ func Open(cfg Config) (*Node, error) {
 	n.cp = cp
 	n.db.Store(db)
 	n.initRevisionSampler()
+	tp := cfg.TracerProvider
+	if tp == nil {
+		tp = otel.GetTracerProvider()
+	}
+	n.tracer = tp.Tracer("github.com/t4db/t4")
 	if cfg.CheckpointEntries > 0 {
 		n.checkpointTriggerC = make(chan struct{}, 1)
 	}
@@ -729,7 +749,7 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 
 	n.observeTerm(rec.Term)
 	n.storeRole(roleFollower)
-	cli := peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log)
+	cli := peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log, n.cfg.TracerProvider)
 	n.peerCli = cli
 	n.leaderCli.Store(cli)
 	metrics.ElectionsTotal.WithLabelValues("lost").Inc()
@@ -992,7 +1012,11 @@ func WithLimit(n int64) ReadOption {
 // LinearizableGet returns the value for key with linearizability guaranteed.
 // On a follower it syncs to the leader's revision before serving locally.
 func (n *Node) LinearizableGet(ctx context.Context, key string, opts ...ReadOption) (*KeyValue, error) {
+	ctx, span := n.tracer.Start(ctx, "t4.get",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	defer span.End()
 	if err := n.syncWithLeader(ctx); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return n.Get(key, opts...)
@@ -1000,7 +1024,11 @@ func (n *Node) LinearizableGet(ctx context.Context, key string, opts ...ReadOpti
 
 // LinearizableExists reports whether key exists with linearizability guaranteed.
 func (n *Node) LinearizableExists(ctx context.Context, key string, opts ...ReadOption) (bool, error) {
+	ctx, span := n.tracer.Start(ctx, "t4.exists",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	defer span.End()
 	if err := n.syncWithLeader(ctx); err != nil {
+		span.RecordError(err)
 		return false, err
 	}
 	return n.Exists(key, opts...)
@@ -1009,7 +1037,11 @@ func (n *Node) LinearizableExists(ctx context.Context, key string, opts ...ReadO
 // LinearizableList returns keys with the given prefix with linearizability
 // guaranteed. Use WithFromKey / WithLimit / WithRevision to refine.
 func (n *Node) LinearizableList(ctx context.Context, prefix string, opts ...ReadOption) ([]*KeyValue, error) {
+	ctx, span := n.tracer.Start(ctx, "t4.list",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(prefix))))
+	defer span.End()
 	if err := n.syncWithLeader(ctx); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return n.List(prefix, opts...)
@@ -1018,7 +1050,11 @@ func (n *Node) LinearizableList(ctx context.Context, prefix string, opts ...Read
 // LinearizableCount returns the count of keys with the given prefix with
 // linearizability guaranteed. Use WithFromKey / WithRevision to refine.
 func (n *Node) LinearizableCount(ctx context.Context, prefix string, opts ...ReadOption) (int64, error) {
+	ctx, span := n.tracer.Start(ctx, "t4.count",
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(prefix))))
+	defer span.End()
 	if err := n.syncWithLeader(ctx); err != nil {
+		span.RecordError(err)
 		return 0, err
 	}
 	return n.Count(prefix, opts...)

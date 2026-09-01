@@ -9,12 +9,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -85,6 +90,12 @@ func runCmd() *cobra.Command {
 			}
 			logrus.SetLevel(lvl)
 
+			tp, shutdownTracing, err := initTracing(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("init tracing: %w", err)
+			}
+			defer func() { _ = shutdownTracing(context.Background()) }()
+
 			if walSyncUpload != "" && walSyncUpload != "true" && walSyncUpload != "false" {
 				return fmt.Errorf("--wal-sync-upload must be \"true\" or \"false\", got %q", walSyncUpload)
 			}
@@ -152,6 +163,7 @@ func runCmd() *cobra.Command {
 				LeaderWatchInterval:          time.Duration(leaderWatchIntervalSec) * time.Second,
 				FollowerMaxRetries:           followerMaxRetries,
 				FollowerWaitMode:             t4.FollowerWaitMode(followerWaitMode),
+				TracerProvider:               tp,
 				WatchSendTimeout:             watchSendTimeout,
 			}
 			encCfg, err := enc.config()
@@ -264,6 +276,7 @@ func runCmd() *cobra.Command {
 					Timeout:             grpcKeepaliveTimeout,
 				}),
 			)...)
+			grpcOpts = append(grpcOpts, t4etcd.TracingOptions(tp)...)
 
 			lis, err := net.Listen("tcp", listenAddr)
 			if err != nil {
@@ -551,6 +564,67 @@ func buildClientTLS(cert, key, ca string) (credentials.TransportCredentials, err
 // buildPeerTLS constructs mTLS credentials for both the leader's gRPC server
 // and a follower's gRPC client from PEM files.
 // ca is the CA cert used to verify the peer; cert/key are this node's identity.
+// initTracing builds an OTLP TracerProvider when an OTLP endpoint is
+// configured, and otherwise returns nil so tracing stays off. Returning nil
+// rather than a no-op provider keeps the "not configured" case free of any
+// span machinery at all.
+//
+// Endpoint, headers, sampling and service name are read from the standard
+// OTEL_* environment variables by the exporter and resource SDK, so there are
+// no t4-specific tracing flags to keep in sync with the spec.
+func initTracing(ctx context.Context) (trace.TracerProvider, func(context.Context) error, error) {
+	noop := func(context.Context) error { return nil }
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" &&
+		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == "" {
+		return nil, noop, nil
+	}
+	exp, err := otlptracegrpc.New(ctx)
+	if err != nil {
+		return nil, noop, fmt.Errorf("OTLP trace exporter: %w", err)
+	}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exp),
+		sdktrace.WithSampler(envSampler()),
+	)
+	// Also set the global provider so any library that resolves its tracer
+	// through otel.GetTracerProvider() participates in the same traces.
+	otel.SetTracerProvider(tp)
+	logrus.WithField("endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")).
+		Info("OpenTelemetry tracing enabled")
+	return tp, tp.Shutdown, nil
+}
+
+// envSampler builds the sampler named by OTEL_TRACES_SAMPLER. The Go SDK —
+// unlike the SDKs for some other languages — does not read these variables on
+// its own, so a database that would otherwise sample every write at full rate
+// has to wire them up explicitly.
+//
+// Defaults to parentbased_always_on, matching the SDK default, so behaviour is
+// unchanged when the variable is unset.
+func envSampler() sdktrace.Sampler {
+	arg := func(def float64) float64 {
+		v, err := strconv.ParseFloat(os.Getenv("OTEL_TRACES_SAMPLER_ARG"), 64)
+		if err != nil {
+			return def
+		}
+		return v
+	}
+	switch os.Getenv("OTEL_TRACES_SAMPLER") {
+	case "always_on":
+		return sdktrace.AlwaysSample()
+	case "always_off":
+		return sdktrace.NeverSample()
+	case "traceidratio":
+		return sdktrace.TraceIDRatioBased(arg(1))
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample())
+	case "parentbased_traceidratio":
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(arg(1)))
+	default: // "", "parentbased_always_on", or unrecognised
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	}
+}
+
 func buildPeerTLS(ca, cert, key string) (serverCreds, clientCreds credentials.TransportCredentials, err error) {
 	tlsCert, err := tls.LoadX509KeyPair(cert, key)
 	if err != nil {
