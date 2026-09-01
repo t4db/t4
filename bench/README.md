@@ -40,6 +40,17 @@ Tune ops count and concurrency with environment variables:
 BENCH_TOTAL=10000 BENCH_CLIENTS=8 ./bench/run.sh single
 ```
 
+Value size defaults to 256 bytes, which is well below a real workload. A
+Kubernetes object is several KiB, and payload size changes the answer: the
+write path is bytes-bound before it is operations-bound, so a benchmark at 256
+bytes measures per-operation overhead rather than the throughput ceiling an
+actual control plane would hit.
+
+```bash
+# Kubernetes-sized objects
+BENCH_VAL_SIZE=4096 BENCH_CLIENTS=256 ./bench/run.sh single-s3
+```
+
 ## Workloads
 
 | Workload | Description | Key insight |
