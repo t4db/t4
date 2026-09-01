@@ -51,6 +51,16 @@ actual control plane would hit.
 BENCH_VAL_SIZE=4096 BENCH_CLIENTS=256 ./bench/run.sh single-s3
 ```
 
+By default every write uses a new key, so put workloads only ever create.
+Updates take a different path — they read the previous version first — and real
+control-plane traffic is update-heavy, so measuring only creates misses half the
+write path. `BENCH_KEY_SPACE` cycles writes over a fixed set of keys:
+
+```bash
+# Lease-renewal shaped: 50k keys rewritten repeatedly
+BENCH_KEY_SPACE=50000 BENCH_VAL_SIZE=4096 ./bench/run.sh single-s3
+```
+
 ## Workloads
 
 | Workload | Description | Key insight |

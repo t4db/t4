@@ -11,6 +11,7 @@
 #   BENCH_TOTAL    total ops per workload (default: 50000)
 #   BENCH_CLIENTS  concurrent clients     (default: 16)
 #   BENCH_VAL_SIZE value size in bytes    (default: 256)
+#   BENCH_KEY_SPACE distinct keys to cycle (default: 0 = always new keys)
 #   BENCH_WORKLOADS space-separated list  (default: all six)
 set -euo pipefail
 
@@ -22,6 +23,7 @@ mkdir -p "$RESULTS_DIR"
 TOTAL="${BENCH_TOTAL:-50000}"
 CLIENTS="${BENCH_CLIENTS:-16}"
 VALSIZE="${BENCH_VAL_SIZE:-256}"
+KEYSPACE="${BENCH_KEY_SPACE:-0}"
 WORKLOADS="${BENCH_WORKLOADS:-seq-put par-put seq-get par-get mixed watch}"
 JSONL="$RESULTS_DIR/results.jsonl"
 
@@ -73,6 +75,7 @@ run_workloads() {
             --workload   "$wl" \
             --clients    "$CLIENTS" \
             --val-size   "$VALSIZE" \
+            --key-space  "$KEYSPACE" \
             --total      "$TOTAL" \
             --scenario   "$scenario" \
             --system     "$system" \
