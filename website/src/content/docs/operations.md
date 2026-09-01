@@ -562,6 +562,10 @@ t4 run --data-dir /var/lib/t4
 With no endpoint set, no provider is created and the span machinery is never
 entered.
 
+Traces are exported over **OTLP/gRPC**, which is port `4317` on a default
+collector. `OTEL_EXPORTER_OTLP_PROTOCOL` is not consulted, so pointing the
+endpoint at an OTLP/HTTP port such as `4318` will not work.
+
 Sampling follows `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG`
 (`always_on`, `always_off`, `traceidratio`, and the `parentbased_*` variants),
 defaulting to `parentbased_always_on`. Sample a busy cluster: at full rate every
@@ -594,6 +598,10 @@ srv := grpc.NewServer(grpcOpts...)
 | `t4.get`, `t4.exists`, `t4.list`, `t4.count` | Linearizable reads (the span covers the leader round trip) |
 | `t4.wal.append` | Child of a write span: the group-commit WAL append, with `t4.batch_size` |
 | `t4.peer.wait_quorum` | Child of a write span: waiting for follower ACKs; absent in single-node mode |
+
+Only the `Linearizable*` read methods are traced. A plain `Get`, `List`,
+`Exists`, or `Count` is served from the local store without a leader round trip
+and produces no span.
 
 On a follower, a write also produces a client span for the forward to the
 leader, which links to the leader's spans — so one trace covers the whole path.

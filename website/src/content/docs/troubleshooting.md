@@ -38,6 +38,40 @@ Trace-level logging prints every WAL entry, follower ACK, and S3 operation — u
 
 ---
 
+### No traces reaching the collector
+
+Check these in order — the first two account for most cases:
+
+1. **The endpoint is unset.** T4 only builds a tracer provider when
+   `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is
+   set. Confirm it took effect by looking for this line at startup:
+
+   ```
+   level=info msg="OpenTelemetry tracing enabled" endpoint=http://...:4317
+   ```
+
+   No line means no provider, and no spans are recorded at all.
+
+2. **Sampling is dropping them.** The Helm chart defaults to
+   `parentbased_traceidratio` at 1%, so 99 writes in 100 produce nothing. Set
+   `tracing.samplerArg=1.0` temporarily, or `tracing.sampler=always_on`, to
+   confirm the pipeline before tuning the rate back down.
+
+3. **The endpoint is an HTTP port.** Export is OTLP/gRPC only. A collector's
+   `4318` receiver will never be reached; use `4317`.
+
+4. **A `parentbased_*` sampler is honouring the caller.** If the etcd client
+   starts the trace and marks it not-sampled, T4 follows that decision no matter
+   what the ratio says. Use a non-parent-based sampler to check T4 in isolation.
+
+5. **The operation is not traced.** Only writes and the `Linearizable*` reads
+   emit spans. A plain `Get`, `List`, or a watch produces none.
+
+If spans arrive but a write shows no `t4.peer.wait_quorum` child, that is
+expected on a single node — there are no followers to wait for.
+
+---
+
 ## Startup issues
 
 ### `failed to read S3 manifest`

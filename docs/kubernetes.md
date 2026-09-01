@@ -381,6 +381,42 @@ Key metrics to alert on: see [Operations — Alerting](operations.md#alerting).
 
 ---
 
+## Distributed tracing
+
+T4 reads the standard OpenTelemetry environment variables; there are no
+T4-specific tracing flags. With no endpoint set, tracing stays off entirely.
+
+With Helm:
+
+```bash
+helm install t4 oci://ghcr.io/t4db/charts/t4 \
+  --set tracing.endpoint=http://otel-collector.monitoring:4317 \
+  --set tracing.samplerArg=0.01
+```
+
+With raw manifests, set the variables on the container directly:
+
+```yaml
+env:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: http://otel-collector.monitoring:4317
+  - name: OTEL_SERVICE_NAME
+    value: t4
+  - name: OTEL_TRACES_SAMPLER
+    value: parentbased_traceidratio
+  - name: OTEL_TRACES_SAMPLER_ARG
+    value: "0.01"
+```
+
+The endpoint must be the collector's OTLP **gRPC** port (`4317`); traces are not
+exported over OTLP/HTTP. Sample deliberately — at full rate every write produces
+a trace, which is why the chart defaults to 1%.
+
+See [Operations — Distributed tracing](operations.md#distributed-tracing) for the
+spans emitted and for why key names are never recorded.
+
+---
+
 ## See also
 
 - [Operations guide](operations.md) — full cluster setup, TLS, auth, rolling upgrade

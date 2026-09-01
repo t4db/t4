@@ -257,6 +257,40 @@ The ServiceMonitor scrapes the `/metrics` endpoint on port `9090`.
 
 ---
 
+## Distributed tracing
+
+Set `tracing.endpoint` to export OpenTelemetry traces for the write path and
+linearizable reads. Leaving it empty keeps tracing off entirely — no provider is
+created and no spans are recorded.
+
+```yaml
+# values.yaml
+tracing:
+  endpoint: http://otel-collector.monitoring:4317
+  serviceName: t4
+  sampler: parentbased_traceidratio
+  samplerArg: "0.01"   # 1% of traces
+```
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `tracing.endpoint` | `""` | OTLP **gRPC** endpoint. Empty disables tracing. Use the collector's gRPC port (`4317`), not its HTTP port (`4318`). |
+| `tracing.serviceName` | `t4` | Reported as the service name in trace resource attributes. |
+| `tracing.sampler` | `parentbased_traceidratio` | One of `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio`. |
+| `tracing.samplerArg` | `"0.01"` | Ratio for the `traceidratio` samplers, 0.0–1.0. Ignored by the other samplers. |
+
+The chart renders these into the standard `OTEL_*` environment variables on the
+StatefulSet, so anything the OpenTelemetry SDK reads from the environment can
+also be set through `extraEnv`.
+
+Sample deliberately. Every write produces a trace at full rate, which is why the
+chart defaults to 1% rather than `always_on`.
+
+Span names, attributes, and the reason key names are never exported are
+documented in [Operations — Distributed tracing](/operations/#distributed-tracing).
+
+---
+
 ## Envoy proxy (read scale-out)
 
 When `replicaCount > 1`, enabling the Envoy proxy routes writes to the leader and load-balances reads across all healthy replicas:
@@ -332,6 +366,10 @@ serviceMonitor:
   namespace: monitoring
   labels:
     release: kube-prometheus-stack
+
+tracing:
+  endpoint: http://otel-collector.monitoring:4317
+  samplerArg: "0.01"
 
 proxy:
   enabled: true
