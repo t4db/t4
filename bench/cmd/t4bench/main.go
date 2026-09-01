@@ -38,6 +38,7 @@ var (
 	fValSize     = flag.Int("val-size", 256, "value size in bytes")
 	fOutput      = flag.String("output", "text", "output format: text|jsonl")
 	fPrefix      = flag.String("prefix", "/bench/", "key prefix")
+	fKeySpace    = flag.Int64("key-space", 0, "distinct keys to cycle through (0 = every write a new key)")
 	fScenario    = flag.String("scenario", "", "scenario label written into jsonl output")
 	fSystem      = flag.String("system", "", "system label written into jsonl output (e.g. t4, etcd)")
 	fDialTimeout = flag.Duration("dial-timeout", 10*time.Second, "connection timeout")
@@ -145,7 +146,20 @@ func main() {
 // ── key / value helpers ───────────────────────────────────────────────────────
 
 // makeKey returns a zero-padded key of approximately fKeySize bytes.
+//
+// With key-space set the counter wraps, so writes land on the same keys
+// repeatedly and become updates rather than creates. The default of 0 keeps
+// every write a new key.
+//
+// The distinction matters: a create and an update take different paths, since
+// an update has to read the previous version first. A benchmark that only ever
+// creates keys measures half the write path, and it is the half real
+// control-plane traffic exercises least — Kubernetes lease renewals rewrite the
+// same keys every few seconds.
 func makeKey(i int64) string {
+	if *fKeySpace > 0 {
+		i %= *fKeySpace
+	}
 	p := *fPrefix
 	s := fmt.Sprintf("%d", i)
 	pad := *fKeySize - len(p) - len(s)
