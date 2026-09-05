@@ -621,6 +621,17 @@ That is enough to attribute latency to a resource type, which is what these
 questions are actually about, without exporting secret names, namespace names,
 or a workload inventory, and without unbounded attribute cardinality.
 
+#### Overhead when tracing is off
+
+With no OTLP endpoint configured T4 installs no OpenTelemetry gRPC stats handler
+at all, so a request allocates exactly what it would if the tracing code were
+absent — a small `Range` measures an identical allocation count either way.
+
+Turning tracing on costs roughly 25% more allocations per request. That cost is
+the per-RPC tagging, which happens before the sampler is consulted, so
+`OTEL_TRACES_SAMPLER=always_off` does not avoid it. To switch tracing off, unset
+the endpoint rather than sampling it away.
+
 
 ## Performance
 
