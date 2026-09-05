@@ -1,4 +1,4 @@
-FROM clojure:temurin-24-lein-bookworm-slim
+FROM clojure:temurin-26-lein-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       openssh-client \
