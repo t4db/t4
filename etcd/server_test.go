@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/t4db/t4"
 	t4etcd "github.com/t4db/t4/etcd"
@@ -646,5 +647,19 @@ func TestCompact(t *testing.T) {
 	}
 	if resp.Header == nil {
 		t.Error("expected response header")
+	}
+}
+
+// TestTracingOptionsNilIsFree pins the cost contract: tracing is opt-in, so a
+// nil provider must install nothing. otelgrpc's stats handler tags every RPC
+// and every message whether or not anything is sampled — when it was installed
+// unconditionally it added ~38 allocations to a small Range, about a fifth of
+// the total, on clusters that had never enabled tracing.
+func TestTracingOptionsNilIsFree(t *testing.T) {
+	if opts := t4etcd.TracingOptions(nil); len(opts) != 0 {
+		t.Fatalf("TracingOptions(nil) = %d options, want 0", len(opts))
+	}
+	if opts := t4etcd.TracingOptions(noop.NewTracerProvider()); len(opts) != 1 {
+		t.Fatalf("TracingOptions(tp) = %d options, want 1", len(opts))
 	}
 }

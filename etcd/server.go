@@ -147,13 +147,18 @@ func WithGRPCLimits(maxConcurrentStreams uint32, maxRecvMsgSize, maxSendMsgSize 
 // quorum spans T4 records for the resulting write.
 //
 // Pass the result to grpc.NewServer alongside NewServerOptions. A nil tp
-// inherits the global provider, which is a no-op when none is configured.
+// returns no options at all: the stats handler is not free when it has nothing
+// to export — it tags every RPC and every message regardless of sampling, which
+// measures as roughly a fifth of the allocations of a small Range. Tracing is
+// opt-in, so the cost has to be opt-in with it. To inherit the global provider,
+// pass otel.GetTracerProvider() explicitly.
 func TracingOptions(tp trace.TracerProvider) []grpc.ServerOption {
-	var opts []otelgrpc.Option
-	if tp != nil {
-		opts = append(opts, otelgrpc.WithTracerProvider(tp))
+	if tp == nil {
+		return nil
 	}
-	return []grpc.ServerOption{grpc.StatsHandler(otelgrpc.NewServerHandler(opts...))}
+	return []grpc.ServerOption{
+		grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(tp))),
+	}
 }
 
 func NewServerOptions(authStore *auth.Store, tokens *auth.TokenStore, opts ...Option) []grpc.ServerOption {

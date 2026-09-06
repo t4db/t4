@@ -49,8 +49,10 @@ type Client struct {
 // returns ErrLeaderUnreachable. Use 0 for unlimited retries.
 // tlsCreds may be nil for plaintext (only safe on a trusted network).
 // tp propagates trace context on forwarded writes so a client span connects
-// through to the leader's commit spans; nil inherits the global provider,
-// which is a no-op when none is configured.
+// through to the leader's commit spans. A nil tp installs no stats handler:
+// otelgrpc tags every RPC whether or not anything is sampled, and a follower
+// forwards every write through this client. Pass otel.GetTracerProvider()
+// explicitly to inherit the global provider.
 func NewClient(leaderAddr, nodeID string, maxRetries int, tlsCreds credentials.TransportCredentials, log peerLogger, tp trace.TracerProvider) *Client {
 	if log == nil {
 		log = stdlibPeerLogger{}
@@ -79,16 +81,15 @@ func (c *Client) getConn() (*grpc.ClientConn, error) {
 	if creds == nil {
 		creds = insecure.NewCredentials()
 	}
-	var otelOpts []otelgrpc.Option
-	if c.tp != nil {
-		otelOpts = append(otelOpts, otelgrpc.WithTracerProvider(c.tp))
-	}
-	conn, err := grpc.NewClient(
-		c.leaderAddr,
+	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
 		grpc.WithDefaultCallOptions(grpc.ForceCodec(Codec{})),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelOpts...)),
-	)
+	}
+	if c.tp != nil {
+		dialOpts = append(dialOpts, grpc.WithStatsHandler(
+			otelgrpc.NewClientHandler(otelgrpc.WithTracerProvider(c.tp))))
+	}
+	conn, err := grpc.NewClient(c.leaderAddr, dialOpts...)
 	if err != nil {
 		return nil, err
 	}
