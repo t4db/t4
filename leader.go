@@ -591,6 +591,11 @@ func (n *Node) stepDownOnFatalCommitError() {
 // not yet present in S3. This is called when becoming leader so that local
 // entries (recovered via replayLocal) are durable in object storage before
 // followers can bootstrap.
+//
+// The List-then-skip below is a bandwidth optimisation, not a correctness
+// guard: the outgoing leader's uploadLoop may publish a segment between the
+// List and our Put. Safety comes from makeUploader's conditional write, which
+// keeps whichever copy was published first.
 func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Store, log Logger) error {
 	if store == nil {
 		return nil

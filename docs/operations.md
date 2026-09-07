@@ -482,6 +482,7 @@ The dashboard contains six sections:
 | `t4_role`                        | gauge     | `role`        | 1 for the active role (`leader`/`follower`/`single`)                                                  |
 | `t4_wal_uploads_total`           | counter   | —             | WAL segments successfully uploaded                                                                    |
 | `t4_wal_upload_errors_total`     | counter   | —             | Failed WAL segment uploads                                                                            |
+| `t4_wal_upload_conflicts_total`  | counter   | —             | WAL segment uploads skipped because the object already existed                                        |
 | `t4_wal_upload_duration_seconds` | histogram | —             | WAL segment upload latency                                                                            |
 | `t4_wal_gc_segments_total`       | counter   | —             | WAL segments deleted from S3 after checkpointing                                                      |
 | `t4_checkpoints_total`           | counter   | —             | Checkpoints written to S3                                                                             |
