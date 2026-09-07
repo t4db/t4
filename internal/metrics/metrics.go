@@ -52,6 +52,12 @@ var (
 	// Role has one labelled gauge per possible role; the active one is set to 1.
 	Role *prometheus.GaugeVec
 
+	// ReplicationDegraded is 1 while the leader cannot meet its configured
+	// follower ACK target and is therefore uploading each batch to object
+	// storage before acknowledging it. Sustained 1 means writes are paying an
+	// S3 round trip and the cluster has lost its replication redundancy.
+	ReplicationDegraded prometheus.Gauge
+
 	// WALUploadsTotal counts WAL segments successfully uploaded to S3.
 	WALUploadsTotal prometheus.Counter
 
@@ -186,6 +192,11 @@ func Register(reg prometheus.Registerer) {
 			Help: "Current node role; 1 = active, 0 = inactive.",
 		}, []string{"role"})
 
+		ReplicationDegraded = prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "t4_replication_degraded",
+			Help: "1 when the leader cannot meet its follower ACK target and is flushing each batch to object storage before acknowledging.",
+		})
+
 		WALUploadsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "t4_wal_uploads_total",
 			Help: "Total WAL segments uploaded to object storage.",
@@ -283,6 +294,7 @@ func Register(reg prometheus.Registerer) {
 			CurrentRevision,
 			CompactRevision,
 			Role,
+			ReplicationDegraded,
 			WALUploadsTotal,
 			WALUploadErrors,
 			WALUploadDuration,

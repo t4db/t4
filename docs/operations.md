@@ -480,6 +480,7 @@ The dashboard contains six sections:
 | `t4_current_revision`            | gauge     | —             | Latest applied revision                                                                               |
 | `t4_compact_revision`            | gauge     | —             | Compaction watermark                                                                                  |
 | `t4_role`                        | gauge     | `role`        | 1 for the active role (`leader`/`follower`/`single`)                                                  |
+| `t4_replication_degraded`        | gauge     | —             | 1 while the leader flushes each batch to S3 for lack of follower ACKs                                 |
 | `t4_wal_uploads_total`           | counter   | —             | WAL segments successfully uploaded                                                                    |
 | `t4_wal_upload_errors_total`     | counter   | —             | Failed WAL segment uploads                                                                            |
 | `t4_wal_upload_duration_seconds` | histogram | —             | WAL segment upload latency                                                                            |

@@ -404,6 +404,10 @@ func (n *Node) commitLoop(ctx context.Context) {
 	// cluster stalls until an operator restarts the dead node.
 	var fatalExit bool
 
+	// Tracks the last durability mode pushed to the WAL so the toggle only
+	// fires on transitions rather than on every batch.
+	degraded := false
+
 	defer func() {
 		// Fence the node first so new writers fail fast.
 		n.closed.Store(true)
@@ -486,6 +490,25 @@ func (n *Node) commitLoop(ctx context.Context) {
 			entries[i] = &req.entry
 		}
 
+		// Decide this batch's durability before appending it. A quorum ACK is
+		// what normally makes a write survive this node, so when too few
+		// followers are connected to produce one, the write has to reach
+		// object storage before it is acknowledged instead. Without this the
+		// leader would keep acknowledging writes whose only copy is a local
+		// disk it was never promised would outlive the process.
+		if want := n.replicationDegraded(); want != degraded {
+			if setter, ok := n.wal.(interface{ SetSyncUpload(bool) }); ok {
+				setter.SetSyncUpload(want)
+				degraded = want
+				metrics.ReplicationDegraded.Set(boolToFloat(want))
+				if want {
+					n.log.Warnf("t4: replication below ACK target — flushing each batch to object storage before acknowledging")
+				} else {
+					n.log.Infof("t4: replication restored — resuming asynchronous WAL upload")
+				}
+			}
+		}
+
 		// Append locally before exposing IDs or payloads to followers. This
 		// sacrifices a small amount of fsync/network overlap, but ensures failed
 		// attempts never enter the peer replay buffer under reusable IDs.
@@ -560,6 +583,30 @@ func (n *Node) commitLoop(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// replicationDegraded reports whether this leader currently lacks the followers
+// needed to meet cfg.FollowerWaitMode's ACK target.
+//
+// Only consulted when WALSyncUpload is set: that flag is the existing knob for
+// "block on object storage so an acknowledged write survives losing this disk",
+// and an operator who turned it off for a durable volume has already answered
+// this question.
+func (n *Node) replicationDegraded() bool {
+	if n.peerSrv == nil || n.cfg.ObjectStore == nil {
+		return false
+	}
+	if n.cfg.WALSyncUpload == nil || !*n.cfg.WALSyncUpload {
+		return false
+	}
+	return !n.peerSrv.ReplicationSatisfiable(peer.WaitMode(n.cfg.FollowerWaitMode))
+}
+
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // stepDownOnFatalCommitError releases leadership after the commit loop has
