@@ -221,6 +221,20 @@ func WithSegmentMaxAge(d time.Duration) Option {
 	return func(w *WAL) { w.segMaxAge = d }
 }
 
+// SetSyncUpload turns synchronous upload on or off for subsequent AppendBatch
+// calls. A leader flips this on when replication degrades below its configured
+// ACK target: with too few followers to make a write durable by replication,
+// object storage becomes the only place an acknowledged write survives, so it
+// has to get there before the caller is told the write succeeded.
+//
+// Each batch appended in this mode seals and uploads its own segment, so a
+// sustained degradation trades one PUT per batch for the durability guarantee.
+func (w *WAL) SetSyncUpload(on bool) {
+	w.mu.Lock()
+	w.syncUpload = on
+	w.mu.Unlock()
+}
+
 // WithSyncUpload makes every AppendBatch upload the active segment to object
 // storage synchronously before returning. This guarantees that any acknowledged
 // write is durable in S3, even if the process crashes immediately after. Has no

@@ -244,6 +244,22 @@ func (s *Server) WaitForFollowers(ctx context.Context, rev int64, mode WaitMode)
 	}
 }
 
+// ReplicationSatisfiable reports whether the followers connected right now
+// could meet mode's ACK target. When it returns false a committed write is
+// durable only where the leader itself puts it: nothing is replicated, so
+// WaitForFollowers will return without having proven anything.
+//
+// WaitNone is always satisfiable — the operator has explicitly opted out of
+// replication durability, and it is not this call's job to override that.
+func (s *Server) ReplicationSatisfiable(mode WaitMode) bool {
+	if mode == WaitNone {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return requiredFollowerACKs(len(s.followers), mode) > 0
+}
+
 func requiredFollowerACKs(connected int, mode WaitMode) int {
 	switch mode {
 	case WaitNone:

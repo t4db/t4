@@ -147,8 +147,12 @@ type Config struct {
 	// if local storage is destroyed before the upload completes. Use this when
 	// local storage is already durable (e.g. a PVC).
 	//
-	// Has no effect in multi-node mode; quorum ACK provides durability without
-	// blocking on S3, so uploads are always async there.
+	// In multi-node mode a quorum ACK normally provides durability, so uploads
+	// stay asynchronous while enough followers are connected to produce one.
+	// If replication drops below FollowerWaitMode's ACK target the leader falls
+	// back to blocking on S3 per batch, because a write acknowledged with no
+	// replica and no upload would survive only on local disk. Set false to keep
+	// uploads asynchronous even then (appropriate when local storage is durable).
 	WALSyncUpload *bool
 
 	// CheckpointInterval controls how often the leader writes a checkpoint.
