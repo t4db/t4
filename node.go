@@ -1250,7 +1250,27 @@ func (n *Node) Watch(ctx context.Context, prefix string, startRev int64, opts ..
 // Kept as a thin shim to preserve existing call sites.
 func toKV(sv *istore.KeyValue) *KeyValue { return sv }
 
+// makeUploader adapts an object.Store to the wal.Uploader signature.
+//
+// Uploads are conditional (PutIfAbsent) whenever the store supports it, which
+// makes a published WAL segment immutable: the first writer to reach a given
+// wal/<term>/<firstRev> key wins and no later writer can rewrite it. Two
+// writers legitimately race for the same key during handover — the outgoing
+// leader's async uploadLoop is still draining while the incoming leader runs
+// uploadLocalWALSegments — and a fenced former leader must not be able to
+// overwrite the segment the new term has already replayed from. Under
+// last-writer-wins it could, resurrecting entries the new term discarded or
+// replacing a segment with a shorter prefix of itself.
+//
+// A conflict is therefore success, not failure: the segment is durable in
+// object storage, which is all the caller asked for. This also makes retries
+// after an ambiguous timeout (the PUT landed but the response was lost)
+// idempotent rather than a source of duplicate writes.
 func makeUploader(obj object.Store, log Logger) wal.Uploader {
+	// Resolved once: the wrappers in pkg/object (instrumented, encrypted)
+	// forward the conditional methods and preserve this assertion.
+	cond, _ := obj.(object.ConditionalStore)
+
 	return func(ctx context.Context, localPath, objectKey string) error {
 		f, err := os.Open(localPath)
 		if err != nil {
@@ -1275,7 +1295,19 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 		}
 		defer f.Close()
 		start := time.Now()
-		if err := obj.Put(ctx, objectKey, f); err != nil {
+		if cond != nil {
+			err = cond.PutIfAbsent(ctx, objectKey, f)
+			if errors.Is(err, object.ErrPreconditionFailed) {
+				// Another writer published this segment first. Its copy is
+				// authoritative; drop ours and reclaim the local file.
+				metrics.WALUploadConflicts.Inc()
+				log.Debugf("uploader: %q already present in object storage — keeping the existing object", objectKey)
+				return os.Remove(localPath)
+			}
+		} else {
+			err = obj.Put(ctx, objectKey, f)
+		}
+		if err != nil {
 			metrics.WALUploadErrors.Inc()
 			return err
 		}

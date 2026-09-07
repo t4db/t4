@@ -58,6 +58,12 @@ var (
 	// WALUploadErrors counts failed WAL segment uploads.
 	WALUploadErrors prometheus.Counter
 
+	// WALUploadConflicts counts WAL segment uploads that were rejected because
+	// the object already existed. Expected during leader handover and on
+	// upload retries; a sustained non-zero rate means two writers are racing
+	// on the same segment key.
+	WALUploadConflicts prometheus.Counter
+
 	// WALUploadDuration measures WAL segment upload latency.
 	WALUploadDuration prometheus.Histogram
 
@@ -196,6 +202,11 @@ func Register(reg prometheus.Registerer) {
 			Help: "Total WAL segment upload errors.",
 		})
 
+		WALUploadConflicts = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "t4_wal_upload_conflicts_total",
+			Help: "Total WAL segment uploads skipped because the object already existed.",
+		})
+
 		WALUploadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "t4_wal_upload_duration_seconds",
 			Help:    "WAL segment upload duration.",
@@ -285,6 +296,7 @@ func Register(reg prometheus.Registerer) {
 			Role,
 			WALUploadsTotal,
 			WALUploadErrors,
+			WALUploadConflicts,
 			WALUploadDuration,
 			WALGCTotal,
 			CheckpointsTotal,
