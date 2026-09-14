@@ -285,9 +285,11 @@ proxy:
 minio:
   enabled: false
 
+  # MinIO's community images were withdrawn from Docker Hub; quay.io is the
+  # remaining publisher.
   image:
-    repository: minio/minio
-    tag: latest
+    repository: quay.io/minio/minio
+    tag: RELEASE.2025-09-07T16-13-09Z
     pullPolicy: IfNotPresent
 
   # Credentials for the MinIO root user.  Also used as T4_S3_ACCESS_KEY_ID /
@@ -321,6 +323,6 @@ minio:
 
   # Image used by the bucket-init Job (minio/mc).
   mcImage:
-    repository: minio/mc
-    tag: latest
+    repository: quay.io/minio/mc
+    tag: RELEASE.2025-08-13T08-35-41Z
     pullPolicy: IfNotPresent

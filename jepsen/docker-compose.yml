@@ -42,8 +42,10 @@ services:
   n5: { <<: *node, hostname: n5 }
 
   # ── MinIO (object store, outside partition boundary) ──────────────────────
+  # MinIO's community images were withdrawn from Docker Hub; quay.io is the
+  # remaining publisher. Pinned to a release tag so the harness can't drift.
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     hostname: minio
     networks: [jepsen]
     command: server /data --console-address :9001
@@ -59,7 +61,7 @@ services:
 
   # Creates the 'jepsen' bucket on first boot.
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     networks: [jepsen]
     depends_on:
       minio: { condition: service_healthy }

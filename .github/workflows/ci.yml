@@ -122,7 +122,7 @@ jobs:
             -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
 
           for i in {1..60}; do
             if curl -fsS http://127.0.0.1:9000/minio/health/live; then

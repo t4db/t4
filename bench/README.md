@@ -98,7 +98,7 @@ a fairer comparison.
 |---------|-------|-------|
 | T4 | built from source | `--wal-sync-upload=true`, MinIO as S3 |
 | etcd | `bitnami/etcd:3.6` | single node, default config |
-| MinIO | `minio/minio:latest` | local Docker, S3-compatible |
+| MinIO | `quay.io/minio/minio` | local Docker, S3-compatible |
 
 **What it shows:** T4 with remote durability comparable to etcd's fsync
 model. Every WAL segment is uploaded to MinIO before the write ACK is returned.
@@ -116,7 +116,7 @@ storage medium (NVMe: ~100 µs, cloud disk: 1–5 ms).
 |---------|-------|-------|
 | t4{1,2,3} | built from source | WAL + leader election via MinIO |
 | etcd{1,2,3} | `bitnami/etcd:3.6` | standard Raft cluster |
-| MinIO | `minio/minio:latest` | shared S3 for T4 |
+| MinIO | `quay.io/minio/minio` | shared S3 for T4 |
 
 **What it shows:** End-to-end quorum write throughput and latency for a
 replicated cluster. The benchmark sends to all endpoints; `clientv3` routes

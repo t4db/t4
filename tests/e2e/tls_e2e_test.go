@@ -311,7 +311,7 @@ func startTLSMinIO(t *testing.T, ctx context.Context, workDir, certPath, keyPath
 		"-v", certsDir+":/root/.minio/certs:ro",
 		"-e", "MINIO_ROOT_USER=minioadmin",
 		"-e", "MINIO_ROOT_PASSWORD=minioadmin",
-		"minio/minio:latest",
+		"quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
 		"server", "/data",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
