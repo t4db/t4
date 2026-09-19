@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { unified } from '@astrojs/markdown-remark';
 import { visit } from 'unist-util-visit';
 
 /**
@@ -56,7 +57,10 @@ export default defineConfig({
 	site,
 	base,
 	markdown: {
-		rehypePlugins: [rehypePrependBase(base)],
+		// Starlight 0.42 made Sätteri the default Markdown processor and dropped
+		// `@astrojs/markdown-remark` to an optional peer dependency. Keep the
+		// unified processor explicitly so the rehype plugin below keeps running.
+		processor: unified({ rehypePlugins: [rehypePrependBase(base)] }),
 	},
 	integrations: [
 		starlight({
