@@ -114,3 +114,21 @@ func TestS3EndpointHostDefaultsToAWS(t *testing.T) {
 		t.Fatalf("want %q, got %q", defaultAWSS3Endpoint, got)
 	}
 }
+
+func TestS3StorePrefixIgnoresSurroundingSlashes(t *testing.T) {
+	for _, prefix := range []string{"t4", "t4/", "/t4", "/t4/", "t4//"} {
+		s := NewS3Store(nil, "bucket", prefix)
+		if got := s.key("manifest/latest"); got != "t4/manifest/latest" {
+			t.Errorf("prefix %q: key = %q, want %q", prefix, got, "t4/manifest/latest")
+		}
+	}
+	for _, prefix := range []string{"", "/", "//"} {
+		s := NewS3Store(nil, "bucket", prefix)
+		if got := s.key("manifest/latest"); got != "manifest/latest" {
+			t.Errorf("prefix %q: key = %q, want %q", prefix, got, "manifest/latest")
+		}
+	}
+	if got := NewS3Store(nil, "bucket", "a/b/").key("wal/1"); got != "a/b/wal/1" {
+		t.Errorf("nested prefix: key = %q, want %q", got, "a/b/wal/1")
+	}
+}
