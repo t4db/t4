@@ -25,13 +25,14 @@ const (
 type S3Store struct {
 	client *minio.Client
 	bucket string
-	prefix string // optional key prefix (no trailing slash needed)
+	prefix string // optional key prefix, without leading or trailing slashes
 }
 
 // NewS3Store creates a Store backed by the given S3 bucket.
-// prefix is prepended to every key (may be empty).
+// prefix is prepended to every key (may be empty). Leading and trailing
+// slashes are ignored, so "t4", "t4/" and "/t4/" all address the same keys.
 func NewS3Store(client *minio.Client, bucket, prefix string) *S3Store {
-	return &S3Store{client: client, bucket: bucket, prefix: prefix}
+	return &S3Store{client: client, bucket: bucket, prefix: strings.Trim(prefix, "/")}
 }
 
 // S3Config holds the parameters for NewS3StoreFromConfig.
@@ -39,7 +40,8 @@ type S3Config struct {
 	// Bucket is the S3 bucket name. Required.
 	Bucket string
 
-	// Prefix is an optional key prefix (no trailing slash needed).
+	// Prefix is an optional key prefix. Leading and trailing slashes are
+	// ignored.
 	Prefix string
 
 	// Endpoint overrides the S3 endpoint URL for MinIO and other
