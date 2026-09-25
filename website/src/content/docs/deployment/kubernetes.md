@@ -117,7 +117,7 @@ open http://localhost:9001/rustfs/console/
 
 > ⚠ **Not for production.** Use a managed S3 service or a dedicated S3-compatible cluster for production deployments.
 
-> **Upgrading from chart 0.2.x:** the `minio.*` values were renamed to `s3server.*` and the bundled server is now RustFS. The server gets a new PVC (`t4-s3`) and the default bucket is now `t4-data`, so objects in the old `t4-minio` volume are not migrated — treat it as a fresh dev store. The chart refuses to render while `minio.enabled` is set.
+> **Upgrading from chart 0.5.x or earlier (to 0.6.0+):** the `minio.*` values were renamed to `s3server.*` and the bundled server is now RustFS. The server gets a new PVC (`t4-s3`) and the default bucket is now `t4-data`, so objects in the old `t4-minio` volume are not migrated — treat it as a fresh dev store. The chart refuses to render while `minio.enabled` is set.
 
 ---
 
