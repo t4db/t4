@@ -1,25 +1,25 @@
-{{- if .Values.minio.enabled }}
+{{- if .Values.s3server.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "t4.minio.fullname" . }}
+  name: {{ include "t4.s3server.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "t4.labels" . | nindent 4 }}
-    app.kubernetes.io/component: minio
+    app.kubernetes.io/component: s3server
 spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: {{ include "t4.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: minio
+    app.kubernetes.io/component: s3server
   ports:
     - name: s3
-      port: {{ .Values.minio.service.port }}
+      port: {{ .Values.s3server.service.port }}
       targetPort: s3
       protocol: TCP
     - name: console
-      port: {{ .Values.minio.service.consolePort }}
+      port: {{ .Values.s3server.service.consolePort }}
       targetPort: console
       protocol: TCP
 {{- end }}

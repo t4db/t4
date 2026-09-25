@@ -18,9 +18,9 @@ This guide covers running T4 on Kubernetes — both single-node and multi-node c
 # Single node (no S3 — local PVC only)
 helm install t4 oci://ghcr.io/t4db/charts/t4
 
-# Single node with built-in MinIO (easy S3 for dev/CI)
+# Single node with the built-in S3 server (easy S3 for dev/CI)
 helm install t4 oci://ghcr.io/t4db/charts/t4 \
-  --set minio.enabled=true
+  --set s3server.enabled=true
 
 # Single node with AWS S3
 helm install t4 oci://ghcr.io/t4db/charts/t4 \
@@ -34,7 +34,7 @@ helm install t4 oci://ghcr.io/t4db/charts/t4 \
   --set s3.region=us-east-1
 ```
 
-See the [full Kubernetes deployment guide](https://t4db.github.io/t4/deployment/kubernetes/) for Helm values, TLS, IRSA, Envoy proxy, and MinIO configuration.
+See the [full Kubernetes deployment guide](https://t4db.github.io/t4/deployment/kubernetes/) for Helm values, TLS, IRSA, Envoy proxy, and built-in S3 server configuration.
 
 ---
 

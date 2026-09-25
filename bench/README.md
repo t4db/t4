@@ -29,7 +29,7 @@ To run only a subset of scenarios:
 
 ```bash
 ./bench/run.sh single          # fastest, no S3
-./bench/run.sh single-s3       # with MinIO WAL upload
+./bench/run.sh single-s3       # with S3 WAL upload
 ./bench/run.sh cluster         # 3-node both
 ./bench/run.sh single cluster  # two scenarios
 ```
@@ -92,18 +92,18 @@ a fairer comparison.
 
 ---
 
-### `single-s3` — WAL sync-uploaded to MinIO
+### `single-s3` — WAL sync-uploaded to S3
 
 | Service | Image | Notes |
 |---------|-------|-------|
-| T4 | built from source | `--wal-sync-upload=true`, MinIO as S3 |
+| T4 | built from source | `--wal-sync-upload=true`, RustFS as S3 |
 | etcd | `bitnami/etcd:3.6` | single node, default config |
-| MinIO | `quay.io/minio/minio` | local Docker, S3-compatible |
+| RustFS | `rustfs/rustfs` | local Docker, S3-compatible |
 
 **What it shows:** T4 with remote durability comparable to etcd's fsync
-model. Every WAL segment is uploaded to MinIO before the write ACK is returned.
+model. Every WAL segment is uploaded to S3 before the write ACK is returned.
 
-**Caveat:** MinIO runs on the same machine (Docker bridge), so network latency
+**Caveat:** the S3 server runs on the same machine (Docker bridge), so network latency
 is ~sub-millisecond. In a real deployment T4 would upload to S3 over a
 LAN/WAN, adding 1–20 ms per segment. etcd's fsync latency depends on the
 storage medium (NVMe: ~100 µs, cloud disk: 1–5 ms).
@@ -114,9 +114,9 @@ storage medium (NVMe: ~100 µs, cloud disk: 1–5 ms).
 
 | Service | Image | Notes |
 |---------|-------|-------|
-| t4{1,2,3} | built from source | WAL + leader election via MinIO |
+| t4{1,2,3} | built from source | WAL + leader election via S3 |
 | etcd{1,2,3} | `bitnami/etcd:3.6` | standard Raft cluster |
-| MinIO | `quay.io/minio/minio` | shared S3 for T4 |
+| RustFS | `rustfs/rustfs` | shared S3 for T4 |
 
 **What it shows:** End-to-end quorum write throughput and latency for a
 replicated cluster. The benchmark sends to all endpoints; `clientv3` routes
@@ -198,8 +198,8 @@ bench/
 ├── cmd/t4bench/main.go   — load generator (workloads + compare command)
 ├── docker/
 │   ├── single/               — 1 T4 + 1 etcd (no S3)
-│   ├── single-s3/            — 1 T4 + MinIO + 1 etcd
-│   └── cluster/              — 3-node T4 + MinIO + 3-node etcd
+│   ├── single-s3/            — 1 T4 + S3 + 1 etcd
+│   └── cluster/              — 3-node T4 + S3 + 3-node etcd
 ├── results/                  — gitignored; written by run.sh
 ├── Dockerfile                — builds t4bench image
 ├── Dockerfile.t4         — builds t4-bench image

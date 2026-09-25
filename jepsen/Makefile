@@ -25,7 +25,7 @@ build: keys
 	docker compose build
 
 up: build
-	docker compose up -d minio minio-init n1 n2 n3 n4 n5
+	docker compose up -d s3 s3-init n1 n2 n3 n4 n5
 
 # ── run a test ────────────────────────────────────────────────────────────────
 run: up

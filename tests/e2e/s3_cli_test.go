@@ -23,7 +23,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-type minioConfig struct {
+type s3TestConfig struct {
 	bin      string
 	endpoint string
 	bucket   string
@@ -33,23 +33,23 @@ type minioConfig struct {
 	region   string
 }
 
-func TestMinIOCLISmoke(t *testing.T) {
-	if os.Getenv("T4_E2E_MINIO") == "" {
-		t.Skip("set T4_E2E_MINIO=1 to run the MinIO-backed CLI smoke test")
+func TestS3CLISmoke(t *testing.T) {
+	if os.Getenv("T4_E2E_S3") == "" {
+		t.Skip("set T4_E2E_S3=1 to run the S3-backed CLI smoke test")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	workDir := t.TempDir()
-	cfg := minioConfig{
+	cfg := s3TestConfig{
 		bin:      envOr("T4_SMOKE_BIN", ""),
-		endpoint: envOr("MINIO_ENDPOINT", "http://127.0.0.1:9000"),
-		bucket:   envOr("MINIO_BUCKET", fmt.Sprintf("t4-smoke-%d", time.Now().UnixNano())),
+		endpoint: envOr("S3_ENDPOINT", "http://127.0.0.1:9000"),
+		bucket:   envOr("S3_BUCKET", fmt.Sprintf("t4-smoke-%d", time.Now().UnixNano())),
 		prefix:   envOr("T4_SMOKE_PREFIX", fmt.Sprintf("smoke-%d", time.Now().UnixNano())),
-		access:   envOr("MINIO_ACCESS_KEY", "minioadmin"),
-		secret:   envOr("MINIO_SECRET_KEY", "minioadmin"),
-		region:   envOr("MINIO_REGION", "us-east-1"),
+		access:   envOr("S3_ACCESS_KEY", "t4testadmin"),
+		secret:   envOr("S3_SECRET_KEY", "t4testadmin"),
+		region:   envOr("S3_REGION", "us-east-1"),
 	}
 	if cfg.bin == "" {
 		cfg.bin = buildT4(t, ctx, workDir)
@@ -205,7 +205,7 @@ func TestMinIOCLISmoke(t *testing.T) {
 
 // s3KeyExists reports whether the object at the prefix-relative key exists in
 // the test bucket. Returns false (no error) when the object is absent.
-func s3KeyExists(ctx context.Context, client *minio.Client, cfg minioConfig, relKey string) (bool, error) {
+func s3KeyExists(ctx context.Context, client *minio.Client, cfg s3TestConfig, relKey string) (bool, error) {
 	_, err := client.StatObject(ctx, cfg.bucket, prefixedKey(cfg, relKey), minio.StatObjectOptions{})
 	if err == nil {
 		return true, nil
@@ -217,7 +217,7 @@ func s3KeyExists(ctx context.Context, client *minio.Client, cfg minioConfig, rel
 }
 
 // s3GetObject downloads and returns the body of a prefix-relative object key.
-func s3GetObject(ctx context.Context, client *minio.Client, cfg minioConfig, relKey string) ([]byte, error) {
+func s3GetObject(ctx context.Context, client *minio.Client, cfg s3TestConfig, relKey string) ([]byte, error) {
 	obj, err := client.GetObject(ctx, cfg.bucket, prefixedKey(cfg, relKey), minio.GetObjectOptions{})
 	if err != nil {
 		return nil, err
@@ -228,7 +228,7 @@ func s3GetObject(ctx context.Context, client *minio.Client, cfg minioConfig, rel
 
 // checkpointSSTs reads the checkpoint manifest at relKey and returns the union
 // of its own_store and ancestor_store SST keys (prefix-relative).
-func checkpointSSTs(ctx context.Context, client *minio.Client, cfg minioConfig, relKey string) ([]string, error) {
+func checkpointSSTs(ctx context.Context, client *minio.Client, cfg s3TestConfig, relKey string) ([]string, error) {
 	body, err := s3GetObject(ctx, client, cfg, relKey)
 	if err != nil {
 		return nil, err
@@ -248,7 +248,7 @@ func checkpointSSTs(ctx context.Context, client *minio.Client, cfg minioConfig, 
 
 // latestCheckpointSSTs returns the SST keys referenced by the current
 // manifest/latest pointer's checkpoint.
-func latestCheckpointSSTs(ctx context.Context, client *minio.Client, cfg minioConfig) ([]string, error) {
+func latestCheckpointSSTs(ctx context.Context, client *minio.Client, cfg s3TestConfig) ([]string, error) {
 	body, err := s3GetObject(ctx, client, cfg, "manifest/latest")
 	if err != nil {
 		return nil, err
@@ -265,7 +265,7 @@ func latestCheckpointSSTs(ctx context.Context, client *minio.Client, cfg minioCo
 	return checkpointSSTs(ctx, client, cfg, m.CheckpointKey)
 }
 
-func prefixedKey(cfg minioConfig, relKey string) string {
+func prefixedKey(cfg s3TestConfig, relKey string) string {
 	if cfg.prefix == "" {
 		return relKey
 	}
@@ -291,7 +291,7 @@ func buildT4(t *testing.T, ctx context.Context, workDir string) string {
 	return binPath
 }
 
-func ensureBucket(ctx context.Context, cfg minioConfig) error {
+func ensureBucket(ctx context.Context, cfg s3TestConfig) error {
 	client, err := s3Client(ctx, cfg)
 	if err != nil {
 		return err
@@ -312,7 +312,7 @@ func ensureBucket(ctx context.Context, cfg minioConfig) error {
 	return fmt.Errorf("create bucket %q: %w", cfg.bucket, lastErr)
 }
 
-func s3Client(ctx context.Context, cfg minioConfig) (*minio.Client, error) {
+func s3Client(ctx context.Context, cfg s3TestConfig) (*minio.Client, error) {
 	_ = ctx
 	u, err := url.Parse(cfg.endpoint)
 	if err != nil {
@@ -329,7 +329,7 @@ func s3Client(ctx context.Context, cfg minioConfig) (*minio.Client, error) {
 	})
 }
 
-func startNode(t *testing.T, ctx context.Context, cfg minioConfig, dataDir, listenAddr string) (*exec.Cmd, *bytes.Buffer) {
+func startNode(t *testing.T, ctx context.Context, cfg s3TestConfig, dataDir, listenAddr string) (*exec.Cmd, *bytes.Buffer) {
 	t.Helper()
 	args := []string{
 		"run",
@@ -408,7 +408,7 @@ func writeProbe(ctx context.Context, listenAddr string) error {
 	return err
 }
 
-func waitForRestoredCount(ctx context.Context, cfg minioConfig, workDir, prefix string, want int) (string, error) {
+func waitForRestoredCount(ctx context.Context, cfg s3TestConfig, workDir, prefix string, want int) (string, error) {
 	deadline := time.Now().Add(45 * time.Second)
 	wantOut := fmt.Sprintf("%s: %d", prefix, want)
 	var lastOut string
@@ -437,7 +437,7 @@ func waitForRestoredCount(ctx context.Context, cfg minioConfig, workDir, prefix 
 	return "", fmt.Errorf("timed out waiting for restored %q count %d; last output:\n%s", prefix, want, lastOut)
 }
 
-func runT4(ctx context.Context, cfg minioConfig, args ...string) (string, error) {
+func runT4(ctx context.Context, cfg s3TestConfig, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, cfg.bin, args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -446,7 +446,7 @@ func runT4(ctx context.Context, cfg minioConfig, args ...string) (string, error)
 	return out.String(), err
 }
 
-func s3Args(cfg minioConfig) []string {
+func s3Args(cfg s3TestConfig) []string {
 	return []string{
 		"--s3-bucket", cfg.bucket,
 		"--s3-prefix", cfg.prefix,

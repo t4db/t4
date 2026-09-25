@@ -17,11 +17,11 @@ import (
 )
 
 // TestRestoreCheckpointFromS3Smoke exercises the `t4 restore checkpoint`
-// command against a real MinIO bucket. The test seeds the bucket by running
+// command against a real S3-compatible bucket. The test seeds the bucket by running
 // an in-process source node, then invokes the CLI restore command.
 func TestRestoreCheckpointFromS3Smoke(t *testing.T) {
-	if os.Getenv("T4_E2E_MINIO") == "" {
-		t.Skip("set T4_E2E_MINIO=1 to run the MinIO-backed restore smoke test")
+	if os.Getenv("T4_E2E_S3") == "" {
+		t.Skip("set T4_E2E_S3=1 to run the S3-backed restore smoke test")
 	}
 
 	ctx := context.Background()
@@ -91,12 +91,12 @@ func TestRestoreCheckpointFromS3Smoke(t *testing.T) {
 }
 
 // TestRestoreCheckpointFromEncryptedS3Smoke exercises object-store encryption
-// against a real MinIO bucket. It verifies that T4 writes encrypted checkpoint
+// against a real S3-compatible bucket. It verifies that T4 writes encrypted checkpoint
 // metadata to S3 and that the CLI can list and restore it only when the same
 // object-store encryption key is supplied.
 func TestRestoreCheckpointFromEncryptedS3Smoke(t *testing.T) {
-	if os.Getenv("T4_E2E_MINIO") == "" {
-		t.Skip("set T4_E2E_MINIO=1 to run the encrypted MinIO restore smoke test")
+	if os.Getenv("T4_E2E_S3") == "" {
+		t.Skip("set T4_E2E_S3=1 to run the encrypted S3 restore smoke test")
 	}
 
 	ctx := context.Background()

@@ -101,7 +101,7 @@ t4 run \
 
 New nodes can join at any time — they restore the latest S3 checkpoint and start replicating. No configuration changes needed on existing nodes.
 
-### MinIO / S3-compatible stores
+### S3-compatible stores (RustFS, Ceph, Garage, …)
 
 ```bash
 t4 run \
@@ -109,7 +109,7 @@ t4 run \
   --listen      0.0.0.0:3379   \
   --s3-bucket   my-bucket      \
   --s3-prefix   t4/        \
-  --s3-endpoint http://minio:9000
+  --s3-endpoint http://s3.internal:9000
 ```
 
 ### Kubernetes
@@ -178,7 +178,7 @@ node, err := t4.Open(t4.Config{
 })
 ```
 
-### With MinIO
+### With an S3-compatible store
 
 ```go
 import (
@@ -194,7 +194,7 @@ cfg, _ := config.LoadDefaultConfig(ctx,
     config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("user", "pass", "")),
     config.WithEndpointResolverWithOptions(
         aws.EndpointResolverWithOptionsFunc(func(service, region string, opts ...any) (aws.Endpoint, error) {
-            return aws.Endpoint{URL: "http://minio:9000", HostnameImmutable: true}, nil
+            return aws.Endpoint{URL: "http://s3.internal:9000", HostnameImmutable: true}, nil
         }),
     ),
 )

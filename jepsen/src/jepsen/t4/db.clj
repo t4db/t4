@@ -76,7 +76,7 @@
       :--listen              "0.0.0.0:3379"
       :--data-dir            data-dir
       :--node-id             (node-id node)
-      :--s3-endpoint         "http://minio:9000"
+      :--s3-endpoint         "http://s3:9000"
       :--s3-bucket           "jepsen"
       :--metrics-addr        (str "0.0.0.0:" metrics-port)
       :--s3-profile          "default"  ; using profile makes t4 read ~/.aws/credentials file
@@ -100,7 +100,7 @@
   node only) to avoid concurrent delete races."
   []
   (c/su
-    (c/exec :aws :--endpoint-url "http://minio:9000"
+    (c/exec :aws :--endpoint-url "http://s3:9000"
             :s3 :rm (str "s3://jepsen/") :--recursive
             (c/lit "; true"))))
 

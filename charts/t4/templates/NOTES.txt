@@ -23,11 +23,11 @@ T4 has been deployed!
   --kine-endpoint="etcd://{{ include "t4.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
 
 {{- if not .Values.s3.bucket }}
-{{- if not .Values.minio.enabled }}
+{{- if not .Values.s3server.enabled }}
 
 ⚠  WARNING: s3.bucket is not set.  Writes are not durable across pod restarts
    without persistent volumes.  Set s3.bucket for production use, or enable
-   the built-in MinIO store with --set minio.enabled=true for development.
+   the built-in S3 server with --set s3server.enabled=true for development.
 {{- end }}
 {{- end }}
 
@@ -37,16 +37,16 @@ T4 has been deployed!
    for a highly-available deployment.
 {{- end }}
 
-{{- if .Values.minio.enabled }}
+{{- if .Values.s3server.enabled }}
 
-━━ MinIO (built-in S3) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━ Built-in S3 server ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  S3 endpoint (internal): {{ include "t4.minio.endpoint" . }}
-  Bucket:                 {{ .Values.minio.bucket }}
+  S3 endpoint (internal): {{ include "t4.s3server.endpoint" . }}
+  Bucket:                 {{ .Values.s3server.bucket }}
 
   Web console (port-forward to access):
-    kubectl port-forward svc/{{ include "t4.minio.fullname" . }} {{ .Values.minio.service.consolePort }}:{{ .Values.minio.service.consolePort }} -n {{ .Release.Namespace }}
-    open http://localhost:{{ .Values.minio.service.consolePort }}
+    kubectl port-forward svc/{{ include "t4.s3server.fullname" . }} {{ .Values.s3server.service.consolePort }}:{{ .Values.s3server.service.consolePort }} -n {{ .Release.Namespace }}
+    open http://localhost:{{ .Values.s3server.service.consolePort }}
 
-  ⚠  MinIO is for development/testing only.  Use a managed S3 service in production.
+  ⚠  The built-in S3 server is for development/testing only.  Use a managed S3 service in production.
 {{- end }}

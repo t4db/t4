@@ -58,7 +58,7 @@ jobs:
     needs: precheck
     uses: ./.github/workflows/jepsen-workflow.yml
     with:
-      nemeses: '["partition-halves", "kill", "partition-minio"]'
+      nemeses: '["partition-halves", "kill", "partition-s3"]'
 
   release:
     name: Create draft release

@@ -1,0 +1,86 @@
+{{- if .Values.s3server.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "t4.s3server.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "t4.labels" . | nindent 4 }}
+    app.kubernetes.io/component: s3server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "t4.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: s3server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "t4.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: s3server
+    spec:
+      securityContext:
+        # The RustFS image runs as uid/gid 10001.
+        fsGroup: 10001
+      containers:
+        - name: s3server
+          image: {{ .Values.s3server.image.repository }}:{{ .Values.s3server.image.tag }}
+          imagePullPolicy: {{ .Values.s3server.image.pullPolicy }}
+          env:
+            - name: RUSTFS_VOLUMES
+              value: /data
+            - name: RUSTFS_ADDRESS
+              value: ":{{ .Values.s3server.service.port }}"
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "true"
+            - name: RUSTFS_CONSOLE_ADDRESS
+              value: ":{{ .Values.s3server.service.consolePort }}"
+            - name: RUSTFS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "t4.s3server.secretName" . }}
+                  key: T4_S3_ACCESS_KEY_ID
+            - name: RUSTFS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "t4.s3server.secretName" . }}
+                  key: T4_S3_SECRET_ACCESS_KEY
+          ports:
+            - name: s3
+              containerPort: {{ .Values.s3server.service.port }}
+              protocol: TCP
+            - name: console
+              containerPort: {{ .Values.s3server.service.consolePort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: s3
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: s3
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.s3server.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.s3server.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "t4.s3server.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}
