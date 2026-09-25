@@ -109,56 +109,57 @@ The pod-name prefix is prepended at runtime (see statefulset.yaml args).
 {{- end }}
 
 {{/*
-MinIO sub-deployment full name.
+Built-in S3 server full name.
 */}}
-{{- define "t4.minio.fullname" -}}
-{{- printf "%s-minio" (include "t4.fullname" .) }}
+{{- define "t4.s3server.fullname" -}}
+{{- printf "%s-s3" (include "t4.fullname" .) }}
 {{- end }}
 
 {{/*
-Name of the Secret that holds MinIO / t4 S3 credentials when minio.enabled.
+Name of the Secret that holds the built-in S3 server / t4 credentials when
+s3server.enabled.
 */}}
-{{- define "t4.minio.secretName" -}}
-{{- printf "%s-minio" (include "t4.fullname" .) }}
+{{- define "t4.s3server.secretName" -}}
+{{- printf "%s-s3" (include "t4.fullname" .) }}
 {{- end }}
 
 {{/*
-Internal S3 endpoint for the MinIO sub-deployment.
+Internal S3 endpoint for the built-in S3 server.
 */}}
-{{- define "t4.minio.endpoint" -}}
-{{- printf "http://%s:%d" (include "t4.minio.fullname" .) (int .Values.minio.service.port) }}
+{{- define "t4.s3server.endpoint" -}}
+{{- printf "http://%s:%d" (include "t4.s3server.fullname" .) (int .Values.s3server.service.port) }}
 {{- end }}
 
 {{/*
-Effective S3 bucket: explicit s3.bucket takes priority, then minio.bucket.
+Effective S3 bucket: explicit s3.bucket takes priority, then s3server.bucket.
 */}}
 {{- define "t4.effectiveS3Bucket" -}}
 {{- if .Values.s3.bucket }}
 {{- .Values.s3.bucket }}
-{{- else if .Values.minio.enabled }}
-{{- .Values.minio.bucket }}
+{{- else if .Values.s3server.enabled }}
+{{- .Values.s3server.bucket }}
 {{- end }}
 {{- end }}
 
 {{/*
-Effective S3 endpoint: explicit s3.endpoint takes priority, then MinIO service.
+Effective S3 endpoint: explicit s3.endpoint takes priority, then the built-in S3 server.
 */}}
 {{- define "t4.effectiveS3Endpoint" -}}
 {{- if .Values.s3.endpoint }}
 {{- .Values.s3.endpoint }}
-{{- else if .Values.minio.enabled }}
-{{- include "t4.minio.endpoint" . }}
+{{- else if .Values.s3server.enabled }}
+{{- include "t4.s3server.endpoint" . }}
 {{- end }}
 {{- end }}
 
 {{/*
 Name of the Secret that holds T4_S3_ACCESS_KEY_ID / T4_S3_SECRET_ACCESS_KEY for
-the t4 pods.  When minio.enabled, use the MinIO secret; otherwise fall
+the t4 pods.  When s3server.enabled, use the built-in server secret; otherwise fall
 back to the standard s3SecretName helper.
 */}}
 {{- define "t4.effectiveS3SecretName" -}}
-{{- if .Values.minio.enabled }}
-{{- include "t4.minio.secretName" . }}
+{{- if .Values.s3server.enabled }}
+{{- include "t4.s3server.secretName" . }}
 {{- else }}
 {{- include "t4.s3SecretName" . }}
 {{- end }}

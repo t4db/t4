@@ -1,0 +1,52 @@
+{{- if .Values.s3server.enabled }}
+# This Job runs after install/upgrade and creates the t4 bucket in the
+# built-in S3 server. It reuses the server image, which ships curl.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "t4.s3server.fullname" . }}-init
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "t4.labels" . | nindent 4 }}
+    app.kubernetes.io/component: s3server-init
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "t4.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: s3server-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: {{ .Values.s3server.image.repository }}:{{ .Values.s3server.image.tag }}
+          imagePullPolicy: {{ .Values.s3server.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              endpoint="{{ include "t4.s3server.endpoint" . }}"
+              until curl -fsS "$endpoint/health" >/dev/null; do
+                echo "Waiting for the S3 server to be ready..."
+                sleep 3
+              done
+              # 200 = created; 409 = already exists.
+              code=$(curl -s -o /tmp/resp -w '%{http_code}' \
+                --aws-sigv4 "aws:amz:us-east-1:s3" \
+                --user "$T4_S3_ACCESS_KEY_ID:$T4_S3_SECRET_ACCESS_KEY" \
+                -X PUT "$endpoint/{{ .Values.s3server.bucket }}")
+              if [ "$code" != 200 ] && [ "$code" != 409 ]; then
+                echo "Creating bucket '{{ .Values.s3server.bucket }}' failed: HTTP $code"
+                cat /tmp/resp; echo
+                exit 1
+              fi
+              echo "Bucket '{{ .Values.s3server.bucket }}' is ready."
+          envFrom:
+            - secretRef:
+                name: {{ include "t4.s3server.secretName" . }}
+{{- end }}

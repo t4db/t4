@@ -11,7 +11,7 @@ jobs:
     # Nightly runs the full nemesis matrix. Per-PR runs use a smaller smoke
     # matrix (see jepsen.yml).
     with:
-      nemeses: '["partition-halves", "kill", "partition-minio"]'
+      nemeses: '["partition-halves", "kill", "partition-s3"]'
 
   stress:
     name: Stress (30m)

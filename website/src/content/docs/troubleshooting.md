@@ -81,7 +81,7 @@ The node can't reach S3 on startup.
 **Check:**
 - S3 credentials (`T4_S3_ACCESS_KEY_ID`, `T4_S3_SECRET_ACCESS_KEY`, or IRSA)
 - Bucket name and prefix (`--s3-bucket`, `--s3-prefix`)
-- Endpoint URL (`--s3-endpoint` for MinIO/Ceph)
+- Endpoint URL (`--s3-endpoint` for S3-compatible stores such as RustFS or Ceph)
 - Network connectivity from the node to S3
 
 ```bash

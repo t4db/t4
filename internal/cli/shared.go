@@ -59,13 +59,13 @@ func addS3Flags(cmd *cobra.Command, bucketRequired bool) *s3Flags {
 	f := &s3Flags{}
 	cmd.Flags().StringVar(&f.Bucket, "s3-bucket", "", "S3 bucket (env: T4_S3_BUCKET)")
 	cmd.Flags().StringVar(&f.Prefix, "s3-prefix", "", "key prefix inside the S3 bucket (env: T4_S3_PREFIX)")
-	cmd.Flags().StringVar(&f.Endpoint, "s3-endpoint", "", "custom S3 endpoint URL, e.g. for MinIO (env: T4_S3_ENDPOINT)")
+	cmd.Flags().StringVar(&f.Endpoint, "s3-endpoint", "", "custom S3 endpoint URL, e.g. for S3-compatible stores (env: T4_S3_ENDPOINT)")
 	cmd.Flags().StringVar(&f.Region, "s3-region", "", "AWS region (env: T4_S3_REGION)")
 	cmd.Flags().StringVar(&f.Profile, "s3-profile", "", "enable the ambient AWS credentials chain (env vars → ~/.aws/credentials[profile] → EC2/EKS IMDS); SSO and AssumeRole profiles are not supported; use 'default' to opt in to the default profile (env: T4_S3_PROFILE)")
 	cmd.Flags().StringVar(&f.AccessKeyID, "s3-access-key-id", "", "t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials (env: T4_S3_ACCESS_KEY_ID)")
 	cmd.Flags().StringVar(&f.SecretAccessKey, "s3-secret-access-key", "", "AWS secret access key (env: T4_S3_SECRET_ACCESS_KEY)")
 	cmd.Flags().StringVar(&f.SessionToken, "s3-session-token", "", "session token for temporary STS credentials; honored with --s3-access-key-id/--s3-secret-access-key (env: T4_S3_SESSION_TOKEN)")
-	cmd.Flags().StringVar(&f.CABundle, "s3-ca-bundle", "", "PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA (env: T4_S3_CA_BUNDLE)")
+	cmd.Flags().StringVar(&f.CABundle, "s3-ca-bundle", "", "PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for S3-compatible stores running behind a self-signed CA (env: T4_S3_CA_BUNDLE)")
 	if bucketRequired {
 		cmd.MarkFlagRequired("s3-bucket")
 	}

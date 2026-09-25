@@ -61,7 +61,7 @@ store, err := object.NewS3StoreFromConfig(ctx, object.S3Config{
     Bucket: "my-bucket",
     Prefix: "t4/",
     Region: "us-east-1",
-    // Endpoint: "http://localhost:9000", // MinIO or another S3-compatible store
+    // Endpoint: "http://localhost:9000", // any S3-compatible store
 })
 if err != nil {
     return err
@@ -165,7 +165,7 @@ Full documentation is available at **[t4db.github.io/t4](https://t4db.github.io/
 | [Security](https://t4db.github.io/t4/security/) | TLS, mTLS, client auth, RBAC setup |
 | [Recipes](https://t4db.github.io/t4/recipes/) | Distributed locks, service discovery, common patterns |
 | [Kubernetes](https://t4db.github.io/t4/deployment/kubernetes/) | Helm chart, StatefulSet deployment |
-| [Docker Compose](https://t4db.github.io/t4/deployment/docker-compose/) | Local, MinIO-backed, and multi-node cluster examples |
+| [Docker Compose](https://t4db.github.io/t4/deployment/docker-compose/) | Local, S3-backed, and multi-node cluster examples |
 | [Architecture](docs/architecture.md) | Internals — WAL, checkpoints, leader election, replication |
 | [Benchmarks](docs/benchmarks.md) | T4 vs etcd benchmark results and analysis |
 | [Migrating from etcd](https://t4db.github.io/t4/etcd-migration/) | Compatibility table and migration steps |

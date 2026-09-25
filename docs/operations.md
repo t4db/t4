@@ -15,7 +15,7 @@ t4 run \
 
 S3 credentials are resolved from the `T4_S3_ACCESS_KEY_ID`, `T4_S3_SECRET_ACCESS_KEY` env vars.
 
-### MinIO or other S3-compatible stores
+### S3-compatible stores (RustFS, Ceph, Garage, …)
 
 ```bash
 t4 run \
@@ -23,7 +23,7 @@ t4 run \
   --listen      0.0.0.0:3379   \
   --s3-bucket   my-bucket      \
   --s3-prefix   t4/        \
-  --s3-endpoint http://minio:9000
+  --s3-endpoint http://s3.internal:9000
 ```
 
 ### Object-store encryption at rest

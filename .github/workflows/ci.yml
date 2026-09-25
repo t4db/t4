@@ -100,8 +100,8 @@ jobs:
       - name: Test Kubernetes apiserver storage
         run: make test-apiserver
 
-  minio-cli-smoke:
-    name: MinIO CLI Smoke
+  s3-cli-smoke:
+    name: S3 CLI Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -116,36 +116,36 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Start MinIO
+      - name: Start S3 server
         run: |
-          docker run -d --name t4-minio-smoke \
+          docker run -d --name t4-s3-smoke \
             -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+            -e RUSTFS_ACCESS_KEY=t4testadmin \
+            -e RUSTFS_SECRET_KEY=t4testadmin \
+            rustfs/rustfs:1.0.0
 
           for i in {1..60}; do
-            if curl -fsS http://127.0.0.1:9000/minio/health/live; then
+            if curl -fsS http://127.0.0.1:9000/health; then
               exit 0
             fi
             sleep 1
           done
 
-          docker logs t4-minio-smoke
+          docker logs t4-s3-smoke
           exit 1
 
       - name: Run e2e
         run: go test -timeout 360s -count=1 ./tests/e2e
         env:
-          T4_E2E_MINIO: "1"
-          MINIO_ENDPOINT: http://127.0.0.1:9000
-          MINIO_ACCESS_KEY: minioadmin
-          MINIO_SECRET_KEY: minioadmin
-          MINIO_REGION: us-east-1
+          T4_E2E_S3: "1"
+          S3_ENDPOINT: http://127.0.0.1:9000
+          S3_ACCESS_KEY: t4testadmin
+          S3_SECRET_KEY: t4testadmin
+          S3_REGION: us-east-1
 
-      - name: Dump MinIO logs
+      - name: Dump S3 server logs
         if: failure()
-        run: docker logs t4-minio-smoke || true
+        run: docker logs t4-s3-smoke || true
 
   test-race-linux:
     name: Test Race (Linux)

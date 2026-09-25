@@ -75,47 +75,49 @@ helm install t4 oci://ghcr.io/t4db/charts/t4 \
   --set s3.existingSecret=t4-s3-credentials
 ```
 
-### MinIO / S3-compatible stores
+### S3-compatible stores
 
 ```bash
 helm install t4 oci://ghcr.io/t4db/charts/t4 \
   --set s3.bucket=my-bucket \
-  --set s3.endpoint=http://minio.minio-ns.svc.cluster.local:9000 \
-  --set s3.existingSecret=minio-credentials
+  --set s3.endpoint=http://s3.storage-ns.svc.cluster.local:9000 \
+  --set s3.existingSecret=t4-s3-credentials
 ```
 
-### Built-in MinIO (development / CI)
+### Built-in S3 server (development / CI)
 
-The chart can deploy a single-node MinIO instance alongside T4 and wire everything up automatically — no external object store needed:
+The chart can deploy a single-node S3-compatible server ([RustFS](https://github.com/rustfs/rustfs)) alongside T4 and wire everything up automatically — no external object store needed:
 
 ```bash
 helm install t4 oci://ghcr.io/t4db/charts/t4 \
-  --set minio.enabled=true
+  --set s3server.enabled=true
 ```
 
-This creates a MinIO Deployment, PVC, Service, and a post-install Job that creates the `t4` bucket. T4's S3 endpoint, bucket, and credentials are configured automatically.
+This creates an S3 server Deployment, PVC, Service, and a post-install Job that creates the `t4-data` bucket. T4's S3 endpoint, bucket, and credentials are configured automatically.
 
 Customise credentials, bucket name, and storage:
 
 ```yaml
 # values.yaml
-minio:
+s3server:
   enabled: true
-  rootUser: myuser
-  rootPassword: mypassword  # change this!
-  bucket: t4
+  accessKey: myuser
+  secretKey: mypassword  # change this!
+  bucket: t4-data        # S3 bucket names must be 3-63 characters
   persistence:
     size: 20Gi
 ```
 
-Access the MinIO web console:
+Access the web console:
 
 ```bash
-kubectl port-forward svc/t4-minio 9001:9001
-open http://localhost:9001
+kubectl port-forward svc/t4-s3 9001:9001
+open http://localhost:9001/rustfs/console/
 ```
 
-> ⚠ **Not for production.** Use a managed S3 service or a dedicated MinIO cluster for production deployments.
+> ⚠ **Not for production.** Use a managed S3 service or a dedicated S3-compatible cluster for production deployments.
+
+> **Upgrading from chart 0.2.x:** the `minio.*` values were renamed to `s3server.*` and the bundled server is now RustFS. The server gets a new PVC (`t4-s3`) and the default bucket is now `t4-data`, so objects in the old `t4-minio` volume are not migrated — treat it as a fresh dev store. The chart refuses to render while `minio.enabled` is set.
 
 ---
 

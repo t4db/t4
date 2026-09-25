@@ -15,7 +15,7 @@
    ;; Knossos linearizability search on the register workload under
    ;; partition-halves can balloon: concurrent ops in both partition halves
    ;; produce histories whose interleaving space is exponential. 2 GB OOM'd
-   ;; in CI; 6 GB leaves room for Docker + MinIO + 5 DB containers on
+   ;; in CI; 6 GB leaves room for Docker + S3 server + 5 DB containers on
    ;; ubuntu-latest (16 GB).
    "-Xmx6g"
    ;; jetcd uses Netty which reflectively accesses JDK internals on Java 17+.

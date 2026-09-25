@@ -3,3 +3,6 @@
 {{- if and $clientFacingTLSRequireClientCert (not $clientFacingTLSEnabled) -}}
 {{- fail "tls.clientCertAuth requires tls.enabled=true" -}}
 {{- end -}}
+{{- if and .Values.minio .Values.minio.enabled -}}
+{{- fail "the minio.* values were renamed to s3server.* (the built-in S3 server is now RustFS); see the chart docs" -}}
+{{- end -}}

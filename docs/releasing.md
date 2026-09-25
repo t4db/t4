@@ -7,7 +7,7 @@ What a maintainer needs to know that is **not** already encoded in CI workflows 
 Release tag (`v*`) push triggers `image-release.yml`, which gates publish on:
 
 - `precheck` — `ci.yml` workflow must have completed with `success` on the release SHA (waits up to ~30 min).
-- `jepsen` — full nemesis matrix (`partition-halves`, `kill`, `partition-minio`) on the release SHA via the reusable `jepsen-workflow.yml`. Guards linearizability per-release, not just nightly.
+- `jepsen` — full nemesis matrix (`partition-halves`, `kill`, `partition-s3`) on the release SHA via the reusable `jepsen-workflow.yml`. Guards linearizability per-release, not just nightly.
 
 `nightly.yml` still runs the same jepsen matrix plus `TestLongRunningConsistency` (30 min stress). Stress is not gated on release; if you care about it for a specific tag, trigger nightly on the SHA first:
 

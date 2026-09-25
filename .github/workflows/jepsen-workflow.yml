@@ -7,7 +7,7 @@ on:
         description: 'JSON-encoded list of nemeses to run, e.g. ["partition-halves"]. Defaults to the full set.'
         type: string
         required: false
-        default: '["partition-halves", "kill", "partition-minio"]'
+        default: '["partition-halves", "kill", "partition-s3"]'
       workloads:
         description: 'JSON-encoded list of workloads to run, e.g. ["register"]. Defaults to both.'
         type: string
@@ -39,9 +39,9 @@ jobs:
       - name: Start infrastructure
         run: |
           docker compose -f jepsen/docker-compose.yml up -d \
-            minio minio-init n1 n2 n3 n4 n5
+            s3 s3-init n1 n2 n3 n4 n5
           docker compose -f jepsen/docker-compose.yml \
-            wait minio-init || true
+            wait s3-init || true
 
       - name: Run Jepsen (${{ matrix.workload }} / ${{ matrix.nemesis }}, 60 s)
         run: |

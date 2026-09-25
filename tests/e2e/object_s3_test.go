@@ -14,10 +14,10 @@ import (
 	"github.com/t4db/t4/pkg/object"
 )
 
-// objectStoreConfig wires the MinIO endpoint into an object.S3Config and
-// keeps the raw minio client around for test-side bucket setup.
+// objectStoreConfig wires the S3 endpoint into an object.S3Config and
+// keeps the raw minio-go client around for test-side bucket setup.
 type objectStoreConfig struct {
-	cfg    minioConfig
+	cfg    s3TestConfig
 	bucket string
 	prefix string
 	store  *object.S3Store
@@ -26,23 +26,23 @@ type objectStoreConfig struct {
 
 func newObjectStoreTest(t *testing.T, ctx context.Context, prefix string, versioned bool) *objectStoreConfig {
 	t.Helper()
-	if os.Getenv("T4_E2E_MINIO") == "" {
-		t.Skip("set T4_E2E_MINIO=1 to run the MinIO-backed object store test")
+	if os.Getenv("T4_E2E_S3") == "" {
+		t.Skip("set T4_E2E_S3=1 to run the S3-backed object store test")
 	}
-	cfg := minioConfig{
-		endpoint: envOr("MINIO_ENDPOINT", "http://127.0.0.1:9000"),
+	cfg := s3TestConfig{
+		endpoint: envOr("S3_ENDPOINT", "http://127.0.0.1:9000"),
 		bucket:   fmt.Sprintf("t4-object-%d", time.Now().UnixNano()),
 		prefix:   prefix,
-		access:   envOr("MINIO_ACCESS_KEY", "minioadmin"),
-		secret:   envOr("MINIO_SECRET_KEY", "minioadmin"),
-		region:   envOr("MINIO_REGION", "us-east-1"),
+		access:   envOr("S3_ACCESS_KEY", "t4testadmin"),
+		secret:   envOr("S3_SECRET_KEY", "t4testadmin"),
+		region:   envOr("S3_REGION", "us-east-1"),
 	}
 	if err := ensureBucket(ctx, cfg); err != nil {
 		t.Fatalf("ensure bucket: %v", err)
 	}
 	raw, err := s3Client(ctx, cfg)
 	if err != nil {
-		t.Fatalf("raw minio client: %v", err)
+		t.Fatalf("raw s3 client: %v", err)
 	}
 	if versioned {
 		if err := raw.EnableVersioning(ctx, cfg.bucket); err != nil {
@@ -270,7 +270,7 @@ func TestS3GetVersionedNotFound(t *testing.T) {
 	ctx := context.Background()
 	o := newObjectStoreTest(t, ctx, "", true)
 
-	if _, err := o.store.GetVersioned(ctx, "no-such-key", "no-such-version"); err != object.ErrNotFound {
+	if _, err := o.store.GetVersioned(ctx, "no-such-key", "00000000-0000-0000-0000-000000000000"); err != object.ErrNotFound {
 		t.Errorf("want ErrNotFound, got %v", err)
 	}
 }

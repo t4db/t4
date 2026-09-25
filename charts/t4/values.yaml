@@ -70,7 +70,7 @@ s3:
   # AWS region.  Ignored when endpoint is set (S3-compatible stores).
   region: ""
 
-  # Custom endpoint for S3-compatible stores (MinIO, Ceph, etc.).
+  # Custom endpoint for S3-compatible stores (RustFS, Ceph, etc.).
   endpoint: ""
 
   # Credentials — choose one of:
@@ -275,30 +275,29 @@ proxy:
   nodeSelector: {}
   tolerations: []
 
-# ── MinIO (built-in S3 for development / CI) ──────────────────────────────────
-# When enabled, deploys a single-node MinIO instance alongside T4 and
-# automatically wires up s3.bucket, s3.endpoint, and S3 credentials so no
-# external object store is needed.
+# ── Built-in S3 server (development / CI) ─────────────────────────────────────
+# When enabled, deploys a single-node S3-compatible server (RustFS) alongside
+# T4 and automatically wires up s3.bucket, s3.endpoint, and S3 credentials so
+# no external object store is needed.
 #
 # ⚠  Not recommended for production.  Use a managed S3 service or a dedicated
-#    MinIO cluster instead.
-minio:
+#    S3-compatible cluster instead.
+s3server:
   enabled: false
 
-  # MinIO's community images were withdrawn from Docker Hub; quay.io is the
-  # remaining publisher.
   image:
-    repository: quay.io/minio/minio
-    tag: RELEASE.2025-09-07T16-13-09Z
+    repository: rustfs/rustfs
+    tag: "1.0.0"
     pullPolicy: IfNotPresent
 
-  # Credentials for the MinIO root user.  Also used as T4_S3_ACCESS_KEY_ID /
-  # T4_S3_SECRET_ACCESS_KEY when t4 connects to MinIO.
-  rootUser: minioadmin
-  rootPassword: minioadmin  # Change this!
+  # Root credentials for the server.  Also used as T4_S3_ACCESS_KEY_ID /
+  # T4_S3_SECRET_ACCESS_KEY when t4 connects to it.
+  accessKey: t4admin
+  secretKey: t4admin123  # Change this!
 
-  # Bucket that t4 will use.  Created automatically by the init job.
-  bucket: t4
+  # Bucket that t4 will use.  Created automatically by the init job.  S3
+  # bucket names must be 3-63 characters.
+  bucket: t4-data
 
   # Optional key prefix within the bucket (e.g. "dev/").
   prefix: ""
@@ -320,9 +319,3 @@ minio:
     port: 9000
     # Web console port.
     consolePort: 9001
-
-  # Image used by the bucket-init Job (minio/mc).
-  mcImage:
-    repository: quay.io/minio/mc
-    tag: RELEASE.2025-08-13T08-35-41Z
-    pullPolicy: IfNotPresent

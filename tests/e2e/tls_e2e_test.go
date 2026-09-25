@@ -31,13 +31,13 @@ func tlsTransport(cfg *tls.Config) *http.Transport {
 // TestTLSE2E exercises all three TLS surfaces on a single 2-node t4 cluster:
 //   - Client TLS with mTLS (client cert required).
 //   - Peer mTLS between the two t4 nodes.
-//   - S3 HTTPS to a MinIO instance using a self-signed CA.
+//   - S3 HTTPS to an S3-compatible (RustFS) instance using a self-signed CA.
 //
 // Setup:
 //   - Generate a single self-signed CA + leaf certs in-process.
-//   - Start a MinIO container with our CA-signed server cert.
+//   - Start a RustFS container with our CA-signed server cert.
 //   - Spawn two t4 binaries with all three TLS flags wired up and
-//     SSL_CERT_FILE pointing at our CA so the AWS SDK trusts MinIO.
+//     SSL_CERT_FILE pointing at our CA so the AWS SDK trusts the S3 server.
 //
 // Positive: a TLS clientv3 (mTLS client cert + our CA as root) writes via
 // node A and reads from node B, verifying replication across peer mTLS.
@@ -47,11 +47,11 @@ func tlsTransport(cfg *tls.Config) *http.Transport {
 //   - Client with wrong CA → handshake fails.
 //   - mTLS server requires client cert, client doesn't present one → fails.
 func TestTLSE2E(t *testing.T) {
-	if os.Getenv("T4_E2E_MINIO") == "" {
-		t.Skip("set T4_E2E_MINIO=1 to run the TLS-MinIO e2e test")
+	if os.Getenv("T4_E2E_S3") == "" {
+		t.Skip("set T4_E2E_S3=1 to run the TLS S3 e2e test")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not available — required to bring up TLS MinIO")
+		t.Skip("docker not available — required to bring up a TLS S3 server")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -61,8 +61,8 @@ func TestTLSE2E(t *testing.T) {
 	certs := newCA(t, workDir, "t4-tls-test-ca")
 	caPath := certs.writeCACert(t, "ca.crt")
 
-	// MinIO HTTPS: server cert with localhost / 127.0.0.1 SANs.
-	minioCertPath, minioKeyPath := certs.mintServer(t, "minio", []string{"localhost"}, []net.IP{net.IPv4(127, 0, 0, 1)})
+	// S3 HTTPS: server cert with localhost / 127.0.0.1 SANs.
+	s3CertPath, s3KeyPath := certs.mintServer(t, "s3", []string{"localhost"}, []net.IP{net.IPv4(127, 0, 0, 1)})
 	// T4 client TLS: server cert with localhost / 127.0.0.1 SANs.
 	clientServerCertPath, clientServerKeyPath := certs.mintServer(t, "t4-client", []string{"localhost"}, []net.IP{net.IPv4(127, 0, 0, 1)})
 	// T4 peer mTLS: per-node cert. Each node is both server and client for
@@ -71,13 +71,13 @@ func TestTLSE2E(t *testing.T) {
 	// Client cert for mTLS clientv3.
 	mTLSClientCertPath, mTLSClientKeyPath := certs.mintClient(t, "tls-test-client")
 
-	minioEndpoint := startTLSMinIO(t, ctx, workDir, minioCertPath, minioKeyPath, caPath)
+	s3Endpoint := startTLSS3(t, ctx, workDir, s3CertPath, s3KeyPath, caPath)
 
 	bin := buildT4(t, ctx, workDir)
 
 	bucket := fmt.Sprintf("t4-tls-%d", time.Now().UnixNano())
 	prefix := fmt.Sprintf("tls-%d", time.Now().UnixNano())
-	if err := ensureBucketTLS(ctx, bucket, minioEndpoint, caPath); err != nil {
+	if err := ensureBucketTLS(ctx, bucket, s3Endpoint, caPath); err != nil {
 		t.Fatalf("ensure bucket: %v", err)
 	}
 
@@ -99,7 +99,7 @@ func TestTLSE2E(t *testing.T) {
 		peerCA:     caPath,
 		s3Bucket:   bucket,
 		s3Prefix:   prefix,
-		s3Endpoint: minioEndpoint,
+		s3Endpoint: s3Endpoint,
 		s3CABundle: caPath,
 	})
 	defer stopNode(nodeA)
@@ -116,7 +116,7 @@ func TestTLSE2E(t *testing.T) {
 		peerCA:     caPath,
 		s3Bucket:   bucket,
 		s3Prefix:   prefix,
-		s3Endpoint: minioEndpoint,
+		s3Endpoint: s3Endpoint,
 		s3CABundle: caPath,
 	})
 	defer stopNode(nodeB)
@@ -257,8 +257,8 @@ func startTLSNode(t *testing.T, ctx context.Context, bin string, args tlsNodeArg
 		"--s3-prefix", args.s3Prefix,
 		"--s3-endpoint", args.s3Endpoint,
 		"--s3-region", "us-east-1",
-		"--s3-access-key-id", "minioadmin",
-		"--s3-secret-access-key", "minioadmin",
+		"--s3-access-key-id", "t4testadmin",
+		"--s3-secret-access-key", "t4testadmin",
 		"--s3-ca-bundle", args.s3CABundle,
 	}
 	var log bytes.Buffer
@@ -271,28 +271,29 @@ func startTLSNode(t *testing.T, ctx context.Context, bin string, args tlsNodeArg
 	return cmd, &log
 }
 
-// startTLSMinIO launches a MinIO container with TLS on a free host port and
-// returns its https://127.0.0.1:<port> endpoint. The CA bundle is mounted
-// alongside public.crt/private.key so MinIO trusts client mTLS too (we don't
-// configure MinIO-side mTLS here, but the CA mount is harmless).
-func startTLSMinIO(t *testing.T, ctx context.Context, workDir, certPath, keyPath, caPath string) string {
+// s3TestImage is the S3-compatible server used for the TLS test. MinIO's
+// community images were withdrawn from Docker Hub and quay.io; keep in sync
+// with the s3-cli-smoke job in .github/workflows/ci.yml.
+const s3TestImage = "rustfs/rustfs:1.0.0"
+
+// startTLSS3 launches an S3-compatible container (RustFS) with TLS on a
+// free host port and returns its https://127.0.0.1:<port> endpoint.
+func startTLSS3(t *testing.T, ctx context.Context, workDir, certPath, keyPath, caPath string) string {
 	t.Helper()
-	certsDir := filepath.Join(workDir, "minio-certs")
+	certsDir := filepath.Join(workDir, "s3-certs")
 	if err := os.Mkdir(certsDir, 0o755); err != nil {
-		t.Fatalf("mkdir minio-certs: %v", err)
+		t.Fatalf("mkdir s3-certs: %v", err)
 	}
-	if err := copyFile(certPath, filepath.Join(certsDir, "public.crt")); err != nil {
-		t.Fatalf("copy minio cert: %v", err)
-	}
-	if err := copyFile(keyPath, filepath.Join(certsDir, "private.key")); err != nil {
-		t.Fatalf("copy minio key: %v", err)
-	}
-	caDir := filepath.Join(certsDir, "CAs")
-	if err := os.Mkdir(caDir, 0o755); err != nil {
-		t.Fatalf("mkdir minio CAs: %v", err)
-	}
-	if err := copyFile(caPath, filepath.Join(caDir, "ca.crt")); err != nil {
-		t.Fatalf("copy minio CA: %v", err)
+	// The container runs as a non-root user, so the throwaway cert and key
+	// must be world-readable once copied in.
+	for src, name := range map[string]string{certPath: "rustfs_cert.pem", keyPath: "rustfs_key.pem"} {
+		dst := filepath.Join(certsDir, name)
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copy %s: %v", name, err)
+		}
+		if err := os.Chmod(dst, 0o644); err != nil {
+			t.Fatalf("chmod %s: %v", name, err)
+		}
 	}
 
 	hostPort := freeAddr(t)
@@ -302,45 +303,51 @@ func startTLSMinIO(t *testing.T, ctx context.Context, workDir, certPath, keyPath
 	}
 	_ = host
 
-	containerName := fmt.Sprintf("t4-tls-minio-%d", time.Now().UnixNano())
+	// Certs are copied in with `docker cp` rather than bind-mounted so the
+	// test works on Docker hosts that don't share the temp dir (e.g. macOS).
+	containerName := fmt.Sprintf("t4-tls-s3-%d", time.Now().UnixNano())
 	runCtx, runCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer runCancel()
-	cmd := exec.CommandContext(runCtx, "docker", "run", "-d",
+	docker := func(args ...string) {
+		t.Helper()
+		if out, err := exec.CommandContext(runCtx, "docker", args...).CombinedOutput(); err != nil {
+			t.Fatalf("docker %s: %v\n%s", args[0], err, out)
+		}
+	}
+	docker("create",
 		"--name", containerName,
 		"-p", fmt.Sprintf("%s:9000", port),
-		"-v", certsDir+":/root/.minio/certs:ro",
-		"-e", "MINIO_ROOT_USER=minioadmin",
-		"-e", "MINIO_ROOT_PASSWORD=minioadmin",
-		"quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
-		"server", "/data",
+		"-e", "RUSTFS_TLS_PATH=/certs",
+		"-e", "RUSTFS_ACCESS_KEY=t4testadmin",
+		"-e", "RUSTFS_SECRET_KEY=t4testadmin",
+		s3TestImage,
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("docker run minio: %v\n%s", err, out)
-	}
 	t.Cleanup(func() {
 		stopCmd := exec.Command("docker", "rm", "-f", containerName)
 		if out, err := stopCmd.CombinedOutput(); err != nil {
 			t.Logf("docker rm -f %s: %v\n%s", containerName, err, out)
 		}
 	})
+	docker("cp", certsDir, containerName+":/certs")
+	docker("start", containerName)
 
 	endpoint := fmt.Sprintf("https://127.0.0.1:%s", port)
-	if err := waitForMinIO(ctx, endpoint, caPath); err != nil {
+	if err := waitForS3TLS(ctx, endpoint, caPath); err != nil {
 		dumpCmd := exec.Command("docker", "logs", containerName)
 		out, _ := dumpCmd.CombinedOutput()
-		t.Fatalf("wait for MinIO HTTPS: %v\n%s", err, out)
+		t.Fatalf("wait for S3 HTTPS: %v\n%s", err, out)
 	}
 	return endpoint
 }
 
-func waitForMinIO(ctx context.Context, endpoint, caPath string) error {
+func waitForS3TLS(ctx context.Context, endpoint, caPath string) error {
 	deadline := time.Now().Add(60 * time.Second)
 	cfg, err := tlsClientConfig(caPath, "", "")
 	if err != nil {
 		return err
 	}
 	for time.Now().Before(deadline) {
-		client, err := tlsMinioClient(endpoint, cfg)
+		client, err := tlsS3Client(endpoint, cfg)
 		if err != nil {
 			return err
 		}
@@ -354,7 +361,7 @@ func waitForMinIO(ctx context.Context, endpoint, caPath string) error {
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return errors.New("timed out waiting for MinIO TLS endpoint")
+	return errors.New("timed out waiting for S3 TLS endpoint")
 }
 
 func ensureBucketTLS(ctx context.Context, bucket, endpoint, caPath string) error {
@@ -362,7 +369,7 @@ func ensureBucketTLS(ctx context.Context, bucket, endpoint, caPath string) error
 	if err != nil {
 		return err
 	}
-	client, err := tlsMinioClient(endpoint, cfg)
+	client, err := tlsS3Client(endpoint, cfg)
 	if err != nil {
 		return err
 	}
@@ -378,7 +385,7 @@ func ensureBucketTLS(ctx context.Context, bucket, endpoint, caPath string) error
 	return nil
 }
 
-func tlsMinioClient(endpoint string, tlsCfg *tls.Config) (*minio.Client, error) {
+func tlsS3Client(endpoint string, tlsCfg *tls.Config) (*minio.Client, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse endpoint %q: %w", endpoint, err)
@@ -388,7 +395,7 @@ func tlsMinioClient(endpoint string, tlsCfg *tls.Config) (*minio.Client, error) 
 		host = endpoint
 	}
 	return minio.New(host, &minio.Options{
-		Creds:     credentials.NewStaticV4("minioadmin", "minioadmin", ""),
+		Creds:     credentials.NewStaticV4("t4testadmin", "t4testadmin", ""),
 		Secure:    u.Scheme == "https",
 		Region:    "us-east-1",
 		Transport: tlsTransport(tlsCfg),

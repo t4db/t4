@@ -84,7 +84,7 @@ Nemeses (the same for both workloads):
 
 - `partition-halves` (random 2/3 split).
 - `kill` (kill+restart a random node).
-- `partition-minio` (isolate a node from S3 via iptables).
+- `partition-s3` (isolate a node from S3 via iptables).
 
 Every PR that touches `jepsen/**` runs the smoke matrix (`partition-halves` × both workloads). The nightly workflow runs the full matrix (every nemesis × both workloads = 6 jobs). A release tag must cite the most recent green nightly Jepsen run — see [Releasing T4](releasing).
 

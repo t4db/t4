@@ -124,6 +124,6 @@ sudo k0s stop
 sudo k0s start
 ```
 
-Use a unique `s3-folder` for every cluster that shares the bucket. For MinIO or another S3-compatible service, also set `s3-endpoint` under `extraArgs`.
+Use a unique `s3-folder` for every cluster that shares the bucket. For an S3-compatible service other than AWS S3, also set `s3-endpoint` under `extraArgs`.
 
 This tutorial remains a single-controller setup. A multi-controller deployment also needs T4 peer addresses, shared S3 configuration, and peer TLS.

@@ -1,7 +1,7 @@
-# cluster — 3-node T4 cluster (with MinIO) vs 3-node etcd Raft cluster.
+# cluster — 3-node T4 cluster (with an S3 server) vs 3-node etcd Raft cluster.
 #
 # T4 model: leader streams WAL entries to followers; all followers ACK
-# before the write completes; WAL is archived to MinIO. Leader election is
+# before the write completes; WAL is archived to S3 (RustFS). Leader election is
 # via an S3 object lock — no static topology configuration needed.
 #
 # etcd model: standard Raft consensus, quorum of 2/3 nodes required per write.
@@ -27,7 +27,7 @@ x-t4-base: &t4-base
   image: t4-bench
   environment: *t4-env
   depends_on:
-    minio-init:
+    s3-init:
       condition: service_completed_successfully
   networks: [bench]
   deploy:
@@ -54,32 +54,31 @@ x-etcd-cluster-env: &etcd-cluster-env
 
 services:
 
-  # ── MinIO (S3 store for T4 WAL + leader election) ─────────────────────
+  # ── S3 (RustFS; store for T4 WAL + leader election) ──────────────────
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: server /data --console-address :9001
+  s3:
+    image: rustfs/rustfs:1.0.0
     environment:
-      MINIO_ROOT_USER: bench
-      MINIO_ROOT_PASSWORD: bench123
+      RUSTFS_ACCESS_KEY: bench
+      RUSTFS_SECRET_KEY: bench123
     volumes:
-      - minio-data:/data
+      - s3-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
       interval: 5s
       timeout: 3s
       retries: 10
     networks: [bench]
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+  s3-init:
+    image: rustfs/rustfs:1.0.0
     depends_on:
-      minio:
+      s3:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-        mc alias set local http://minio:9000 bench bench123 &&
-        mc mb --ignore-existing local/bench
+        code=$$(curl -s -o /dev/null -w %{http_code} --aws-sigv4 aws:amz:us-east-1:s3 --user bench:bench123 -X PUT http://s3:9000/bench) &&
+        echo create bucket: $$code && [ $$code = 200 ] || [ $$code = 409 ]
       "
     networks: [bench]
 
@@ -99,7 +98,7 @@ services:
       - --wal-sync-upload=false
       - --s3-bucket=bench
       - --s3-prefix=cluster
-      - --s3-endpoint=http://minio:9000
+      - --s3-endpoint=http://s3:9000
       - --log-level=warn
     ports:
       - "3379:2379"
@@ -126,7 +125,7 @@ services:
       - --metrics-addr=0.0.0.0:9090
       - --s3-bucket=bench
       - --s3-prefix=cluster
-      - --s3-endpoint=http://minio:9000
+      - --s3-endpoint=http://s3:9000
       - --log-level=warn
     ports:
       - "3380:2379"
@@ -153,7 +152,7 @@ services:
       - --metrics-addr=0.0.0.0:9090
       - --s3-bucket=bench
       - --s3-prefix=cluster
-      - --s3-endpoint=http://minio:9000
+      - --s3-endpoint=http://s3:9000
       - --log-level=warn
     ports:
       - "3381:2379"
@@ -246,4 +245,4 @@ volumes:
   etcd1-data:
   etcd2-data:
   etcd3-data:
-  minio-data:
+  s3-data:

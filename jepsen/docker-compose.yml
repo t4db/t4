@@ -11,7 +11,7 @@ x-node: &node
     # T4-scoped S3 credentials — picked up via T4_S3_* env vars.
     T4_S3_ACCESS_KEY_ID: "jepsen"
     T4_S3_SECRET_ACCESS_KEY: "jepsen123"
-    T4_S3_REGION: "us-east-1"   # MinIO ignores this but the SDK requires it
+    T4_S3_REGION: "us-east-1"   # the S3 server ignores this but the SDK requires it
   ulimits:
     nofile: { soft: 65536, hard: 65536 }
 
@@ -41,34 +41,33 @@ services:
   n4: { <<: *node, hostname: n4 }
   n5: { <<: *node, hostname: n5 }
 
-  # ── MinIO (object store, outside partition boundary) ──────────────────────
-  # MinIO's community images were withdrawn from Docker Hub; quay.io is the
-  # remaining publisher. Pinned to a release tag so the harness can't drift.
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    hostname: minio
+  # ── S3 (object store, outside partition boundary) ─────────────────────────
+  # RustFS, an S3-compatible server. MinIO's community images were withdrawn
+  # from Docker Hub and quay.io.
+  s3:
+    image: rustfs/rustfs:1.0.0
+    hostname: s3
     networks: [jepsen]
-    command: server /data --console-address :9001
     environment:
-      MINIO_ROOT_USER: jepsen
-      MINIO_ROOT_PASSWORD: jepsen123
-    volumes: [minio-data:/data]
+      RUSTFS_ACCESS_KEY: jepsen
+      RUSTFS_SECRET_KEY: jepsen123
+    volumes: [s3-data:/data]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   # Creates the 'jepsen' bucket on first boot.
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+  s3-init:
+    image: rustfs/rustfs:1.0.0
     networks: [jepsen]
     depends_on:
-      minio: { condition: service_healthy }
+      s3: { condition: service_healthy }
     entrypoint: >
       /bin/sh -c "
-        mc alias set local http://minio:9000 jepsen jepsen123 &&
-        mc mb --ignore-existing local/jepsen
+        code=$$(curl -s -o /dev/null -w %{http_code} --aws-sigv4 aws:amz:us-east-1:s3 --user jepsen:jepsen123 -X PUT http://s3:9000/jepsen) &&
+        echo create bucket: $$code && [ $$code = 200 ] || [ $$code = 409 ]
       "
 
 networks:
@@ -76,5 +75,5 @@ networks:
     driver: bridge
 
 volumes:
-  minio-data:
+  s3-data:
   lein-cache:

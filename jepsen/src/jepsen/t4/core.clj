@@ -43,33 +43,33 @@
                  (gen/sleep 15)
                  {:type :info :f :stop}])}
 
-   ;; Partition a random node away from MinIO using iptables.
+   ;; Partition a random node away from the S3 server using iptables.
    ;; Tests S3-write failure handling; requires NET_ADMIN cap on node containers.
-   :partition-minio
+   :partition-s3
    {:nemesis  (let [isolated (atom nil)]
                 (reify nemesis/Nemesis
                   (setup! [this _test] this)
                   (invoke! [this test op]
                     (case (:f op)
-                      :isolate-minio
+                      :isolate-s3
                       (let [node (rand-nth (:nodes test))]
                         (reset! isolated node)
-                        (info "isolating" node "from minio")
+                        (info "isolating" node "from s3")
                         (c/on-nodes test [node]
                           (fn [_ _]
                             (c/su (c/exec :iptables :-A :OUTPUT
-                                          :-d "minio" :-p "tcp"
+                                          :-d "s3" :-p "tcp"
                                           :--dport "9000" :-j "DROP"))))
                         (assoc op :type :info :value node))
 
-                      :heal-minio
+                      :heal-s3
                       (if-let [node @isolated]
                         (do (reset! isolated nil)
-                            (info "healing" node "→ minio")
+                            (info "healing" node "→ s3")
                             (c/on-nodes test [node]
                               (fn [_ _]
                                 (c/su (c/exec :iptables :-D :OUTPUT
-                                              :-d "minio" :-p "tcp"
+                                              :-d "s3" :-p "tcp"
                                               :--dport "9000" :-j "DROP"))))
                             (assoc op :type :info :value node))
                         (assoc op :type :info :value nil))))
@@ -78,15 +78,15 @@
                       (c/on-nodes test [node]
                         (fn [_ _]
                           (try (c/su (c/exec :iptables :-D :OUTPUT
-                                             :-d "minio" :-p "tcp"
+                                             :-d "s3" :-p "tcp"
                                              :--dport "9000" :-j "DROP"))
                                (catch Exception _)))))
                     this)))
     :gen      (gen/cycle
                 [(gen/sleep 10)
-                 {:type :info :f :isolate-minio}
+                 {:type :info :f :isolate-s3}
                  (gen/sleep 20)
-                 {:type :info :f :heal-minio}])}})
+                 {:type :info :f :heal-s3}])}})
 
 ;; ── Workloads ─────────────────────────────────────────────────────────────────
 
@@ -193,7 +193,7 @@
     :default :register
     :parse-fn keyword]
    [nil "--nemesis NAME"
-    "Nemesis: none | partition-halves | kill | partition-minio (default: kill)"
+    "Nemesis: none | partition-halves | kill | partition-s3 (default: kill)"
     :default :partition-halves
     :parse-fn keyword]])
 

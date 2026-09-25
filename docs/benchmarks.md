@@ -49,7 +49,7 @@ Head-to-head comparison of T4 and etcd, run from the repository benchmark harnes
 
 ### 3-node cluster (`cluster` scenario)
 
-T4 cluster nodes use MinIO for leader election and WAL/checkpoint archival; etcd uses a standard 3-node raft cluster.
+T4 cluster nodes use a local S3-compatible server (RustFS) for leader election and WAL/checkpoint archival; etcd uses a standard 3-node raft cluster.
 
 | Workload               | T4 ops/s | etcd ops/s | Ratio | T4 p50   | etcd p50 | T4 p999   | etcd p999 |
 |------------------------|----------|------------|-------|----------|----------|-----------|-----------|

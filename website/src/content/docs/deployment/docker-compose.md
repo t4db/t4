@@ -1,6 +1,6 @@
 ---
 title: Docker Compose
-description: Run T4 with Docker Compose — single node, MinIO-backed, and 3-node cluster examples.
+description: Run T4 with Docker Compose — single node, S3-backed, and 3-node cluster examples.
 ---
 
 ## Single node, local only
@@ -29,36 +29,39 @@ etcdctl --endpoints=localhost:3379 put /hello world
 
 ---
 
-## Single node with MinIO (S3-compatible)
+## Single node with an S3-compatible store
+
+This example runs [RustFS](https://github.com/rustfs/rustfs) as a local S3-compatible server; any S3-compatible store works the same way via `--s3-endpoint`. The web console is at <http://localhost:9001/rustfs/console/>.
 
 ```yaml
 # compose.yml
 services:
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: server /data --console-address ":9001"
+  s3:
+    image: rustfs/rustfs:1.0.0
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_ACCESS_KEY: t4admin
+      RUSTFS_SECRET_KEY: t4admin123
+      RUSTFS_CONSOLE_ENABLE: "true"
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio-data:/data
+      - s3-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-fs", "http://localhost:9000/health"]
       interval: 5s
       retries: 5
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+  # Creates the bucket (HTTP 200, or 409 if it already exists).
+  s3-init:
+    image: rustfs/rustfs:1.0.0
     depends_on:
-      minio:
+      s3:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-        mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb --ignore-existing local/t4
+        code=$$(curl -s -o /dev/null -w %{http_code} --aws-sigv4 aws:amz:us-east-1:s3 --user t4admin:t4admin123 -X PUT http://s3:9000/t4-data) &&
+        echo create bucket: $$code && [ $$code = 200 ] || [ $$code = 409 ]
       "
 
   t4:
@@ -67,65 +70,65 @@ services:
       run
       --data-dir /var/lib/t4
       --listen 0.0.0.0:3379
-      --s3-bucket t4
-      --s3-prefix data/
-      --s3-endpoint http://minio:9000
+      --s3-bucket t4-data
+      --s3-prefix data
+      --s3-endpoint http://s3:9000
     environment:
-      T4_S3_ACCESS_KEY_ID: minioadmin
-      T4_S3_SECRET_ACCESS_KEY: minioadmin
+      T4_S3_ACCESS_KEY_ID: t4admin
+      T4_S3_SECRET_ACCESS_KEY: t4admin123
       T4_S3_REGION: us-east-1
     ports:
       - "3379:3379"
     volumes:
       - t4-data:/var/lib/t4
     depends_on:
-      minio-init:
+      s3-init:
         condition: service_completed_successfully
 
 volumes:
-  minio-data:
+  s3-data:
   t4-data:
 ```
 
 ---
 
-## 3-node cluster with MinIO
+## 3-node cluster with an S3-compatible store
 
 ```yaml
 # compose.yml
 x-t4-common: &t4-common
   image: ghcr.io/t4db/t4:latest
   environment:
-    T4_S3_ACCESS_KEY_ID: minioadmin
-    T4_S3_SECRET_ACCESS_KEY: minioadmin
+    T4_S3_ACCESS_KEY_ID: t4admin
+    T4_S3_SECRET_ACCESS_KEY: t4admin123
     T4_S3_REGION: us-east-1
   depends_on:
-    minio-init:
+    s3-init:
       condition: service_completed_successfully
 
 services:
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: server /data --console-address ":9001"
+  s3:
+    image: rustfs/rustfs:1.0.0
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_ACCESS_KEY: t4admin
+      RUSTFS_SECRET_KEY: t4admin123
     volumes:
-      - minio-data:/data
+      - s3-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-fs", "http://localhost:9000/health"]
       interval: 5s
       retries: 5
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+  # Creates the bucket (HTTP 200, or 409 if it already exists).
+  s3-init:
+    image: rustfs/rustfs:1.0.0
     depends_on:
-      minio:
+      s3:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-        mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb --ignore-existing local/t4
+        code=$$(curl -s -o /dev/null -w %{http_code} --aws-sigv4 aws:amz:us-east-1:s3 --user t4admin:t4admin123 -X PUT http://s3:9000/t4-data) &&
+        echo create bucket: $$code && [ $$code = 200 ] || [ $$code = 409 ]
       "
 
   t4-0:
@@ -134,9 +137,9 @@ services:
       run
       --data-dir /var/lib/t4
       --listen 0.0.0.0:3379
-      --s3-bucket t4
-      --s3-prefix cluster/
-      --s3-endpoint http://minio:9000
+      --s3-bucket t4-data
+      --s3-prefix cluster
+      --s3-endpoint http://s3:9000
       --node-id t4-0
       --peer-listen 0.0.0.0:3380
       --advertise-peer t4-0:3380
@@ -152,9 +155,9 @@ services:
       run
       --data-dir /var/lib/t4
       --listen 0.0.0.0:3379
-      --s3-bucket t4
-      --s3-prefix cluster/
-      --s3-endpoint http://minio:9000
+      --s3-bucket t4-data
+      --s3-prefix cluster
+      --s3-endpoint http://s3:9000
       --node-id t4-1
       --peer-listen 0.0.0.0:3380
       --advertise-peer t4-1:3380
@@ -170,9 +173,9 @@ services:
       run
       --data-dir /var/lib/t4
       --listen 0.0.0.0:3379
-      --s3-bucket t4
-      --s3-prefix cluster/
-      --s3-endpoint http://minio:9000
+      --s3-bucket t4-data
+      --s3-prefix cluster
+      --s3-endpoint http://s3:9000
       --node-id t4-2
       --peer-listen 0.0.0.0:3380
       --advertise-peer t4-2:3380
@@ -183,7 +186,7 @@ services:
       - t4-2-data:/var/lib/t4
 
 volumes:
-  minio-data:
+  s3-data:
   t4-0-data:
   t4-1-data:
   t4-2-data:
