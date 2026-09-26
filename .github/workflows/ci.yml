@@ -100,6 +100,24 @@ jobs:
       - name: Test Kubernetes apiserver storage
         run: make test-apiserver
 
+  test-etcd-diff-linux:
+    name: Test differential against etcd (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tests/etcddiff/go.mod
+          cache: true
+          cache-dependency-path: tests/etcddiff/go.sum
+
+      # A random seed per run; a failure logs it for ETCDDIFF_SEED=<seed>.
+      - name: Test differential against etcd
+        run: make test-etcd-diff
+
   s3-cli-smoke:
     name: S3 CLI Smoke
     runs-on: ubuntu-latest
