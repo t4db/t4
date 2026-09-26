@@ -28,17 +28,31 @@ import (
 //	1 (\x01) — original format; CRC32C-framed entries, big-endian fixed fields.
 //	2 (\x02) — entry payload includes a WAL sequence ID separate from revision
 //	            and etcd-style per-key version.
+//	3 (\x03) — same entry payload as 2; the segment may contain meta ops
+//	            (OpMetaPut/OpMetaDelete, standalone or inside OpTxn). The
+//	            version exists as a fence: binaries that predate meta ops
+//	            refuse the segment instead of misapplying them.
+//
+// Writers open segments at formatBase and raise the header to formatMeta in
+// place, just before the first entry that requires it (see RequiredFormat).
+// This is valid because a format-3 payload is byte-identical to format 2.
 const (
-	// WALFormatVersion is the format version encoded in the magic byte of every
-	// segment file. Increment this constant (and update segMagic) when making
-	// an incompatible change to the segment or entry wire format.
-	WALFormatVersion = 2
+	// WALFormatVersion is the newest segment format this binary can read.
+	// Increment it (and teach the writer to emit it) when making an
+	// incompatible change to the segment or entry wire format.
+	WALFormatVersion = formatMeta
+
+	formatBase = 2 // written for segments containing only data/compact ops
+	formatMeta = 3 // required once a segment contains a meta op
 
 	segMagicPrefix = "T4"
 	segMagicSuffix = '\n'
-	segMagic       = "T4\x02\n"
 	segHeaderLen   = 20
 )
+
+func segMagic(version int) string {
+	return segMagicPrefix + string(rune(version)) + string(segMagicSuffix)
+}
 
 // SegmentWriter appends entries to a local WAL segment file.
 type SegmentWriter struct {
@@ -46,6 +60,7 @@ type SegmentWriter struct {
 	path       string
 	term       uint64
 	firstRev   int64
+	version    int // format written in the header
 	size       int64
 	entryCount int
 	sealed     bool // true once Seal() has been called successfully
@@ -60,7 +75,7 @@ func OpenSegmentWriter(dir string, term uint64, firstRev int64) (*SegmentWriter,
 	if err != nil {
 		return nil, fmt.Errorf("wal: create segment %q: %w", path, err)
 	}
-	sw := &SegmentWriter{f: f, path: path, term: term, firstRev: firstRev}
+	sw := &SegmentWriter{f: f, path: path, term: term, firstRev: firstRev, version: formatBase}
 	if err := sw.writeHeader(); err != nil {
 		f.Close()
 		os.Remove(path)
@@ -71,7 +86,7 @@ func OpenSegmentWriter(dir string, term uint64, firstRev int64) (*SegmentWriter,
 
 func (sw *SegmentWriter) writeHeader() error {
 	hdr := make([]byte, segHeaderLen)
-	copy(hdr[0:4], segMagic)
+	copy(hdr[0:4], segMagic(sw.version))
 	binary.BigEndian.PutUint64(hdr[4:12], sw.term)
 	binary.BigEndian.PutUint64(hdr[12:20], uint64(sw.firstRev))
 	if _, err := sw.f.Write(hdr); err != nil {
@@ -81,8 +96,26 @@ func (sw *SegmentWriter) writeHeader() error {
 	return nil
 }
 
+// ensureFormat raises the header's format version in place when e needs a
+// newer format than the segment currently declares. The header write is made
+// durable by the fsync that follows the entry append.
+func (sw *SegmentWriter) ensureFormat(e *Entry) error {
+	v := RequiredFormat(e)
+	if v <= sw.version {
+		return nil
+	}
+	if _, err := sw.f.WriteAt([]byte(segMagic(v)), 0); err != nil {
+		return fmt.Errorf("wal: raise segment %q to format %d: %w", sw.path, v, err)
+	}
+	sw.version = v
+	return nil
+}
+
 // Append writes e to the segment and fsyncs.
 func (sw *SegmentWriter) Append(e *Entry) error {
+	if err := sw.ensureFormat(e); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	if err := AppendEntry(&buf, e); err != nil {
 		return err
@@ -102,6 +135,9 @@ func (sw *SegmentWriter) Append(e *Entry) error {
 // AppendNoSync writes e to the segment without fsyncing.
 // The caller must call Sync after writing all entries to ensure durability.
 func (sw *SegmentWriter) AppendNoSync(e *Entry) error {
+	if err := sw.ensureFormat(e); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	if err := AppendEntry(&buf, e); err != nil {
 		return err

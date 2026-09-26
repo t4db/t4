@@ -663,6 +663,28 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 	}
 	resolved := make([]resolvedOp, 0, len(ops))
 	for _, op := range ops {
+		switch op.Type {
+		case TxnPut, TxnDelete:
+		case TxnMetaPut, TxnMetaDelete:
+			if err := validateMetaKey(op.Key); err != nil {
+				return wal.Entry{}, false, nil, txnStats{}, err
+			}
+			if err := n.requireMetaLocked(); err != nil {
+				return wal.Entry{}, false, nil, txnStats{}, err
+			}
+			walOp := wal.OpMetaPut
+			if op.Type == TxnMetaDelete {
+				walOp = wal.OpMetaDelete
+			}
+			// Meta ops are applied as given: no current state to resolve,
+			// and deleting a missing meta key is harmless.
+			resolved = append(resolved, resolvedOp{walOp: walOp, key: op.Key, value: op.Value})
+			continue
+		default:
+			// Never ignore an op type this binary does not know: silently
+			// dropping part of a transaction breaks its atomicity.
+			return wal.Entry{}, false, nil, txnStats{}, fmt.Errorf("txn: unknown op type %d", op.Type)
+		}
 		existing, ok := readCache[op.Key]
 		if !ok {
 			var err error
@@ -717,15 +739,30 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		return wal.Entry{}, false, nil, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
 	}
 
-	seen := make(map[string]struct{}, len(active))
+	// Data and meta keys live in separate keyspaces, so the same name may
+	// appear once in each.
+	type branchKey struct {
+		meta bool
+		key  string
+	}
+	seen := make(map[branchKey]struct{}, len(active))
+	dataOps := 0
 	for _, r := range active {
-		if _, dup := seen[r.key]; dup {
+		k := branchKey{meta: r.walOp.IsMeta(), key: r.key}
+		if _, dup := seen[k]; dup {
 			return wal.Entry{}, false, nil, txnStats{}, fmt.Errorf("txn: duplicate key %q in branch", r.key)
 		}
-		seen[r.key] = struct{}{}
+		seen[k] = struct{}{}
+		if !k.meta {
+			dataOps++
+		}
 	}
 
-	n.nextRev++
+	// Only data ops consume a revision. A meta-only txn carries the last
+	// assigned revision, like a standalone meta write.
+	if dataOps > 0 {
+		n.nextRev++
+	}
 	newRev := n.nextRev
 
 	var deletedKeys map[string]struct{}
@@ -739,6 +776,9 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		subOps[i] = wal.TxnSubOp{
 			Op: r.walOp, Key: r.key, Value: r.value, Lease: r.lease,
 			CreateRevision: cr, PrevRevision: r.prevRevision, Version: r.version,
+		}
+		if r.walOp.IsMeta() {
+			continue
 		}
 		if r.walOp == wal.OpDelete {
 			stats.deletes++
@@ -784,6 +824,10 @@ func opLabel(op wal.Op) string {
 		return "compact"
 	case wal.OpTxn:
 		return "txn"
+	case wal.OpMetaPut:
+		return "meta_put"
+	case wal.OpMetaDelete:
+		return "meta_delete"
 	default:
 		return "unknown"
 	}
@@ -872,11 +916,20 @@ func (n *Node) clearPendingBatch(batch []*writeReq) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for _, req := range batch {
+		// Meta ops never enter the pending map, and they carry the revision of
+		// the preceding data write: matching them against pending entries
+		// would drop an in-flight data key of the same name too early.
+		if req.entry.Op.IsMeta() {
+			continue
+		}
 		if req.entry.Op == wal.OpTxn {
 			// For txn entries the key field is empty; decode sub-ops to clear
 			// each affected key from the pending map.
 			if ops, err := wal.DecodeTxnOps(req.entry.Value); err == nil {
 				for _, op := range ops {
+					if op.Op.IsMeta() {
+						continue
+					}
 					if p, ok := n.pending[op.Key]; ok && p.rev == req.entry.Revision {
 						delete(n.pending, op.Key)
 					}
@@ -933,6 +986,9 @@ func encodeErr(err error) (code, msg string) {
 	if errors.Is(err, ErrKeyExists) {
 		return "key_exists", ""
 	}
+	if errors.Is(err, ErrMetaDisabled) {
+		return "meta_disabled", ""
+	}
 	return "error", err.Error()
 }
 
@@ -942,6 +998,8 @@ func decodeErr(code, msg string) error {
 		return nil
 	case "key_exists":
 		return ErrKeyExists
+	case "meta_disabled":
+		return ErrMetaDisabled
 	default:
 		return errors.New(msg)
 	}

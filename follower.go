@@ -311,6 +311,12 @@ func fwdOpLabel(op peer.ForwardOp) string {
 		return "get_revision"
 	case peer.ForwardTxn:
 		return "txn"
+	case peer.ForwardMetaPut:
+		return "meta_put"
+	case peer.ForwardMetaDelete:
+		return "meta_delete"
+	case peer.ForwardGetSequence:
+		return "get_sequence"
 	default:
 		return "unknown"
 	}

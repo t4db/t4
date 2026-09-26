@@ -54,6 +54,9 @@ func New(log checkpointLogger) *Manager {
 //
 //	1 — original format (all existing clusters); introduced as an explicit
 //	    field so future incompatible changes can be detected at runtime.
+//	2 — the Pebble state includes the meta keyspace (see wal.OpMetaPut). A
+//	    binary that predates it would restore without that state, so it must
+//	    refuse the checkpoint instead.
 //
 // Compatibility rules:
 //   - Adding new JSON fields with omitempty tags is always backward-compatible:
@@ -64,11 +67,17 @@ func New(log checkpointLogger) *Manager {
 //   - Nodes running version N can safely read checkpoints written by version N-1.
 //     Downgrade (new → old) is only safe if no FormatVersion > 1 checkpoint
 //     has been written.
+//   - Writers use the lowest version that can represent the checkpoint, so
+//     data that does not need a newer format stays readable by older nodes.
 const (
-	// CheckpointFormatVersion is the format version written into every new
-	// Manifest and CheckpointIndex. Increment this when a format change is
-	// incompatible with older readers.
-	CheckpointFormatVersion uint32 = 1
+	// FormatVersionBase is written for checkpoints without meta keyspace state.
+	FormatVersionBase uint32 = 1
+	// FormatVersionMeta is written once the meta keyspace is non-empty.
+	FormatVersionMeta uint32 = 2
+
+	// CheckpointFormatVersion is the newest format this binary can read.
+	// Increment it when a format change is incompatible with older readers.
+	CheckpointFormatVersion = FormatVersionMeta
 )
 
 // Manifest is stored at "manifest/latest" in object storage.
@@ -187,12 +196,12 @@ func (mgr *Manager) WriteManifest(ctx context.Context, store object.Store, m *Ma
 // LIST request, keeping the per-checkpoint S3 cost to O(1) GETs regardless of
 // how many SST files have accumulated in the bucket.
 func (mgr *Manager) Write(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision int64, lastWALKey string, ancestorStore object.Store) error {
-	return mgr.WriteAtSequence(ctx, db, store, term, revision, revision, lastWALKey, ancestorStore)
+	return mgr.WriteAtSequence(ctx, db, store, term, revision, revision, lastWALKey, ancestorStore, FormatVersionBase)
 }
 
 // WriteAtSequence is like Write, but records the WAL sequence covered by the
 // checkpoint separately from the user-visible revision.
-func (mgr *Manager) WriteAtSequence(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision, sequence int64, lastWALKey string, ancestorStore object.Store) error {
+func (mgr *Manager) WriteAtSequence(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision, sequence int64, lastWALKey string, ancestorStore object.Store, formatVersion uint32) error {
 	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
 	if err != nil {
 		return fmt.Errorf("checkpoint: mktemp: %w", err)
@@ -259,7 +268,7 @@ func (mgr *Manager) WriteAtSequence(ctx context.Context, db *pebble.DB, store ob
 		return fmt.Errorf("checkpoint: walk: %w", err)
 	}
 
-	return mgr.writeIndex(ctx, store, term, revision, sequence, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles)
+	return mgr.writeIndex(ctx, store, term, revision, sequence, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles, formatVersion)
 }
 
 // WriteWithRegistry creates a Pebble checkpoint using a pre-built SST registry
@@ -271,12 +280,12 @@ func (mgr *Manager) WriteAtSequence(ctx context.Context, db *pebble.DB, store ob
 // inheritedRegistry maps Pebble SST filename → s3 key in the ancestor store
 // (for branch nodes); these are recorded as AncestorSSTFiles.
 func (mgr *Manager) WriteWithRegistry(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision int64, lastWALKey string, localRegistry, inheritedRegistry map[string]string) error {
-	return mgr.WriteWithRegistryAtSequence(ctx, db, store, term, revision, revision, lastWALKey, localRegistry, inheritedRegistry)
+	return mgr.WriteWithRegistryAtSequence(ctx, db, store, term, revision, revision, lastWALKey, localRegistry, inheritedRegistry, FormatVersionBase)
 }
 
 // WriteWithRegistryAtSequence is like WriteWithRegistry, but records the WAL
 // sequence covered by the checkpoint separately from the user-visible revision.
-func (mgr *Manager) WriteWithRegistryAtSequence(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision, sequence int64, lastWALKey string, localRegistry, inheritedRegistry map[string]string) error {
+func (mgr *Manager) WriteWithRegistryAtSequence(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision, sequence int64, lastWALKey string, localRegistry, inheritedRegistry map[string]string, formatVersion uint32) error {
 	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
 	if err != nil {
 		return fmt.Errorf("checkpoint: mktemp: %w", err)
@@ -337,14 +346,14 @@ func (mgr *Manager) WriteWithRegistryAtSequence(ctx context.Context, db *pebble.
 		return fmt.Errorf("checkpoint: walk: %w", err)
 	}
 
-	return mgr.writeIndex(ctx, store, term, revision, sequence, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles)
+	return mgr.writeIndex(ctx, store, term, revision, sequence, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles, formatVersion)
 }
 
 // writeIndex writes the checkpoint index JSON and updates manifest/latest.
-func (mgr *Manager) writeIndex(ctx context.Context, store object.Store, term uint64, revision, sequence int64, lastWALKey string, sstFiles, ancestorSSTFiles, metaFiles []string) error {
+func (mgr *Manager) writeIndex(ctx context.Context, store object.Store, term uint64, revision, sequence int64, lastWALKey string, sstFiles, ancestorSSTFiles, metaFiles []string, formatVersion uint32) error {
 	indexKey := CheckpointIndexKey(term, revision)
 	idx := &CheckpointIndex{
-		FormatVersion:    CheckpointFormatVersion,
+		FormatVersion:    formatVersion,
 		Term:             term,
 		Revision:         revision,
 		LastSequence:     sequence,
@@ -361,7 +370,7 @@ func (mgr *Manager) writeIndex(ctx context.Context, store object.Store, term uin
 	}
 
 	m := &Manifest{
-		FormatVersion: CheckpointFormatVersion,
+		FormatVersion: formatVersion,
 		CheckpointKey: indexKey,
 		Revision:      revision,
 		LastSequence:  sequence,

@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
@@ -369,6 +370,22 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		n.mu.Unlock()
 		return &peer.ForwardResponse{Revision: rev, Succeeded: true}, nil
 
+	case peer.ForwardMetaPut:
+		err := n.MetaPut(ctx, req.Key, req.Value)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardMetaDelete:
+		err := n.MetaDelete(ctx, req.Key)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardGetSequence:
+		// Every acknowledged write has been applied before its caller is
+		// released, so the applied sequence covers all of them. Meta writes
+		// have no optimistic pending state, unlike ForwardGetRevision.
+		return &peer.ForwardResponse{Revision: n.db.Load().LastSequence(), Succeeded: true}, nil
+
 	case peer.ForwardTxn:
 		if req.TxnReq == nil {
 			return nil, fmt.Errorf("t4: ForwardTxn missing TxnReq")
@@ -726,14 +743,20 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 		n.log.Errorf("t4: startup checkpoint flush pebble: %v", err)
 		return
 	}
+	cpFormat, err := n.checkpointFormat()
+	if err != nil {
+		n.fenceMu.Unlock()
+		n.log.Errorf("t4: startup checkpoint format: %v", err)
+		return
+	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry(), cpFormat); err != nil {
 			n.fenceMu.Unlock()
 			n.log.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
 			return
 		}
-	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
+	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore, cpFormat); err != nil {
 		n.fenceMu.Unlock()
 		n.log.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
 		return
@@ -742,6 +765,20 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 	atomic.StoreInt64(&n.entriesSinceCheckpoint, 0)
 	metrics.CheckpointsTotal.Inc()
 	n.log.Infof("t4: startup checkpoint written (rev=%d)", rev)
+}
+
+// checkpointFormat returns the checkpoint format needed to represent the
+// current store: the meta keyspace requires FormatVersionMeta so that binaries
+// predating it refuse the checkpoint rather than restore without that state.
+func (n *Node) checkpointFormat() (uint32, error) {
+	hasMeta, err := n.db.Load().HasMeta()
+	if err != nil {
+		return 0, err
+	}
+	if hasMeta {
+		return checkpoint.FormatVersionMeta, nil
+	}
+	return checkpoint.FormatVersionBase, nil
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {
@@ -765,14 +802,20 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		n.log.Errorf("t4: checkpoint flush pebble: %v", err)
 		return
 	}
+	cpFormat, err := n.checkpointFormat()
+	if err != nil {
+		n.fenceMu.Unlock()
+		n.log.Errorf("t4: checkpoint format: %v", err)
+		return
+	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry(), cpFormat); err != nil {
 			n.fenceMu.Unlock()
 			n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 			return
 		}
-	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
+	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore, cpFormat); err != nil {
 		n.fenceMu.Unlock()
 		n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 		return
