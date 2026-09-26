@@ -14,10 +14,13 @@ import (
 //	'l' + rev(8B BE)  → serialised entry  (append-only change log)
 //	'i' + key bytes   → rev(8B BE)         (current modRevision per live key)
 //	'm' + name bytes  → metadata value     (compact rev, current rev, etc.)
+//	's' + key bytes   → meta keyspace value (replicated via OpMetaPut/OpMetaDelete;
+//	                     unversioned, never watched, no revision)
 const (
-	prefixLog  = byte('l')
-	prefixIdx  = byte('i')
-	prefixMeta = byte('m')
+	prefixLog    = byte('l')
+	prefixIdx    = byte('i')
+	prefixMeta   = byte('m')
+	prefixMetaKV = byte('s')
 )
 
 var (
@@ -39,10 +42,20 @@ var (
 	revisionSampleUpper  = []byte{prefixMeta, 'r', 'u'}
 
 	// Iteration bounds.
-	logLower = []byte{prefixLog, 0, 0, 0, 0, 0, 0, 0, 0}
-	logUpper = []byte{prefixLog + 1}
-	idxUpper = []byte{prefixIdx + 1}
+	logLower    = []byte{prefixLog, 0, 0, 0, 0, 0, 0, 0, 0}
+	logUpper    = []byte{prefixLog + 1}
+	idxUpper    = []byte{prefixIdx + 1}
+	metaKVLower = []byte{prefixMetaKV}
+	metaKVUpper = []byte{prefixMetaKV + 1}
 )
+
+// metaKVKey encodes a meta keyspace key as a pebble key.
+func metaKVKey(key string) []byte {
+	k := make([]byte, 1+len(key))
+	k[0] = prefixMetaKV
+	copy(k[1:], key)
+	return k
+}
 
 const (
 	flagCreate = byte(1 << 0)

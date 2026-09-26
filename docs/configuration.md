@@ -208,6 +208,23 @@ metadata.
 | `t4 inspect history` | `T4_DATA_DIR` | `--data-dir` |
 | `t4 inspect list` | `T4_DATA_DIR` | `--data-dir` |
 | `t4 inspect meta` | `T4_DATA_DIR` | `--data-dir` |
+| `t4 replicate run` | `T4_LOG_LEVEL` | `--log-level` |
+| `t4 replicate run` | `T4_REPLICATE_LEASE_RECONCILE_INTERVAL` | `--lease-reconcile-interval` |
+| `t4 replicate run` | `T4_REPLICATE_LEASE_TTL_MARGIN` | `--lease-ttl-margin` |
+| `t4 replicate run` | `T4_REPLICATE_METRICS_ADDR` | `--metrics-addr` |
+| `t4 replicate run` | `T4_REPLICATE_SOURCE_CACERT` | `--source-cacert` |
+| `t4 replicate run` | `T4_REPLICATE_SOURCE_CERT` | `--source-cert` |
+| `t4 replicate run` | `T4_REPLICATE_SOURCE_ENDPOINTS` | `--source-endpoints` |
+| `t4 replicate run` | `T4_REPLICATE_SOURCE_KEY` | `--source-key` |
+| `t4 replicate run` | `T4_REPLICATE_SOURCE_PASSWORD` | `--source-password` |
+| `t4 replicate run` | `T4_REPLICATE_SOURCE_USER` | `--source-user` |
+| `t4 replicate run` | `T4_REPLICATE_STATE_PREFIX` | `--state-prefix` |
+| `t4 replicate run` | `T4_REPLICATE_TARGET_CACERT` | `--target-cacert` |
+| `t4 replicate run` | `T4_REPLICATE_TARGET_CERT` | `--target-cert` |
+| `t4 replicate run` | `T4_REPLICATE_TARGET_ENDPOINTS` | `--target-endpoints` |
+| `t4 replicate run` | `T4_REPLICATE_TARGET_KEY` | `--target-key` |
+| `t4 replicate run` | `T4_REPLICATE_TARGET_PASSWORD` | `--target-password` |
+| `t4 replicate run` | `T4_REPLICATE_TARGET_USER` | `--target-user` |
 | `t4 restore checkpoint` | `T4_DATA_DIR` | `--data-dir` |
 | `t4 restore checkpoint` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
 | `t4 restore checkpoint` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
@@ -354,6 +371,23 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 inspect list` | `--prefix` | — | — | No | only return keys with this prefix |
 | `t4 inspect meta` | `--data-dir` | `/var/lib/t4` | `T4_DATA_DIR` | No | directory containing local Pebble data |
 | `t4 inspect meta` | `--json` | `false` | — | No | emit JSON output |
+| `t4 replicate run` | `--lease-reconcile-interval` | `5s` | `T4_REPLICATE_LEASE_RECONCILE_INTERVAL` | No | how often target leases are kept alive and leases gone from the source are revoked |
+| `t4 replicate run` | `--lease-ttl-margin` | `10m0s` | `T4_REPLICATE_LEASE_TTL_MARGIN` | No | added to lease TTLs on the target so it never expires a lease before the source; must exceed the longest replicator downtime |
+| `t4 replicate run` | `--log-level` | `info` | `T4_LOG_LEVEL` | No | log level (trace/debug/info/warn/error) |
+| `t4 replicate run` | `--metrics-addr` | `0.0.0.0:9091` | `T4_REPLICATE_METRICS_ADDR` | No | HTTP address for /metrics and /healthz; empty disables |
+| `t4 replicate run` | `--source-cacert` | — | `T4_REPLICATE_SOURCE_CACERT` | No | CA bundle to verify the source's TLS certificate |
+| `t4 replicate run` | `--source-cert` | — | `T4_REPLICATE_SOURCE_CERT` | No | client certificate for the source |
+| `t4 replicate run` | `--source-endpoints` | — | `T4_REPLICATE_SOURCE_ENDPOINTS` | No | comma-separated etcd v3 endpoints of the source |
+| `t4 replicate run` | `--source-key` | — | `T4_REPLICATE_SOURCE_KEY` | No | client key for the source |
+| `t4 replicate run` | `--source-password` | — | `T4_REPLICATE_SOURCE_PASSWORD` | No | password for the source |
+| `t4 replicate run` | `--source-user` | — | `T4_REPLICATE_SOURCE_USER` | No | username for the source |
+| `t4 replicate run` | `--state-prefix` | `/__t4_replication/` | `T4_REPLICATE_STATE_PREFIX` | No | target key prefix for replication state; source keys under it are not replicated |
+| `t4 replicate run` | `--target-cacert` | — | `T4_REPLICATE_TARGET_CACERT` | No | CA bundle to verify the target's TLS certificate |
+| `t4 replicate run` | `--target-cert` | — | `T4_REPLICATE_TARGET_CERT` | No | client certificate for the target |
+| `t4 replicate run` | `--target-endpoints` | — | `T4_REPLICATE_TARGET_ENDPOINTS` | No | comma-separated etcd v3 endpoints of the target |
+| `t4 replicate run` | `--target-key` | — | `T4_REPLICATE_TARGET_KEY` | No | client key for the target |
+| `t4 replicate run` | `--target-password` | — | `T4_REPLICATE_TARGET_PASSWORD` | No | password for the target |
+| `t4 replicate run` | `--target-user` | — | `T4_REPLICATE_TARGET_USER` | No | username for the target |
 | `t4 restore checkpoint` | `--checkpoint` | — | — | No | checkpoint key to restore (default: latest; use 't4 restore list' to find keys) |
 | `t4 restore checkpoint` | `--data-dir` | — | `T4_DATA_DIR` | Yes | local directory to restore into (required; must not already contain a Pebble database) |
 | `t4 restore checkpoint` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |

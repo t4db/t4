@@ -43,6 +43,11 @@ type Server struct {
 	maxBroadcastRev int64            // highest sequence sent via Broadcast
 	forwardHandler  ForwardHandler
 
+	// minFollowerFormat is the lowest WAL format (FollowRequest.WALFormat) a
+	// follower must read to be served, so no follower receives entries it
+	// would misapply.
+	minFollowerFormat int
+
 	// ackNotify is a buffered-1 channel. A non-blocking send is made whenever
 	// any follower ACKs an entry or disconnects, waking WaitForFollowers.
 	ackNotify chan struct{}
@@ -299,6 +304,14 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	// Holding the lock here means Broadcast also blocks, so entries that arrive
 	// during "snapshot + register" will be in the channel — no gap.
 	s.mu.Lock()
+	if req.WALFormat < s.minFollowerFormat {
+		required := s.minFollowerFormat
+		s.mu.Unlock()
+		s.log.Warnf("peer: refusing follower %q: it reads WAL format %d, this database requires %d — upgrade the node",
+			req.NodeID, req.WALFormat, required)
+		return status.Errorf(codes.FailedPrecondition,
+			"wal_format_unsupported: follower reads WAL format %d, leader requires %d", req.WALFormat, required)
+	}
 	// A follower whose FromRevision is below startRev has missed entries that
 	// were committed by a prior leader and replayed from S3 by this leader —
 	// those entries are in Pebble but will never appear in the ring buffer.
@@ -357,7 +370,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 		}
 	}()
 
-	s.log.Infof("peer: follower %q connected (fromRev=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, len(snapshot))
+	s.log.Infof("peer: follower %q connected (fromRev=%d, walFormat=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, req.WALFormat, len(snapshot))
 
 	// Spawn a goroutine to read ACK messages from the follower on the bidi
 	// stream. The main goroutine continues sending WalEntryMsgs concurrently.
@@ -433,6 +446,14 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			return stream.Context().Err()
 		}
 	}
+}
+
+// SetMinFollowerWALFormat makes Follow refuse followers that report a WAL
+// format below v. It must be set before the server accepts connections.
+func (s *Server) SetMinFollowerWALFormat(v int) {
+	s.mu.Lock()
+	s.minFollowerFormat = v
+	s.mu.Unlock()
 }
 
 // GoodBye implements WalStreamServer. Called by a follower before graceful

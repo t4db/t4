@@ -180,6 +180,10 @@ func unmarshalWalEntryMsg(data []byte, m *WalEntryMsg) error {
 type FollowRequest struct {
 	FromRevision int64  `json:"from_revision"`
 	NodeID       string `json:"node_id"`
+	// WALFormat is the highest WAL format version the follower can apply
+	// (wal.WALFormatVersion). Zero means the follower predates this field.
+	// A leader must not stream entries in a newer format to that follower.
+	WALFormat int `json:"wal_format,omitempty"`
 }
 
 // AckMsg is sent by a follower to the leader on the bidi Follow stream to
@@ -240,6 +244,9 @@ const (
 	ForwardCompact                    // compact up to Revision
 	ForwardGetRevision                // ReadIndex: returns the leader's current revision
 	ForwardTxn                        // multi-key atomic transaction
+	ForwardMetaPut                    // set a meta keyspace key
+	ForwardMetaDelete                 // delete a meta keyspace key
+	ForwardGetSequence                // ReadIndex for the meta keyspace: returns the leader's applied WAL sequence
 )
 
 // KVMsg is the wire representation of a key-value record.
@@ -267,7 +274,7 @@ type TxnCondMsg struct {
 
 // TxnOpMsg is the wire representation of a TxnOp (one branch operation).
 type TxnOpMsg struct {
-	Type  uint8  `json:"type"` // 0=put, 1=delete
+	Type  uint8  `json:"type"` // 0=put, 1=delete, 2=meta put, 3=meta delete
 	Key   string `json:"key"`
 	Value []byte `json:"value,omitempty"`
 	Lease int64  `json:"lease,omitempty"`

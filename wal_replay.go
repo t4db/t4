@@ -36,6 +36,9 @@ func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, after
 		}
 		entries, readErr := sr.ReadAll()
 		_ = rc.Close()
+		if errors.Is(readErr, wal.ErrUnknownOp) {
+			return fmt.Errorf("replayPinned segment %q: %w", seg.Key, readErr)
+		}
 		if readErr != nil {
 			log.Warnf("t4: partial pinned segment %q: %v", seg.Key, readErr)
 		}
@@ -202,6 +205,9 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 		}
 		entries, readErr := sr.ReadAll()
 		_ = rc.Close()
+		if errors.Is(readErr, wal.ErrUnknownOp) {
+			return fmt.Errorf("replayRemote segment %q: %w", key, readErr)
+		}
 		if readErr != nil {
 			log.Warnf("t4: partial remote segment %q: %v", key, readErr)
 		}

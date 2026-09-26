@@ -11,9 +11,11 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
+	"github.com/t4db/t4/internal/testhook"
 	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
 )
@@ -21,7 +23,10 @@ import (
 // becomeLeader transitions this node to leader role.
 // Re-opens the WAL with an S3 uploader, starts the peer gRPC server,
 // and launches the watchLoop. Must NOT be called with n.mu held.
-func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord) error {
+//
+// opening is true when called from Open, which may then create the database
+// with the meta keyspace (see initMetaAtGenesis); a promotion never does.
+func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord, opening bool) error {
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	if err := n.recoverLocalWALBeforeLeadership(walDir); err != nil {
 		return err
@@ -77,6 +82,15 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	w2.Start(bgCtx)
 
 	peerSrv := peer.NewServer(n.cfg.PeerBufferSize, n.log)
+	// A database with the meta keyspace, or one Open is about to create with
+	// it (see initMetaAtGenesis), has WAL entries that followers below format
+	// 3 would misapply: refuse them before serving.
+	if _, metaOn, err := n.db.Load().MetaGet(metaFormatKey); err != nil {
+		_ = w2.Close()
+		return fmt.Errorf("t4: read meta format: %w", err)
+	} else if metaOn || (opening && n.db.Load().LastSequence() == 0 && !testhook.LegacyNewDatabases.Load()) {
+		peerSrv.SetMinFollowerWALFormat(wal.WALFormatVersion)
+	}
 	lis, err := net.Listen("tcp", n.cfg.PeerListenAddr)
 	if err != nil {
 		_ = w2.Close()
@@ -101,6 +115,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.nextSeq = nextSeq
 	n.pending = make(map[string]pendingKV)
+	n.pendingMeta = make(map[string]pendingMeta)
 	n.mu.Unlock()
 
 	// Install the forward handler after role is set to leader so that
@@ -327,6 +342,11 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 // when a follower forwards a write. Dispatches to the appropriate Node method.
 // Since HandleForward runs on the leader, all write methods execute directly.
 func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*peer.ForwardResponse, error) {
+	if testhook.V1Leader.Load() {
+		if err := v1ForwardSupported(req); err != nil {
+			return nil, err
+		}
+	}
 	switch req.Op {
 	case peer.ForwardPut:
 		rev, err := n.Put(ctx, req.Key, req.Value, req.Lease)
@@ -369,6 +389,22 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		n.mu.Unlock()
 		return &peer.ForwardResponse{Revision: rev, Succeeded: true}, nil
 
+	case peer.ForwardMetaPut:
+		err := n.MetaPut(ctx, req.Key, req.Value)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardMetaDelete:
+		err := n.MetaDelete(ctx, req.Key)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardGetSequence:
+		// Every acknowledged write has been applied before its caller is
+		// released, so the applied sequence covers all of them. Meta writes
+		// have no optimistic pending state, unlike ForwardGetRevision.
+		return &peer.ForwardResponse{Revision: n.db.Load().LastSequence(), Succeeded: true}, nil
+
 	case peer.ForwardTxn:
 		if req.TxnReq == nil {
 			return nil, fmt.Errorf("t4: ForwardTxn missing TxnReq")
@@ -390,6 +426,31 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		}, nil
 	}
 	return nil, fmt.Errorf("t4: unknown forward op %d", req.Op)
+}
+
+// v1ForwardSupported reports whether a v1.1 leader understands req: it had no
+// meta forward ops, txn conditions up to TxnCondLease, and txn ops up to
+// TxnDelete. It ignored anything newer instead of rejecting it.
+func v1ForwardSupported(req *peer.ForwardRequest) error {
+	if req.Op > peer.ForwardTxn {
+		return fmt.Errorf("t4: forward op %d is unknown to a v1.1 leader", req.Op)
+	}
+	if req.TxnReq == nil {
+		return nil
+	}
+	for _, c := range req.TxnReq.Conditions {
+		if TxnCondTarget(c.Target) > TxnCondLease {
+			return fmt.Errorf("t4: txn condition target %d is unknown to a v1.1 leader", c.Target)
+		}
+	}
+	for _, ops := range [][]peer.TxnOpMsg{req.TxnReq.Success, req.TxnReq.Failure} {
+		for _, op := range ops {
+			if TxnOpType(op.Type) > TxnDelete {
+				return fmt.Errorf("t4: txn op type %d is unknown to a v1.1 leader", op.Type)
+			}
+		}
+	}
+	return nil
 }
 
 // commitLoop is the group-commit pipeline for leader/single-node writes.
@@ -726,14 +787,20 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 		n.log.Errorf("t4: startup checkpoint flush pebble: %v", err)
 		return
 	}
+	cpFormat, err := n.checkpointFormat()
+	if err != nil {
+		n.fenceMu.Unlock()
+		n.log.Errorf("t4: startup checkpoint format: %v", err)
+		return
+	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry(), cpFormat); err != nil {
 			n.fenceMu.Unlock()
 			n.log.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
 			return
 		}
-	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
+	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore, cpFormat); err != nil {
 		n.fenceMu.Unlock()
 		n.log.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
 		return
@@ -742,6 +809,20 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 	atomic.StoreInt64(&n.entriesSinceCheckpoint, 0)
 	metrics.CheckpointsTotal.Inc()
 	n.log.Infof("t4: startup checkpoint written (rev=%d)", rev)
+}
+
+// checkpointFormat returns the checkpoint format needed to represent the
+// current store: the meta keyspace requires FormatVersionMeta so that binaries
+// predating it refuse the checkpoint rather than restore without that state.
+func (n *Node) checkpointFormat() (uint32, error) {
+	hasMeta, err := n.db.Load().HasMeta()
+	if err != nil {
+		return 0, err
+	}
+	if hasMeta {
+		return checkpoint.FormatVersionMeta, nil
+	}
+	return checkpoint.FormatVersionBase, nil
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {
@@ -765,14 +846,20 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		n.log.Errorf("t4: checkpoint flush pebble: %v", err)
 		return
 	}
+	cpFormat, err := n.checkpointFormat()
+	if err != nil {
+		n.fenceMu.Unlock()
+		n.log.Errorf("t4: checkpoint format: %v", err)
+		return
+	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry(), cpFormat); err != nil {
 			n.fenceMu.Unlock()
 			n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 			return
 		}
-	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
+	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore, cpFormat); err != nil {
 		n.fenceMu.Unlock()
 		n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 		return

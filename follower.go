@@ -2,6 +2,7 @@ package t4
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -107,6 +108,12 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			continue
 		}
 
+		if errors.Is(err, wal.ErrUnknownOp) {
+			n.log.Errorf("t4: leader sent a WAL entry this binary cannot apply — upgrade this node; stopping: %v", err)
+			n.cancelBg()
+			return
+		}
+
 		if peer.IsLeaderUnreachable(err) || peer.IsLeaderShutdown(err) {
 			if peer.IsLeaderShutdown(err) {
 				n.log.Infof("t4: leader shut down gracefully — attempting immediate election takeover")
@@ -177,14 +184,22 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	// committed revision. A node missing entries would either drop them (data
 	// loss) or fail to serve reads that clients already observed.
 	if existing != nil && existing.CommittedRev > n.db.Load().CurrentRevision() {
-		// Graceful shutdown path: the old leader vacated and (under the new
-		// graceful-leader-shutdown protocol) uploaded its WAL to S3 before
-		// touching the lock with its final CommittedRev. Following the
-		// existing.LeaderAddr would just retry a dead endpoint forever —
-		// catch up via S3 instead, then proceed to TakeOver.
-		if graceful && n.cfg.ObjectStore != nil {
-			n.log.Infof("t4: takeover: catching up from S3 before takeover (ours=%d, leader=%d)",
+		// The leader is gone: it shut down gracefully (and uploaded its WAL
+		// before recording its final CommittedRev), or its liveness record
+		// went stale above. Following its address cannot catch this node up,
+		// so catch up from object storage (checkpoint, then WAL), where every
+		// committed write is durable once no follower acknowledges it, then
+		// take over.
+		if n.cfg.ObjectStore != nil {
+			n.log.Infof("t4: takeover: catching up from object storage before takeover (ours=%d, leader=%d)",
 				n.db.Load().CurrentRevision(), existing.CommittedRev)
+			// WAL segments covered by the latest checkpoint may already be
+			// garbage-collected: restore the checkpoint first if this node is
+			// behind it, as the follow loop's resync does.
+			if err := n.resyncFromCheckpoint(bgCtx); err != nil {
+				n.log.Errorf("t4: takeover catch-up checkpoint restore: %v — will retry", err)
+				return nil, false
+			}
 			catchupCtx, catchupCancel := context.WithTimeout(bgCtx, 2*time.Minute)
 			rerr := replayRemote(catchupCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), n.log)
 			catchupCancel()
@@ -192,17 +207,18 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 				n.log.Errorf("t4: takeover catch-up replay: %v — will retry", rerr)
 				return nil, false
 			}
-			if existing.CommittedRev > n.db.Load().CurrentRevision() {
-				n.log.Warnf("t4: takeover: still behind after S3 catch-up (ours=%d, leader=%d) — will retry once WAL upload completes",
+			n.db.Load().NotifyRevision()
+		}
+		if existing.CommittedRev > n.db.Load().CurrentRevision() {
+			if graceful {
+				n.log.Warnf("t4: takeover: still behind after catch-up (ours=%d, leader=%d) — will retry once WAL upload completes",
 					n.db.Load().CurrentRevision(), existing.CommittedRev)
 				return nil, false
 			}
-			// Fall through to TakeOver with caught-up state.
-		} else {
-			// Non-graceful: a current leader may still be alive somewhere with
-			// fresh writes. Switch followLoop to its address so connecting
-			// triggers an in-place resync that catches up this node.
-			n.log.Infof("t4: takebover: node is behind leader committed rev (ours=%d, leader=%d) — following current leader to catch up",
+			// Some committed entries are not in object storage yet, so a
+			// leader that still has them may be alive after all. Follow it;
+			// connecting triggers an in-place resync of this node.
+			n.log.Infof("t4: takeover: node is behind leader committed rev after catch-up (ours=%d, leader=%d) — following current leader",
 				n.db.Load().CurrentRevision(), existing.CommittedRev)
 			if existing.LeaderAddr != "" {
 				n.observeTerm(existing.Term)
@@ -210,6 +226,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 			}
 			return nil, false
 		}
+		// Caught up: fall through to TakeOver.
 	}
 
 	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), n.db.Load().CurrentRevision())
@@ -219,7 +236,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	}
 
 	if won {
-		if err := n.becomeLeader(bgCtx, lock, rec); err != nil {
+		if err := n.becomeLeader(bgCtx, lock, rec, false); err != nil {
 			n.log.Errorf("t4: promotion failed: %v", err)
 			return nil, false
 		}
@@ -304,6 +321,12 @@ func fwdOpLabel(op peer.ForwardOp) string {
 		return "get_revision"
 	case peer.ForwardTxn:
 		return "txn"
+	case peer.ForwardMetaPut:
+		return "meta_put"
+	case peer.ForwardMetaDelete:
+		return "meta_delete"
+	case peer.ForwardGetSequence:
+		return "get_sequence"
 	default:
 		return "unknown"
 	}

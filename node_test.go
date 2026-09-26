@@ -547,6 +547,14 @@ func TestNodeFlushAfterCompactDoesNotReuseWALSequence(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = n.Close() })
+	// A new database may already hold entries (the meta format marker).
+	if err := n.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	baseSeq, err := wal.MaxSequence(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatalf("MaxSequence: %v", err)
+	}
 
 	if _, err := n.Put(c, "k", []byte("v1"), 0); err != nil {
 		t.Fatalf("Put: %v", err)
@@ -568,8 +576,8 @@ func TestNodeFlushAfterCompactDoesNotReuseWALSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MaxSequence: %v", err)
 	}
-	if maxSeq != 3 {
-		t.Fatalf("MaxSequence after repeated compact/flush: want 3 got %d", maxSeq)
+	if maxSeq != baseSeq+3 {
+		t.Fatalf("MaxSequence after repeated compact/flush: want %d got %d", baseSeq+3, maxSeq)
 	}
 	if n.CurrentRevision() != 1 {
 		t.Fatalf("CurrentRevision after repeated compact/flush: want 1 got %d", n.CurrentRevision())

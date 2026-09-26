@@ -19,6 +19,8 @@ These are the failure modes the binary refuses rather than silently corrupting s
 |---|---|
 | Checkpoint `format_version` newer than this binary understands | Startup refuses to restore. Operator must roll the binary forward. |
 | WAL frame magic / version newer than this binary understands | Startup refuses to replay. Same remedy. |
+| Follower on an earlier release connecting to the leader of a database created with the meta keyspace | The leader refuses the stream with `wal_format_unsupported`. Upgrade the follower. |
+| WAL entry with an op code this binary does not know (local replay, S3 replay, or the leader's peer stream) | Replay or apply is refused. A follower stops replicating and logs an error instead of retrying or attempting a leader takeover; it does not apply the entry. Same remedy. |
 | `manifest/latest` references a checkpoint missing referenced SSTs | Startup error. Recoverable from an earlier checkpoint via `t4 restore`. |
 | Branch registry entry points at a checkpoint older than the safe `format_version` | GC refuses to reclaim. Inspect with `t4 inspect`. |
 
@@ -40,6 +42,22 @@ The cluster keeps accepting writes throughout, modulo the ~6 s window when the l
 1. Stop the t4 process.
 2. Install the new binary.
 3. Start with the same flags. T4 replays any unsealed WAL entries from the local data directory; if the local directory is gone (ephemeral storage), it restores the latest checkpoint from S3.
+
+## Databases created with the meta keyspace
+
+Databases created by this release or later keep T4's own bookkeeping (etcd leases, auth users, roles and tokens) in the
+meta keyspace, which is replicated through the WAL but does not consume revisions. As in etcd, granting a lease,
+keeping it alive, revoking a lease with no attached keys, and changing auth leave the revision unchanged.
+
+The meta keyspace is enabled when the database is created, as its first WAL entry, and never changes afterwards:
+
+- **Existing databases keep their format.** When this release opens a database created by an earlier one, lease and
+  auth state stays in revisioned keys as before, and the database can still be downgraded.
+- **New databases cannot be opened by earlier releases.** Their WAL segments containing meta entries use format 3 and
+  their checkpoints use format 2, which earlier releases refuse.
+- **A leader of a new database refuses followers that run an earlier release.** They are turned away with
+  `wal_format_unsupported` before any entry is streamed to them. Create new databases only once every node runs this
+  release or later.
 
 ## Downgrade
 
