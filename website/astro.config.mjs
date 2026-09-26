@@ -85,6 +85,7 @@ export default defineConfig({
 						{ label: 'Operations', slug: 'operations' },
 						{ label: 'Branches', slug: 'branches' },
 						{ label: 'Backup and Restore', slug: 'backup-restore' },
+						{ label: 'Replication to etcd', slug: 'replication' },
 						{ label: 'Security', slug: 'security' },
 						{ label: 'Recipes', slug: 'recipes' },
 					],
