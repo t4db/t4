@@ -2,6 +2,7 @@ package peer_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -491,5 +492,71 @@ func TestReconnectReplaysUncommittedEntriesOnlyOnce(t *testing.T) {
 	}
 	if len(applied) != 2 || applied[0] != 1 || applied[1] != 2 {
 		t.Fatalf("applied revisions = %v, want [1 2]", applied)
+	}
+}
+
+// futureOpServer streams an entry with an op code this binary does not know,
+// as a newer leader would, and records the FollowRequests it receives.
+type futureOpServer struct {
+	mu       sync.Mutex
+	requests []peer.FollowRequest
+}
+
+func (s *futureOpServer) Follow(req *peer.FollowRequest, stream peer.WalStream_FollowServer) error {
+	s.mu.Lock()
+	s.requests = append(s.requests, *req)
+	s.mu.Unlock()
+
+	e := makeEntry(1)
+	e.Op = 99
+	if err := stream.Send(peer.EntryToMsg(e)); err != nil {
+		return err
+	}
+	if err := stream.Send(&peer.WalEntryMsg{Commit: true, CommitStartRevision: 1, CommitRevision: 1}); err != nil {
+		return err
+	}
+	<-stream.Context().Done()
+	return stream.Context().Err()
+}
+
+func (s *futureOpServer) Forward(context.Context, *peer.ForwardRequest) (*peer.ForwardResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "unused")
+}
+
+func (s *futureOpServer) GoodBye(context.Context, *peer.GoodByeRequest) (*peer.GoodByeResponse, error) {
+	return &peer.GoodByeResponse{}, nil
+}
+
+// TestFollowRejectsUnknownOp verifies that a follower refuses an entry it
+// cannot apply: nothing reaches its WAL or store, and Follow returns
+// immediately instead of retrying until ErrLeaderUnreachable (which would make
+// the follower attempt a leadership takeover).
+func TestFollowRejectsUnknownOp(t *testing.T) {
+	srv := &futureOpServer{}
+	addr := startServer(t, srv)
+
+	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	var walCalls, applyCalls int
+	err := cli.Follow(ctx, 1,
+		func([]wal.Entry) error { walCalls++; return nil },
+		func([]wal.Entry) error { applyCalls++; return nil },
+	)
+	if !errors.Is(err, wal.ErrUnknownOp) {
+		t.Fatalf("Follow: want ErrUnknownOp, got %v", err)
+	}
+	if walCalls != 0 || applyCalls != 0 {
+		t.Fatalf("unknown op reached follower: walFn=%d applyFn=%d", walCalls, applyCalls)
+	}
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.requests) != 1 {
+		t.Fatalf("follower connected %d times, want 1 (no retry)", len(srv.requests))
+	}
+	if got := srv.requests[0].WALFormat; got != wal.WALFormatVersion {
+		t.Fatalf("FollowRequest.WALFormat: want %d, got %d", wal.WALFormatVersion, got)
 	}
 }

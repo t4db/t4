@@ -189,6 +189,10 @@ type FollowRequest struct {
 	FromRevision int64  `json:"from_revision"`
 	NodeID       string `json:"node_id"`
 	Heartbeats   bool   `json:"heartbeats,omitempty"`
+	// WALFormat is the highest WAL format version the follower can apply
+	// (wal.WALFormatVersion). Zero means the follower predates this field.
+	// A leader must not stream entries in a newer format to that follower.
+	WALFormat int `json:"wal_format,omitempty"`
 }
 
 // AckMsg is sent by a follower to the leader on the bidi Follow stream to
