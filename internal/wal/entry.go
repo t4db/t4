@@ -7,6 +7,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -23,7 +24,80 @@ const (
 	// OpTxn is a multi-key atomic transaction. Key is empty; sub-operations
 	// are encoded in Value using EncodeTxnOps / DecodeTxnOps.
 	OpTxn Op = 5
+	// OpMetaPut sets Key to Value in the meta keyspace: unversioned node
+	// metadata that has no history, is never watched, and does not advance
+	// the user-visible revision. Requires WAL format 3.
+	OpMetaPut Op = 6
+	// OpMetaDelete removes Key from the meta keyspace. Requires WAL format 3.
+	OpMetaDelete Op = 7
 )
+
+// ErrUnknownOp is returned when a WAL entry or txn sub-operation carries an op
+// code this binary does not understand. It usually means the entry was written
+// by a newer T4 release. Callers must fail closed: guessing the semantics of an
+// unknown op (for example, treating it as a put) silently corrupts state.
+var ErrUnknownOp = errors.New("wal: unknown op (written by a newer T4 release?)")
+
+// Known reports whether o is an entry-level op code understood by this binary.
+func (o Op) Known() bool { return o >= OpCreate && o <= OpMetaDelete }
+
+// IsMeta reports whether o writes the meta keyspace.
+func (o Op) IsMeta() bool { return o == OpMetaPut || o == OpMetaDelete }
+
+// knownTxnSubOp reports whether o is valid inside an OpTxn payload.
+func knownTxnSubOp(o Op) bool {
+	return o == OpCreate || o == OpUpdate || o == OpDelete || o.IsMeta()
+}
+
+// ConsumesRevision reports whether applying e advances the user-visible
+// revision: true for data writes, false for compaction, meta ops, and
+// transactions whose sub-operations are all meta ops. Entries that do not
+// consume a revision carry the revision of the preceding data write, so
+// anything keyed by revision (log records, pending reads, term-conflict
+// cleanup) must skip them.
+func (e *Entry) ConsumesRevision() bool {
+	switch e.Op {
+	case OpCreate, OpUpdate, OpDelete:
+		return true
+	case OpTxn:
+		s, err := scanTxnOps(e.Value)
+		// An undecodable payload is rejected on apply; treat it as data so
+		// callers never skip revision-keyed safety work for it.
+		return err != nil || s.data > 0
+	default:
+		return false
+	}
+}
+
+// RequiredFormat returns the lowest WAL segment format that may contain e.
+// Meta ops, standalone or inside a transaction, require format 3 so that
+// binaries predating them refuse the segment instead of misapplying it.
+func RequiredFormat(e *Entry) int {
+	switch e.Op {
+	case OpMetaPut, OpMetaDelete:
+		return formatMeta
+	case OpTxn:
+		if s, err := scanTxnOps(e.Value); err == nil && s.meta > 0 {
+			return formatMeta
+		}
+	}
+	return formatBase
+}
+
+// ValidateEntry checks that e and, for OpTxn, every sub-operation carry op
+// codes understood by this binary. It returns an error wrapping ErrUnknownOp
+// otherwise.
+func ValidateEntry(e *Entry) error {
+	if !e.Op.Known() {
+		return fmt.Errorf("%w: op=%d seq=%d rev=%d", ErrUnknownOp, e.Op, e.Sequence(), e.Revision)
+	}
+	if e.Op == OpTxn {
+		if _, err := scanTxnOps(e.Value); err != nil {
+			return fmt.Errorf("seq=%d rev=%d: %w", e.Sequence(), e.Revision, err)
+		}
+	}
+	return nil
+}
 
 // Entry is one record in the write-ahead log.
 type Entry struct {
@@ -98,10 +172,29 @@ func EncodeTxnOps(ops []TxnSubOp) []byte {
 	return buf
 }
 
-// DecodeTxnOps decodes a byte slice produced by EncodeTxnOps.
+// DecodeTxnOps decodes a byte slice produced by EncodeTxnOps. It returns an
+// error wrapping ErrUnknownOp if any sub-operation has an unknown op code.
 func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
+	ops, _, err := decodeTxnOps(b, true)
+	return ops, err
+}
+
+// txnSummary counts the data and meta sub-operations in a txn payload.
+type txnSummary struct{ data, meta int }
+
+// scanTxnOps validates framing and op codes of a txn payload and counts its
+// sub-operations without allocating them.
+func scanTxnOps(b []byte) (txnSummary, error) {
+	_, s, err := decodeTxnOps(b, false)
+	return s, err
+}
+
+// decodeTxnOps parses and validates a txn payload. When keep is false it only
+// validates framing and op codes, without allocating the decoded ops.
+func decodeTxnOps(b []byte, keep bool) ([]TxnSubOp, txnSummary, error) {
+	var sum txnSummary
 	if len(b) < 4 {
-		return nil, fmt.Errorf("wal: txn ops payload too short (%d bytes)", len(b))
+		return nil, sum, fmt.Errorf("wal: txn ops payload too short (%d bytes)", len(b))
 	}
 	rawCount := binary.BigEndian.Uint32(b[0:4])
 	versioned := rawCount&txnOpsVersionedFlag != 0
@@ -110,27 +203,47 @@ func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
 	if versioned {
 		fixedSize = txnSubOpFixedSize
 	}
-	ops := make([]TxnSubOp, 0, count)
+	var ops []TxnSubOp
+	if keep {
+		// Bound the allocation by what the payload can actually hold, so a
+		// corrupt count cannot trigger a huge allocation.
+		ops = make([]TxnSubOp, 0, min(count, (len(b)-4)/fixedSize))
+	}
 	off := 4
 	for i := 0; i < count; i++ {
 		if len(b)-off < fixedSize {
-			return nil, fmt.Errorf("wal: txn sub-op %d header truncated", i)
+			return nil, sum, fmt.Errorf("wal: txn sub-op %d header truncated", i)
 		}
-		o := TxnSubOp{}
-		o.Op = Op(b[off])
-		o.Lease = int64(binary.BigEndian.Uint64(b[off+1:]))
-		o.CreateRevision = int64(binary.BigEndian.Uint64(b[off+9:]))
-		o.PrevRevision = int64(binary.BigEndian.Uint64(b[off+17:]))
+		op := Op(b[off])
+		if !knownTxnSubOp(op) {
+			return nil, sum, fmt.Errorf("%w: txn sub-op %d has op=%d", ErrUnknownOp, i, op)
+		}
+		if op.IsMeta() {
+			sum.meta++
+		} else {
+			sum.data++
+		}
 		keyLenOffset := off + 25
 		if versioned {
-			o.Version = int64(binary.BigEndian.Uint64(b[off+25:]))
 			keyLenOffset = off + 33
 		}
 		keyLen := int(binary.BigEndian.Uint32(b[keyLenOffset:]))
 		valLen := int(binary.BigEndian.Uint32(b[keyLenOffset+4:]))
+		hdr := off
 		off += fixedSize
 		if len(b)-off < keyLen+valLen {
-			return nil, fmt.Errorf("wal: txn sub-op %d payload truncated (need %d, have %d)", i, keyLen+valLen, len(b)-off)
+			return nil, sum, fmt.Errorf("wal: txn sub-op %d payload truncated (need %d, have %d)", i, keyLen+valLen, len(b)-off)
+		}
+		if !keep {
+			off += keyLen + valLen
+			continue
+		}
+		o := TxnSubOp{Op: op}
+		o.Lease = int64(binary.BigEndian.Uint64(b[hdr+1:]))
+		o.CreateRevision = int64(binary.BigEndian.Uint64(b[hdr+9:]))
+		o.PrevRevision = int64(binary.BigEndian.Uint64(b[hdr+17:]))
+		if versioned {
+			o.Version = int64(binary.BigEndian.Uint64(b[hdr+25:]))
 		}
 		o.Key = string(b[off : off+keyLen])
 		off += keyLen
@@ -141,7 +254,7 @@ func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
 		off += valLen
 		ops = append(ops, o)
 	}
-	return ops, nil
+	return ops, sum, nil
 }
 
 // Wire layout:
@@ -245,6 +358,9 @@ func unmarshalEntryVersion(b []byte, version int) (*Entry, error) {
 	}
 	e := &Entry{}
 	e.Op = Op(b[0])
+	if !e.Op.Known() {
+		return nil, fmt.Errorf("%w: op=%d", ErrUnknownOp, e.Op)
+	}
 	e.Revision = int64(binary.BigEndian.Uint64(b[1:9]))
 	e.Term = binary.BigEndian.Uint64(b[9:17])
 	e.Lease = int64(binary.BigEndian.Uint64(b[17:25]))

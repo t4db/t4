@@ -244,6 +244,8 @@ func TestCanceledWriteDoesNotConsumeWALSequence(t *testing.T) {
 	}()
 
 	ctx := context.Background()
+	// A new database may already hold entries (the meta format marker).
+	baseSeq := n.db.Load().LastSequence()
 	if _, err := n.Put(ctx, "/gap/seed", []byte("seed"), 0); err != nil {
 		t.Fatalf("seed Put: %v", err)
 	}
@@ -261,8 +263,8 @@ func TestCanceledWriteDoesNotConsumeWALSequence(t *testing.T) {
 		t.Fatalf("Put after canceled batch: %v", err)
 	}
 
-	if got := n.db.Load().LastSequence(); got != 2 {
-		t.Fatalf("LastSequence after seed/cancel/commit = %d, want 2", got)
+	if got := n.db.Load().LastSequence(); got != baseSeq+2 {
+		t.Fatalf("LastSequence after seed/cancel/commit = %d, want %d", got, baseSeq+2)
 	}
 	if got := n.db.Load().CurrentRevision(); got != 3 {
 		t.Fatalf("CurrentRevision after seed/cancel/commit = %d, want 3", got)

@@ -36,6 +36,9 @@ var (
 	ErrClosed         = errors.New("t4: node is closed")
 	ErrCompacted      = istore.ErrCompacted
 	ErrFutureRevision = istore.ErrFutureRevision
+	// ErrMetaDisabled is returned by meta keyspace writes before the cluster
+	// has been upgraded to a WAL format that supports them.
+	ErrMetaDisabled = errors.New("t4: meta keyspace is not enabled for this database")
 )
 
 // TxnCondTarget identifies which field of a key's metadata is compared.
@@ -47,6 +50,9 @@ const (
 	TxnCondCreate                       // compare CreateRevision
 	TxnCondValue                        // compare Value bytes
 	TxnCondLease                        // compare Lease ID
+	// TxnCondMetaExists compares whether Key exists in the meta keyspace,
+	// using Version: 1 if it exists, 0 if it does not.
+	TxnCondMetaExists
 )
 
 // TxnCondResult is the comparison operator for a TxnCondition.
@@ -78,8 +84,10 @@ type TxnCondition struct {
 type TxnOpType uint8
 
 const (
-	TxnPut    TxnOpType = iota // upsert
-	TxnDelete                  // unconditional delete
+	TxnPut        TxnOpType = iota // upsert
+	TxnDelete                      // unconditional delete
+	TxnMetaPut                     // set a meta keyspace key (see Node.MetaPut)
+	TxnMetaDelete                  // delete a meta keyspace key (see Node.MetaDelete)
 )
 
 // TxnOp is one write operation in a transaction's Then or Else branch.
@@ -149,10 +157,21 @@ type writeReq struct {
 	walStart, walEnd       time.Time
 	quorumStart, quorumEnd time.Time
 	batchSize              int
+
+	// metaToken owns this request's entries in Node.pendingMeta (0 = none).
+	metaToken uint64
 }
 
 func newWriteReq(ctx context.Context, e wal.Entry) *writeReq {
 	return &writeReq{entry: e, done: make(chan error, 1), ctx: ctx}
+}
+
+// pendingMeta tracks an in-flight meta write so that meta existence
+// conditions evaluated under n.mu see writes not yet applied to Pebble. token
+// identifies the write request that owns the entry (writeReq.metaToken).
+type pendingMeta struct {
+	token   uint64
+	deleted bool
 }
 
 // pendingKV tracks an in-flight write that has been assigned a revision and
@@ -198,6 +217,11 @@ type Node struct {
 	// pending holds in-flight writes that have been assigned a revision but
 	// not yet applied to Pebble. Protected by mu.
 	pending map[string]pendingKV
+
+	// pendingMeta holds in-flight meta keyspace writes; metaTokenSeq issues
+	// their tokens. Protected by mu.
+	pendingMeta  map[string]pendingMeta
+	metaTokenSeq uint64
 
 	// writeC is the channel to the commit loop (group-commit WAL + Pebble apply).
 	// Only used when the node is leader or single.
@@ -651,6 +675,7 @@ func Open(cfg Config) (*Node, error) {
 		nextRev:     db.CurrentRevision(),
 		nextSeq:     nextSeq,
 		pending:     make(map[string]pendingKV),
+		pendingMeta: make(map[string]pendingMeta),
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,
 	}
@@ -687,6 +712,10 @@ func Open(cfg Config) (*Node, error) {
 	if n.loadRole() != roleFollower {
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
+		if err := n.initMetaAtGenesis(bgCtx); err != nil {
+			_ = n.Close()
+			return nil, err
+		}
 	}
 	if n.loadRole() != roleFollower && cfg.ObjectStore != nil && cfg.CheckpointInterval > 0 {
 		n.bgWg.Add(1)
@@ -924,19 +953,9 @@ func (n *Node) WatchSendTimeout() time.Duration { return n.cfg.WatchSendTimeout 
 // current revision, then wait until this node has applied at least that far.
 // Returns nil immediately if the node is the leader or running single-node.
 func (n *Node) syncWithLeader(ctx context.Context) error {
-	cli := n.leaderCli.Load()
-	if cli == nil {
-		// If the background context has been cancelled the node is either
-		// shutting down or has been fenced (leader superseded by a new term).
-		// Serving a read from our local stale Pebble would violate
-		// linearizability — return an error so the client retries elsewhere.
-		if n.bgCtx.Err() != nil {
-			return ErrClosed
-		}
-		if n.loadRole() == roleFollower {
-			return ErrNoLeader
-		}
-		return nil // leader or single-node — already up-to-date
+	cli, err := n.readIndexClient()
+	if cli == nil || err != nil {
+		return err
 	}
 	resp, err := cli.ForwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardGetRevision})
 	if err != nil {
@@ -953,6 +972,27 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 		return fmt.Errorf("t4: read sync: wait for local revision %d: %w", resp.Revision, err)
 	}
 	return nil
+}
+
+// readIndexClient returns the client to ask for a read index. A nil client
+// with a nil error means this node is the leader or single-node and its local
+// state is already up to date.
+func (n *Node) readIndexClient() (*peer.Client, error) {
+	cli := n.leaderCli.Load()
+	if cli == nil {
+		// If the background context has been cancelled the node is either
+		// shutting down or has been fenced (leader superseded by a new term).
+		// Serving a read from our local stale Pebble would violate
+		// linearizability — return an error so the client retries elsewhere.
+		if n.bgCtx.Err() != nil {
+			return nil, ErrClosed
+		}
+		if n.loadRole() == roleFollower {
+			return nil, ErrNoLeader
+		}
+		return nil, nil // leader or single-node — already up-to-date
+	}
+	return cli, nil
 }
 
 func isLeaderUnavailable(err error) bool {

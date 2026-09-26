@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -268,5 +269,45 @@ func TestApplyEntryTermConflictSameKey(t *testing.T) {
 	}
 	if kv.Revision != 1 {
 		t.Errorf("Revision: want 1 got %d", kv.Revision)
+	}
+}
+
+// ── Unknown ops ──────────────────────────────────────────────────────────────
+
+// TestApplyRejectsUnknownOp guards against an older binary misapplying an op
+// added by a newer release. Previously any unrecognised op was written as a
+// data record at logKey(e.Revision), overwriting that revision's history.
+func TestApplyRejectsUnknownOp(t *testing.T) {
+	const opFromFuture wal.Op = 99
+	s := openMem(t)
+	apply(t, s, createEntry(1, "a", []byte("v1")))
+
+	for _, e := range []wal.Entry{
+		// Same revision as the data write, like a metadata-only entry.
+		{ID: 2, Revision: 1, Term: 1, Op: opFromFuture, Key: "b", Value: []byte("x")},
+		{ID: 2, Revision: 2, Term: 1, Op: wal.OpTxn, Value: wal.EncodeTxnOps([]wal.TxnSubOp{
+			{Op: wal.OpCreate, Key: "c", Value: []byte("y")},
+			{Op: opFromFuture, Key: "b", Value: []byte("x")},
+		})},
+	} {
+		if err := s.Apply([]wal.Entry{e}); !errors.Is(err, wal.ErrUnknownOp) {
+			t.Fatalf("Apply op=%d: want ErrUnknownOp, got %v", e.Op, err)
+		}
+		if err := s.Recover([]wal.Entry{e}); !errors.Is(err, wal.ErrUnknownOp) {
+			t.Fatalf("Recover op=%d: want ErrUnknownOp, got %v", e.Op, err)
+		}
+	}
+
+	if got := s.CurrentRevision(); got != 1 {
+		t.Fatalf("CurrentRevision: want 1, got %d", got)
+	}
+	kv, err := s.GetAt("a", 1)
+	if err != nil || kv == nil || string(kv.Value) != "v1" {
+		t.Fatalf("GetAt(a, 1): want v1, got %+v err=%v", kv, err)
+	}
+	for _, k := range []string{"b", "c"} {
+		if kv, err := s.Get(k); err != nil || kv != nil {
+			t.Fatalf("Get(%s): want absent, got %+v err=%v", k, kv, err)
+		}
 	}
 }
