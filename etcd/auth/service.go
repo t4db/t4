@@ -14,6 +14,18 @@ type Service struct {
 	etcdserverpb.UnimplementedAuthServer
 	store  *Store
 	tokens *TokenStore
+
+	// Header, when set, supplies the response header for every RPC, as etcd
+	// includes one in all Auth responses. Auth changes do not advance the
+	// revision in etcd, so the header reports the current revision.
+	Header func() *etcdserverpb.ResponseHeader
+}
+
+func (s *Service) header() *etcdserverpb.ResponseHeader {
+	if s.Header == nil {
+		return nil
+	}
+	return s.Header()
 }
 
 // NewService returns a Service backed by store and tokens.
@@ -27,18 +39,19 @@ func (s *Service) AuthEnable(ctx context.Context, _ *etcdserverpb.AuthEnableRequ
 	if err := s.store.Enable(ctx); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "auth enable: %v", err)
 	}
-	return &etcdserverpb.AuthEnableResponse{}, nil
+	return &etcdserverpb.AuthEnableResponse{Header: s.header()}, nil
 }
 
 func (s *Service) AuthDisable(ctx context.Context, _ *etcdserverpb.AuthDisableRequest) (*etcdserverpb.AuthDisableResponse, error) {
 	if err := s.store.Disable(ctx); err != nil {
 		return nil, status.Errorf(codes.Internal, "auth disable: %v", err)
 	}
-	return &etcdserverpb.AuthDisableResponse{}, nil
+	return &etcdserverpb.AuthDisableResponse{Header: s.header()}, nil
 }
 
 func (s *Service) AuthStatus(_ context.Context, _ *etcdserverpb.AuthStatusRequest) (*etcdserverpb.AuthStatusResponse, error) {
 	return &etcdserverpb.AuthStatusResponse{
+		Header:  s.header(),
 		Enabled: s.store.IsEnabled(),
 	}, nil
 }
@@ -56,7 +69,7 @@ func (s *Service) Authenticate(_ context.Context, req *etcdserverpb.Authenticate
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "generate token: %v", err)
 	}
-	return &etcdserverpb.AuthenticateResponse{Token: tok}, nil
+	return &etcdserverpb.AuthenticateResponse{Header: s.header(), Token: tok}, nil
 }
 
 // ── Users ────────────────────────────────────────────────────────────────────
@@ -77,7 +90,7 @@ func (s *Service) UserAdd(ctx context.Context, req *etcdserverpb.AuthUserAddRequ
 	if err := s.store.PutUser(ctx, u, password); err != nil {
 		return nil, status.Errorf(codes.Internal, "add user: %v", err)
 	}
-	return &etcdserverpb.AuthUserAddResponse{}, nil
+	return &etcdserverpb.AuthUserAddResponse{Header: s.header()}, nil
 }
 
 func (s *Service) UserGet(_ context.Context, req *etcdserverpb.AuthUserGetRequest) (*etcdserverpb.AuthUserGetResponse, error) {
@@ -85,7 +98,7 @@ func (s *Service) UserGet(_ context.Context, req *etcdserverpb.AuthUserGetReques
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "%v", err)
 	}
-	return &etcdserverpb.AuthUserGetResponse{Roles: u.Roles}, nil
+	return &etcdserverpb.AuthUserGetResponse{Header: s.header(), Roles: u.Roles}, nil
 }
 
 func (s *Service) UserList(_ context.Context, _ *etcdserverpb.AuthUserListRequest) (*etcdserverpb.AuthUserListResponse, error) {
@@ -97,14 +110,14 @@ func (s *Service) UserList(_ context.Context, _ *etcdserverpb.AuthUserListReques
 	for i, u := range users {
 		names[i] = u.Name
 	}
-	return &etcdserverpb.AuthUserListResponse{Users: names}, nil
+	return &etcdserverpb.AuthUserListResponse{Header: s.header(), Users: names}, nil
 }
 
 func (s *Service) UserDelete(ctx context.Context, req *etcdserverpb.AuthUserDeleteRequest) (*etcdserverpb.AuthUserDeleteResponse, error) {
 	if err := s.store.DeleteUser(ctx, req.Name); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "delete user: %v", err)
 	}
-	return &etcdserverpb.AuthUserDeleteResponse{}, nil
+	return &etcdserverpb.AuthUserDeleteResponse{Header: s.header()}, nil
 }
 
 func (s *Service) UserChangePassword(ctx context.Context, req *etcdserverpb.AuthUserChangePasswordRequest) (*etcdserverpb.AuthUserChangePasswordResponse, error) {
@@ -115,21 +128,21 @@ func (s *Service) UserChangePassword(ctx context.Context, req *etcdserverpb.Auth
 	if err := s.store.PutUser(ctx, u, req.Password); err != nil {
 		return nil, status.Errorf(codes.Internal, "change password: %v", err)
 	}
-	return &etcdserverpb.AuthUserChangePasswordResponse{}, nil
+	return &etcdserverpb.AuthUserChangePasswordResponse{Header: s.header()}, nil
 }
 
 func (s *Service) UserGrantRole(ctx context.Context, req *etcdserverpb.AuthUserGrantRoleRequest) (*etcdserverpb.AuthUserGrantRoleResponse, error) {
 	if err := s.store.GrantRole(ctx, req.User, req.Role); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "grant role: %v", err)
 	}
-	return &etcdserverpb.AuthUserGrantRoleResponse{}, nil
+	return &etcdserverpb.AuthUserGrantRoleResponse{Header: s.header()}, nil
 }
 
 func (s *Service) UserRevokeRole(ctx context.Context, req *etcdserverpb.AuthUserRevokeRoleRequest) (*etcdserverpb.AuthUserRevokeRoleResponse, error) {
 	if err := s.store.RevokeRole(ctx, req.Name, req.Role); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "revoke role: %v", err)
 	}
-	return &etcdserverpb.AuthUserRevokeRoleResponse{}, nil
+	return &etcdserverpb.AuthUserRevokeRoleResponse{Header: s.header()}, nil
 }
 
 // ── Roles ────────────────────────────────────────────────────────────────────
@@ -144,7 +157,7 @@ func (s *Service) RoleAdd(ctx context.Context, req *etcdserverpb.AuthRoleAddRequ
 	if err := s.store.PutRole(ctx, Role{Name: req.Name}); err != nil {
 		return nil, status.Errorf(codes.Internal, "add role: %v", err)
 	}
-	return &etcdserverpb.AuthRoleAddResponse{}, nil
+	return &etcdserverpb.AuthRoleAddResponse{Header: s.header()}, nil
 }
 
 func (s *Service) RoleGet(_ context.Context, req *etcdserverpb.AuthRoleGetRequest) (*etcdserverpb.AuthRoleGetResponse, error) {
@@ -160,7 +173,7 @@ func (s *Service) RoleGet(_ context.Context, req *etcdserverpb.AuthRoleGetReques
 			RangeEnd: []byte(p.RangeEnd),
 		}
 	}
-	return &etcdserverpb.AuthRoleGetResponse{Perm: perms}, nil
+	return &etcdserverpb.AuthRoleGetResponse{Header: s.header(), Perm: perms}, nil
 }
 
 func (s *Service) RoleList(_ context.Context, _ *etcdserverpb.AuthRoleListRequest) (*etcdserverpb.AuthRoleListResponse, error) {
@@ -172,14 +185,14 @@ func (s *Service) RoleList(_ context.Context, _ *etcdserverpb.AuthRoleListReques
 	for i, r := range roles {
 		names[i] = r.Name
 	}
-	return &etcdserverpb.AuthRoleListResponse{Roles: names}, nil
+	return &etcdserverpb.AuthRoleListResponse{Header: s.header(), Roles: names}, nil
 }
 
 func (s *Service) RoleDelete(ctx context.Context, req *etcdserverpb.AuthRoleDeleteRequest) (*etcdserverpb.AuthRoleDeleteResponse, error) {
 	if err := s.store.DeleteRole(ctx, req.Role); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "delete role: %v", err)
 	}
-	return &etcdserverpb.AuthRoleDeleteResponse{}, nil
+	return &etcdserverpb.AuthRoleDeleteResponse{Header: s.header()}, nil
 }
 
 func (s *Service) RoleGrantPermission(ctx context.Context, req *etcdserverpb.AuthRoleGrantPermissionRequest) (*etcdserverpb.AuthRoleGrantPermissionResponse, error) {
@@ -194,12 +207,12 @@ func (s *Service) RoleGrantPermission(ctx context.Context, req *etcdserverpb.Aut
 	if err := s.store.GrantPermission(ctx, req.Name, p); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "grant permission: %v", err)
 	}
-	return &etcdserverpb.AuthRoleGrantPermissionResponse{}, nil
+	return &etcdserverpb.AuthRoleGrantPermissionResponse{Header: s.header()}, nil
 }
 
 func (s *Service) RoleRevokePermission(ctx context.Context, req *etcdserverpb.AuthRoleRevokePermissionRequest) (*etcdserverpb.AuthRoleRevokePermissionResponse, error) {
 	if err := s.store.RevokePermission(ctx, req.Role, string(req.Key), string(req.RangeEnd)); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "revoke permission: %v", err)
 	}
-	return &etcdserverpb.AuthRoleRevokePermissionResponse{}, nil
+	return &etcdserverpb.AuthRoleRevokePermissionResponse{Header: s.header()}, nil
 }

@@ -202,6 +202,11 @@ func (s *Server) subscribeWatch(wctx context.Context, cr *etcdserverpb.WatchCrea
 	// Sampling first means a commit racing the subscribe is under-reported
 	// rather than claimed as delivered — the safe direction.
 	startRev := fromEtcdRevision(cr.StartRevision)
+	if cr.StartRevision == 1 {
+		// Wire revision 1 is the empty store: replay from the first write.
+		// fromEtcdRevision maps it to 0, which Node.Watch reads as "now".
+		startRev = 1
+	}
 	lastRev := startRev - 1
 	if startRev == 0 {
 		lastRev = s.node.CurrentRevision()

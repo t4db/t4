@@ -203,7 +203,9 @@ func (s *Server) Register(srv *grpc.Server) {
 	etcdserverpb.RegisterMaintenanceServer(srv, s)
 
 	if s.authStore != nil {
-		etcdserverpb.RegisterAuthServer(srv, auth.NewService(s.authStore, s.tokens))
+		authSvc := auth.NewService(s.authStore, s.tokens)
+		authSvc.Header = s.header
+		etcdserverpb.RegisterAuthServer(srv, authSvc)
 	} else {
 		etcdserverpb.RegisterAuthServer(srv, &etcdserverpb.UnimplementedAuthServer{})
 	}
@@ -285,6 +287,9 @@ func eventToProto(e t4.Event) *mvccpb.Event {
 	ev := &mvccpb.Event{Kv: kvToProto(e.KV)}
 	if e.Type == t4.EventDelete {
 		ev.Type = mvccpb.DELETE
+		// etcd reports a deletion as a tombstone: only the key and the
+		// revision of the delete. The deleted value's metadata is in PrevKv.
+		ev.Kv = &mvccpb.KeyValue{Key: ev.Kv.Key, ModRevision: ev.Kv.ModRevision}
 	} else {
 		ev.Type = mvccpb.PUT
 	}
