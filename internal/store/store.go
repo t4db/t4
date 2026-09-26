@@ -494,7 +494,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 			// Meta-only entries carry the revision of the preceding data
 			// write: the term-conflict cleanup below would delete that write.
 			if err := s.applyEntry(b, e); err != nil {
-				b.Close()
+				_ = b.Close()
 				return err
 			}
 		} else {
@@ -781,8 +781,11 @@ func (s *Store) MetaGet(key string) (value []byte, ok bool, err error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("store: get meta key %q: %w", key, err)
 	}
-	defer closer.Close()
-	return append([]byte(nil), v...), true, nil
+	value = append([]byte(nil), v...)
+	if err := closer.Close(); err != nil {
+		return nil, false, fmt.Errorf("store: get meta key %q: %w", key, err)
+	}
+	return value, true, nil
 }
 
 // MetaList returns all meta keyspace entries whose key starts with prefix,
