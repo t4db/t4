@@ -537,8 +537,14 @@ func (s *Store) Recover(entries []wal.Entry) error {
 }
 
 func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
-	if e.Op == wal.OpTxn {
+	switch e.Op {
+	case wal.OpTxn:
 		return s.applyTxnEntry(b, e)
+	case wal.OpCreate, wal.OpUpdate, wal.OpDelete:
+	default:
+		// Never guess: writing an unknown op as a data record would overwrite
+		// the log entry at e.Revision and corrupt history.
+		return fmt.Errorf("store: apply seq=%d rev=%d: %w: op=%d", e.Sequence(), e.Revision, wal.ErrUnknownOp, e.Op)
 	}
 	lk := logKey(e.Revision)
 
