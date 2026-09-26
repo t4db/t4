@@ -222,6 +222,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		// Caught up: fall through to TakeOver.
 	}
 
+	takeoverStart := time.Now()
 	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), n.db.Load().CurrentRevision())
 	if err != nil {
 		n.log.Errorf("t4: takeover election error: %v", err)
@@ -229,7 +230,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	}
 
 	if won {
-		if err := n.becomeLeader(bgCtx, lock, rec); err != nil {
+		if err := n.becomeLeader(bgCtx, lock, rec, takeoverStart); err != nil {
 			n.log.Errorf("t4: promotion failed: %v", err)
 			return nil, false
 		}

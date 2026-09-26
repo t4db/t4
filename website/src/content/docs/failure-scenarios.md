@@ -90,13 +90,13 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 **Scenario:** S3 becomes unreachable while the cluster is running.
 
 **Outcome:**
-- Writes continue. WAL segment uploads and checkpoints queue in the background.
-- Leader election liveness touches fail with transient errors — the lock is not refreshed, but the `LastSeenNano` timestamp was last set before the outage. The cluster remains stable as long as no new election is triggered during the outage window.
-- If S3 is unreachable for > `LeaderLivenessTTL` (6 s) **and** a follower tries to promote, the follower cannot write the new lock either → no election, no split-brain.
+- WAL segment uploads and checkpoints queue in the background.
+- The leader renews its lock in S3 every 2 s. Each successful renewal extends its lease to 4 s after the renewal started. Once renewals fail for longer than that, the lease expires. The leader then stops acknowledging writes and serving linearizable reads, and returns `ErrNoLeader` (etcd: `Unavailable`), because it can no longer rule out that another node has taken over.
+- Followers cannot write a new lock either, so no election succeeds and there is no split brain. Serializable reads keep working on every node.
 
 **Recovery:**
-- When S3 becomes reachable again, queued uploads resume automatically.
-- No manual intervention needed if the cluster stayed up during the outage.
+- When S3 becomes reachable again, the next renewal restores the lease and writes resume. Queued uploads resume automatically.
+- No manual intervention is needed.
 
 **Tested by:** `TestObjectStoreUnavailableWritesSucceed`, `TestObjectStoreUnavailableRecovery`
 
@@ -125,25 +125,29 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 **Scenario:** a follower cannot reach the leader or S3, but the leader can still reach S3 and the other followers.
 
 1. Follower exhausts `--follower-max-retries` reconnect attempts.
-2. Follower reads the S3 lock — `LastSeenNano` is fresh (≤ 2 s old) → **does not promote**.
+2. Follower reads the S3 lock. The leader renews `LastSeenNano` every 2 s, so it is fresh and the follower **does not promote**.
 3. Leader continues writing with the remaining nodes.
 4. When the partition heals, the follower reconnects and resyncs from the leader's ring buffer.
 
 **Result:** no data loss, no split-brain, no service interruption.
 
+**Tested by:** `TestNoTakeoverFromLiveLeader`, `TestLeaderHeartbeatNotBlockedByPendingWrites`
+
 ---
 
 ### Leader partitioned from followers and S3
 
-1. Leader stops refreshing `LastSeenNano`.
-2. After 6 s the lock goes stale.
-3. A follower races to write a new lock with `If-Match: <etag>`. Only one wins.
-4. New leader begins serving. Old leader detects supersession on its next fenced check and steps down.
-5. Old leader's uncommitted in-flight writes are dropped.
+1. The leader's lock renewals fail. Within 4 s its lease expires, and it stops acknowledging writes and serving linearizable reads.
+2. After 6 s without a renewal, the lock goes stale.
+3. Followers race to write a new lock with `If-Match: <etag>`. Only one wins.
+4. The new leader begins serving. By then the old leader has already stopped serving. When it reaches S3 again, it sees the new lock and steps down.
+5. The old leader's writes that were not acknowledged are dropped. A client retrying them gets an error, never a false success.
 
-**Failover time:** ~6 s with default settings. ~0.3 s with graceful shutdown broadcast.
+The lease relies on clocks: nodes' clocks may drift apart by less than 2 s over a 6 s window. NTP keeps drift far below that.
 
-**Tested by:** `TestNetworkPartitionNoSplitBrain`, `TestFailoverTime`
+**Failover time:** ~6 s with default settings (2 × `FollowerRetryInterval` = 4 s, plus election time). ~0.3 s with graceful shutdown broadcast.
+
+**Tested by:** `TestNetworkPartitionNoSplitBrain`, `TestFailoverTime`, `TestDeposedLeaderStopsServing`
 
 ---
 

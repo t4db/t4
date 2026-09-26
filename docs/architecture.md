@@ -152,23 +152,21 @@ If the store does not implement the `ConditionalStore` interface (optional; see 
 3. If the lock has already advanced to a term higher than the follower's `floorTerm` (another candidate already won), the follower backs off and follows the new winner.
 4. Otherwise: read the lock ETag, then `PUT` with `If-Match: <etag>`. Only the candidate that read the same ETag wins; all others get a precondition failure and re-read to find the new leader.
 
-**Stepdown:**
-- On every follower disconnect the leader immediately fences all writes (`fenceMu` write-lock), reads the S3 lock **with its ETag**, and — if still the owner — writes a **liveness touch** (`LastSeenNano = now()`) using `If-Match: <etag>` (conditional PUT). This closes the Read→Touch race: if a follower won a TakeOver between the leader's Read and Touch, the conditional PUT fails with `ErrPreconditionFailed` and the leader steps down immediately, without a second round-trip.
-- Polling (fence + conditional-check + conditional-touch every `FollowerRetryInterval` = 2 s) continues until at least one follower reconnects; once followers are present, polling pauses — liveness is signalled implicitly by the live stream.
-- As a backstop, the leader re-reads the lock on the `LeaderWatchInterval` (default 5 min) periodic ticker even when no disconnect has occurred.
-- If the lock no longer points to this node at any check (or the conditional touch is rejected), it steps down.
+**Lease and stepdown:**
+- For as long as it is leader, the leader renews the lock every `FollowerRetryInterval` (2 s), and immediately when a follower disconnects: it reads the lock **with its ETag** and — if still the owner — rewrites `LastSeenNano = now()` and its committed revision using `If-Match: <etag>`. If a follower won a TakeOver between the Read and the write, the conditional PUT fails with `ErrPreconditionFailed` and the leader steps down immediately.
+- Renewal does not pause while followers are connected, and it does not wait for in-flight writes: a follower cut off by a partition must always find a live leader's `LastSeenNano` fresh, even if the leader never noticed the partition.
+- Each successful renewal extends the leader's **lease** to the time the renewal started plus `LeaderLivenessTTL` − 2 s. The leader acknowledges writes and serves linearizable reads (its own, and the ReadIndex it answers for followers) only while the lease is valid; otherwise it returns a "no leader" error. A TakeOver needs `LastSeenNano` to be 6 s old, so a leader that cannot renew has stopped serving at least 2 s before anyone can replace it, as long as node clocks differ by less than those 2 s.
+- If the lock no longer points to this node at any renewal, it steps down. The `LeaderWatchInterval` ticker adds an extra renewal but is no longer needed for detection.
 
-**S3 request budget during a disconnect event:**  
-Each poll tick costs 1 GET + 1 PUT (touch). With a `FollowerRetryInterval` of 2 s, that is at most 1 GET + 1 PUT per 2 s while a follower is disconnected. Polling stops as soon as any follower reconnects. Outside of disconnect events (and the periodic ticker) there are zero additional S3 requests on the write path.
-
-There is no heartbeat, no TTL, and no ZooKeeper-style session. The only S3 writes for election outside of disconnect events are at election time and on takeover.
+**S3 request budget:**
+Each renewal costs 1 GET + 1 conditional PUT, so a leader issues about 1 GET + 1 PUT every 2 s (≈ 43,000 of each per day), independently of load. Election writes otherwise happen only at startup and on takeover.
 
 ### CAP properties
 
 T4 is a **CP** system (Consistent + Partition-tolerant) that provides strong durability guarantees in cluster mode:
 
 - **No network partition**: reads are linearizable (followers use the ReadIndex pattern — they sync to the leader's revision before serving). Writes are always routed to the leader.
-- **Under network partition**: when a follower is fully isolated (can't reach leader or other followers), it will eventually TakeOver once `LastSeenNano` goes stale. The old leader detects supersession either via its next conditional liveness touch (which fails with `ErrPreconditionFailed` the instant a new leader writes the lock) or within one poll interval (≤ 2 s). **The split-brain window is effectively zero**: the conditional touch means A cannot refresh its liveness after B wins — A's next touch attempt is rejected and triggers immediate stepdown. Linearizable reads on a partitioned follower return errors until reconnection — the system favours consistency over availability.
+- **Under network partition**: a follower that loses the leader promotes only once `LastSeenNano` is stale, which happens only if the leader cannot reach S3. Such a leader's lease has lapsed by then, so it has already stopped acknowledging writes and serving linearizable reads; once it reaches S3 again it sees the new lock and steps down. Linearizable reads on a partitioned follower return errors until reconnection — the system favours consistency over availability.
 
 **Durability in cluster mode:** quorum commit means every acknowledged write exists on at least two nodes' WALs before the caller sees success. If all followers disconnect, the leader falls back to single-node mode — writes remain available and durable in the leader's local WAL; followers replay missed entries when they reconnect. S3 is disaster-recovery only (both nodes fail simultaneously); WAL uploads are async and do not affect write latency.
 

@@ -120,17 +120,19 @@ t4 run \
   lock's `LastSeenNano`. If stale (older than `LeaderLivenessTTL` = 6 s), it attempts a takeover using
   `If-Match: <etag>` — only the candidate that read the same ETag wins the race. The new leader records its own address
   and `LastSeenNano`.
-- The former leader periodically re-reads the S3 lock (`--leader-watch-interval-sec`, default 300 s) and on every
-  follower disconnect. Each check reads the lock **with its ETag**, then — if still the owner — writes a liveness touch
-  using `If-Match: <etag>`. If the conditional touch is rejected (`ErrPreconditionFailed`), a new leader has taken over
-  between the Read and the Touch: the old leader steps down immediately. This closes the Read→Touch split-brain race
-  without a second round-trip.
+- The leader renews the lock every 2 s for as long as it is leader, and immediately on a follower disconnect. Each
+  renewal reads the lock **with its ETag**, then — if still the owner — rewrites `LastSeenNano` using
+  `If-Match: <etag>`. If the renewal is rejected (`ErrPreconditionFailed`), a new leader has taken over: the old leader
+  steps down immediately.
+- The leader holds a **lease**: it acknowledges writes and serves linearizable reads only while its last successful
+  renewal started less than 4 s ago (`LeaderLivenessTTL` minus a 2 s safety margin). A leader that cannot reach S3
+  therefore stops serving before any follower is allowed to take over. This relies on node clocks differing by less
+  than 2 s; keep NTP running on all nodes.
 - Writes sent to a follower are automatically forwarded to the current leader and the result is returned to the caller.
 
-Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). There is no TTL
-polling — the only S3 election writes are at startup, on leader takeover, and during liveness touches while followers
-are disconnected. In cluster mode, writes additionally require quorum ACK from all connected followers before returning
-to the caller.
+Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). Lease renewal
+costs 1 GET + 1 conditional PUT on the lock every 2 s per cluster (≈ 43,000 of each per day). In cluster mode, writes
+additionally require quorum ACK from all connected followers before returning to the caller.
 
 ### S3 operation budget
 
@@ -142,20 +144,19 @@ The default settings are useful for estimating monthly S3 request volume:
 | `SegmentMaxAge` | 10 s | Up to 259,200 age-based WAL rotations/uploads with continuous writes |
 | `SegmentMaxSize` | 50 MB | Adds more WAL uploads if the workload writes 50 MB before 10 s elapses |
 | `CheckpointInterval` | 15 min | 2,880 checkpoint cycles |
-| `LeaderWatchInterval` | 5 min | 8,640 periodic leader lock reads |
-| `FollowerRetryInterval` | 2 s | 1,296,000 liveness poll ticks if a follower is disconnected all month |
+| `FollowerRetryInterval` | 2 s | 1,296,000 leader lock renewals (cluster mode) |
 
 In a healthy cluster, ordinary writes do not wait for S3. The steady-state S3 cost is mostly asynchronous WAL upload:
 
 | Source | Approximate monthly S3 operations |
 |--------|-----------------------------------|
 | WAL archive | ~259,200 PUTs for continuous low/medium write traffic, plus size-based rotations if WAL reaches 50 MB before 10 s |
-| Periodic leader lock watch | ~8,640 GETs |
+| Leader lock renewal (cluster mode) | ~1,296,000 GETs + ~1,296,000 conditional PUTs |
 | Checkpoints | 2,880 checkpoint cycles; each writes several small objects plus any new SST files for changed data |
 
-Follower disconnects add incident traffic, not baseline traffic. While a follower is disconnected, the leader performs a
-fenced liveness check/touch every 2 seconds: one GET plus one conditional PUT per tick. A month-long disconnect would be
-about 1,296,000 GETs and 1,296,000 PUTs.
+In cluster mode the leader renews its lock every 2 seconds whether or not followers are connected: one GET plus one
+conditional PUT per renewal. This keeps its lease valid, which lets it serve writes and linearizable reads safely (see
+[Consistency](consistency#split-brain-prevention)). Single-node mode does not renew a lock.
 
 Single-node synchronous S3 durability has a different cost profile. With `WALSyncUpload=true`, each acknowledged
 `AppendBatch` is uploaded before returning, so the cost is close to one WAL PUT per write batch:

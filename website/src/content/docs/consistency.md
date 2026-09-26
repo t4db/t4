@@ -114,11 +114,14 @@ T4 is a **CP system** (Consistent + Partition-tolerant) in cluster mode:
 Leader identity is stored as a record in S3 with an ETag-based conditional update mechanism:
 
 1. **Election:** candidates race to write the lock with `If-None-Match: *` (create if absent) or `If-Match: <etag>` (CAS on takeover). The S3 API guarantees only one candidate wins.
-2. **Liveness:** while any follower is disconnected the leader refreshes a `LastSeenNano` timestamp in the lock every 2 s. A follower only promotes after `LastSeenNano` has been stale for ≥ 6 s.
-3. **Step-down:** the leader re-reads the lock on every follower disconnect event. If the lock no longer names this node (a new leader has taken over), the leader immediately stops serving writes and closes its peer gRPC server.
-4. **Fencing on conditional touch:** when the leader's liveness touch is rejected with `ErrPreconditionFailed`, it knows a new leader has written the lock and steps down immediately — no wait required.
+2. **Liveness:** for as long as it is leader, the leader renews the lock every 2 s: it rewrites `LastSeenNano` (and its committed revision) with `If-Match` on the ETag it last read. It does this whether or not followers are connected, so a follower that loses its stream never sees a live leader as dead.
+3. **Takeover:** a follower that has lost the leader promotes only if `LastSeenNano` is at least 6 s old (`LeaderLivenessTTL`) and it is not behind the committed revision recorded in the lock.
+4. **Lease:** the leader acknowledges writes and serves linearizable reads only while its last successful renewal started less than 4 s ago (the 6 s TTL minus a 2 s safety margin). Otherwise it refuses them with a "no leader" error until it renews again. A write that was already committed when the lease lapsed also gets this error, and may still take effect, as with any etcd write that fails with `Unavailable`. A leader that cannot reach S3 therefore stops serving about 2 s before any follower may take over.
+5. **Step-down:** if a renewal is rejected with `ErrPreconditionFailed`, or the lock names another node, the leader steps down immediately.
 
-**The split-brain window is effectively zero.** At most one node can write the lock at any point in time, and the former leader detects supersession on its very next touch attempt (≤ 2 s).
+**No two nodes serve as leader at the same time,** provided the clocks of any two nodes differ by less than the 2 s safety margin: the former leader's lease runs out before a takeover is allowed.
+
+A remaining limitation: the committed revision in the lock is only as recent as the last renewal. If the leader crashes, a write it acknowledged in its last ~2 s is lost when the node that takes over did not receive it.
 
 ---
 
@@ -126,23 +129,22 @@ Leader identity is stored as a record in S3 with an ETag-based conditional updat
 
 ### Follower partitioned from leader (leader can still reach S3)
 
-1. Follower loses the peer stream.
-2. Leader touches `LastSeenNano` immediately and continues refreshing every 2 s.
+1. Follower loses the peer stream (the leader may not even notice).
+2. Leader keeps renewing `LastSeenNano` every 2 s.
 3. Follower exhausts its retry budget (~4 s at default settings).
 4. Follower reads the S3 lock — `LastSeenNano` ≤ 2 s old → **does not promote**.
 5. Partition heals → follower reconnects and replays missed WAL entries.
 
 **Result:** no split-brain, no data loss, writes continue uninterrupted on the leader.
 
-### Leader partitioned from followers and S3
+### Leader partitioned from S3 (its followers may still reach it)
 
-1. Leader stops refreshing `LastSeenNano`.
-2. After 6 s the lock goes stale.
-3. A follower races to write a new lock with `If-Match: <etag>`. Only one wins.
-4. New leader begins serving. Old leader detects supersession on its next fenced check and steps down.
-5. Old leader's uncommitted in-flight writes are dropped.
+1. Leader cannot renew the lock.
+2. Within 4 s of its last renewal its lease lapses: it stops acknowledging writes and serving linearizable reads.
+3. After 6 s the lock is stale; a follower that has lost the leader wins a conditional PUT on the lock and becomes leader.
+4. The former leader keeps retrying; once it reaches S3 again it sees the new lock and steps down.
 
-**Result:** automatic failover in ~6 s. Any write that completed quorum ACK before the partition is never lost (exists on ≥ 2 nodes' WALs).
+**Result:** automatic failover in ~6 s, with no window in which both nodes serve.
 
 ### All followers disconnected (leader isolated from followers, connected to S3)
 

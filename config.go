@@ -209,9 +209,9 @@ type Config struct {
 	// server. Defaults to PeerListenAddr.
 	AdvertisePeerAddr string
 
-	// LeaderWatchInterval is how often the leader reads the lock from S3 to
-	// detect if it has been superseded. Read-only; no renewals.
-	// Default: 5 minutes.
+	// LeaderWatchInterval adds an extra lock renewal at this interval. The
+	// leader already renews its lock every 2 seconds, so this setting only
+	// matters if set below that. Default: 5 minutes.
 	LeaderWatchInterval time.Duration
 
 	// FollowerMaxRetries is the number of consecutive stream failures a follower

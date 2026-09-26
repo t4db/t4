@@ -21,7 +21,10 @@ import (
 // becomeLeader transitions this node to leader role.
 // Re-opens the WAL with an S3 uploader, starts the peer gRPC server,
 // and launches the watchLoop. Must NOT be called with n.mu held.
-func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord) error {
+//
+// lockWriteStart is when the lock write that won leadership started; the
+// first lease runs from then.
+func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord, lockWriteStart time.Time) error {
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	if err := n.recoverLocalWALBeforeLeadership(walDir); err != nil {
 		return err
@@ -97,6 +100,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.peerLis = lis
 	n.peerGRPC = grpcSrv
 	n.leaderCli.Store(nil) // leader does not forward writes
+	n.extendLease(lockWriteStart)
 	n.storeRole(roleLeader)
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.nextSeq = nextSeq
@@ -150,172 +154,100 @@ func (n *Node) recoverLocalWALBeforeLeadership(walDir string) error {
 	return nil
 }
 
-// watchLoop periodically reads the lock from S3 to detect supersession.
-// Steps down (cancelBg) if the lock's term or owner changes.
-// On clean shutdown, releases the lock.
+// watchLoop keeps this node's leadership valid and detects when it is lost.
 //
-// Split-brain prevention strategy:
-//
-//  1. Periodic fallback: LeaderWatchInterval reads S3 to detect supersession.
-//     Does not touch LastSeenNano — followers are healthy while connected.
-//
-//  2. On follower disconnect: immediately fence writes (~50ms), verify still
-//     leader, touch LastSeenNano so the disconnected follower backs off from
-//     TakeOver. Begin polling every peer.FollowerRetryInterval to keep
-//     LastSeenNano fresh and detect any TakeOver that follows. Stop polling
-//     once followers reconnect.
-//
-//  3. TakeOver safety: if a follower fails to reconnect after FollowerMaxRetries
-//     it calls TakeOver. If LastSeenNano is older than LeaderLivenessTTL the
-//     TakeOver proceeds (via atomic conditional PUT). The leader detects the
-//     supersession at its next fencedCheck and steps down cleanly.
+// Every peer.FollowerRetryInterval, and immediately when a follower
+// disconnects, it renews the leader lease (see lease.go): it reads the lock,
+// then rewrites it with a fresh LastSeenNano and CommittedRev, conditioned
+// on the ETag it read, so a TakeOver in between is detected. Renewal never
+// pauses, whether or not followers are connected: a follower that loses its
+// stream must always see a live leader as live. If the lock has been taken,
+// the node steps down.
 func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) {
-	ticker := time.NewTicker(n.cfg.LeaderWatchInterval)
-	defer ticker.Stop()
-
-	// Disconnect channel from the peer server, if we're running in multi-node mode.
 	var disconnectC <-chan struct{}
 	if n.peerSrv != nil {
 		disconnectC = n.peerSrv.DisconnectC
 	}
+	renewTicker := time.NewTicker(peer.FollowerRetryInterval)
+	defer renewTicker.Stop()
+	// Config.LeaderWatchInterval predates continuous renewal; it now only
+	// adds a renewal of its own.
+	watchTicker := time.NewTicker(n.cfg.LeaderWatchInterval)
+	defer watchTicker.Stop()
 
-	// pollC is non-nil while liveness-touch polling is active (nil blocks in select).
-	var (
-		activePollTicker *time.Ticker
-		pollC            <-chan time.Time
-	)
-
-	stopPolling := func() {
-		if activePollTicker != nil {
-			activePollTicker.Stop()
-			activePollTicker = nil
+	// stepDown fences writes while cancelling the node's background work,
+	// then stops the peer server so followers lose their streams and find
+	// the new leader. fenceMu is released before grpcSrv.Stop(): Stop waits
+	// for in-flight handlers, which take fenceMu.RLock themselves.
+	stepDown := func(reason, why string) {
+		n.log.Errorf("t4: leader watch (%s): %s — stepping down", reason, why)
+		n.fenceMu.Lock()
+		n.cancelBg()
+		n.fenceMu.Unlock()
+		if grpcSrv := n.peerGRPC; grpcSrv != nil {
+			grpcSrv.Stop()
 		}
-		pollC = nil
 	}
 
-	startPolling := func() {
-		if activePollTicker != nil {
-			return // already polling
-		}
-		activePollTicker = time.NewTicker(peer.FollowerRetryInterval)
-		pollC = activePollTicker.C
-	}
-
-	// Always start polling immediately in cluster mode so LastSeenNano is
-	// kept fresh from the very first tick, even before any follower connects.
-	// Without this, a leader with no followers never touches the lock and the
-	// liveness record goes stale after LeaderLivenessTTL, letting any
-	// recovering follower win TakeOver and create a split-brain.
-	if n.peerSrv != nil {
-		startPolling()
-	}
-
-	// fencedCheck fences all leader writes for the duration of one S3 GET (and
-	// optional PUT). Returns false and steps down if the lock has been superseded.
-	// When touch is true and still leader, also writes LastSeenNano to the lock
-	// so disconnected followers see a fresh liveness signal and back off TakeOver.
-	//
-	// The Read and the Touch (when requested) are tied together via a conditional
-	// PUT (If-Match: <etag>): if another node wins the lock between our Read and
-	// our Touch, TouchIfMatch returns ErrPreconditionFailed and we step down
-	// immediately — closing the Read→Touch split-brain race.
-	//
-	// NOTE: fenceMu is released explicitly (not via defer) so that grpcSrv.Stop()
-	// can be called outside the lock.  grpc.Server.Stop waits for in-flight
-	// handlers to finish; those handlers (Put/Create/…) acquire fenceMu.RLock()
-	// themselves, so calling Stop() while holding the write lock would deadlock.
-	fencedCheck := func(reason string, touch bool) bool {
+	// renew renews the lease; it returns false after stepping down. It does
+	// not take fenceMu: writes waiting on follower acknowledgements must not
+	// delay it, or a live leader's liveness record goes stale. Safety instead
+	// comes from the lease, which every write acknowledgement and
+	// linearizable read checks.
+	renew := func(reason string) bool {
 		// A fenced node (Close in flight, commitLoop dead from a fatal
-		// error, or any future code path that flips n.closed) must NOT
-		// refresh LastSeenNano on the cluster lock. Touching the lock
-		// here would assert "I'm a healthy leader" while in fact this
-		// node can no longer make progress, causing followers' TakeOver
-		// to back off on a liveness check and the cluster to stall.
-		// Exit the watch loop instead; whichever path set n.closed is
-		// responsible for tearing down peerGRPC.
+		// error, …) must not assert liveness it cannot back up; whichever
+		// path set n.closed tears down the peer server.
 		if n.closed.Load() {
 			n.log.Debugf("t4: leader watch (%s): node fenced — exiting watch loop", reason)
 			return false
 		}
-		n.fenceMu.Lock()
+		start := time.Now()
 		rCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		rec, etag, err := lock.ReadETag(rCtx)
 		cancel()
 		if err != nil {
-			n.fenceMu.Unlock()
 			n.log.Warnf("t4: leader watch (%s): read lock: %v", reason, err)
-			return true // transient S3 error; keep running
+			return true // transient; the lease lapses if this persists
 		}
 		if rec == nil || rec.Term != term || rec.NodeID != n.cfg.NodeID {
-			n.log.Errorf("t4: leader watch (%s): lock superseded (current: %+v) — stepping down", reason, rec)
-			n.cancelBg()
-			n.fenceMu.Unlock()
-			// Stop the peer gRPC server so followers immediately lose their
-			// streams and detect the leadership change.  Without this, followers
-			// keep forwarding ForwardGetRevision to this zombie leader and receive
-			// a stale revision, causing linearizability violations.
-			if grpcSrv := n.peerGRPC; grpcSrv != nil {
-				grpcSrv.Stop()
-			}
+			stepDown(reason, fmt.Sprintf("lock superseded (current: %+v)", rec))
 			return false
 		}
-		if touch && n.peerSrv != nil {
-			tCtx, tCancel := context.WithTimeout(ctx, 5*time.Second)
-			err := lock.TouchIfMatch(tCtx, term, n.cfg.AdvertisePeerAddr, etag, n.db.Load().CurrentRevision())
-			tCancel()
-			if errors.Is(err, object.ErrPreconditionFailed) {
-				// Another node wrote the lock between our Read and our Touch —
-				// we have been superseded.  Step down immediately.
-				n.log.Errorf("t4: leader watch (%s): touch precondition failed — lock taken, stepping down", reason)
-				n.cancelBg()
-				n.fenceMu.Unlock()
-				if grpcSrv := n.peerGRPC; grpcSrv != nil {
-					grpcSrv.Stop()
-				}
-				return false
-			}
-			if err != nil {
-				n.log.Warnf("t4: leader watch (%s): touch lock: %v", reason, err)
-			}
+		tCtx, tCancel := context.WithTimeout(ctx, 5*time.Second)
+		err = lock.TouchIfMatch(tCtx, term, n.cfg.AdvertisePeerAddr, etag, n.db.Load().CurrentRevision())
+		tCancel()
+		if errors.Is(err, object.ErrPreconditionFailed) {
+			stepDown(reason, "touch precondition failed — lock taken")
+			return false
 		}
-		n.fenceMu.Unlock()
+		if err != nil {
+			n.log.Warnf("t4: leader watch (%s): touch lock: %v", reason, err)
+			return true
+		}
+		n.extendLease(start)
 		return true
 	}
 
+	if !renew("start") {
+		return
+	}
 	for {
 		select {
-		case <-ticker.C:
-			if !fencedCheck("periodic", false) {
+		case <-renewTicker.C:
+			if !renew("renew") {
 				return
 			}
-
+		case <-watchTicker.C:
+			if !renew("periodic") {
+				return
+			}
 		case <-disconnectC:
-			// Immediate check + touch: catches TakeOver that already happened,
-			// and signals liveness to the disconnected follower.
-			n.log.Infof("t4: leader watch: follower disconnected — fencing writes and checking lock")
-			if !fencedCheck("disconnect", true) {
+			n.log.Infof("t4: leader watch: follower disconnected — renewing lease")
+			if !renew("disconnect") {
 				return
 			}
-			// Resume polling so LastSeenNano stays fresh while the follower
-			// is away.  startPolling is idempotent — if we were already polling
-			// (e.g. started at launch with no followers), this is a no-op.
-			startPolling()
-
-		case <-pollC:
-			// Touch the lock to signal liveness and detect supersession.
-			if !fencedCheck("poll", true) {
-				stopPolling()
-				return
-			}
-			// If followers have (re)connected, liveness touches are no longer
-			// necessary — stop polling and rely on the periodic ticker.
-			if n.peerSrv != nil && n.peerSrv.ConnectedFollowers() > 0 {
-				n.log.Debugf("t4: leader watch: followers connected — pausing liveness poll")
-				stopPolling()
-			}
-
 		case <-ctx.Done():
-			stopPolling()
 			return
 		}
 	}
@@ -358,6 +290,11 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
 
 	case peer.ForwardGetRevision:
+		// A follower's linearizable read relies on this answer, so it
+		// needs the same lease a local read does.
+		if err := n.checkLease(); err != nil {
+			return nil, err
+		}
 		// Return nextRev (the highest *assigned* revision), not db.CurrentRevision()
 		// (the last *applied* revision). A write increments nextRev under n.mu and
 		// sends to writeC before the commit loop applies it to Pebble. If we returned
