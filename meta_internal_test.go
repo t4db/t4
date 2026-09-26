@@ -419,11 +419,12 @@ func TestMetaOnFollower(t *testing.T) {
 func TestTxnMetaExistsCondition(t *testing.T) {
 	ctx := metaCtx(t)
 	legacy := openLegacyNode(t, object.NewMem(), t.TempDir())
-	if resp, err := legacy.Txn(ctx, TxnRequest{Conditions: []TxnCondition{MetaDisabled()}}); err != nil || !resp.Succeeded {
+	metaDisabled := TxnCondition{Key: metaFormatKey, Target: TxnCondMetaExists, Result: TxnCondEqual, Version: 0}
+	if resp, err := legacy.Txn(ctx, TxnRequest{Conditions: []TxnCondition{metaDisabled}}); err != nil || !resp.Succeeded {
 		t.Fatalf("MetaDisabled on a legacy database: %+v, %v", resp, err)
 	}
 	n := openMetaNode(t, object.NewMem(), t.TempDir())
-	if resp, err := n.Txn(ctx, TxnRequest{Conditions: []TxnCondition{MetaDisabled()}}); err != nil || resp.Succeeded {
+	if resp, err := n.Txn(ctx, TxnRequest{Conditions: []TxnCondition{metaDisabled}}); err != nil || resp.Succeeded {
 		t.Fatalf("MetaDisabled on a new database: %+v, %v", resp, err)
 	}
 

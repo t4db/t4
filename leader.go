@@ -23,7 +23,10 @@ import (
 // becomeLeader transitions this node to leader role.
 // Re-opens the WAL with an S3 uploader, starts the peer gRPC server,
 // and launches the watchLoop. Must NOT be called with n.mu held.
-func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord) error {
+//
+// opening is true when called from Open, which may then create the database
+// with the meta keyspace (see initMetaAtGenesis); a promotion never does.
+func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord, opening bool) error {
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	if err := n.recoverLocalWALBeforeLeadership(walDir); err != nil {
 		return err
@@ -79,13 +82,13 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	w2.Start(bgCtx)
 
 	peerSrv := peer.NewServer(n.cfg.PeerBufferSize, n.log)
-	// A database with the meta keyspace, or a new one about to get it (see
-	// initMetaAtGenesis), has WAL entries that followers below format 3 would
-	// misapply: refuse them before serving.
+	// A database with the meta keyspace, or one Open is about to create with
+	// it (see initMetaAtGenesis), has WAL entries that followers below format
+	// 3 would misapply: refuse them before serving.
 	if _, metaOn, err := n.db.Load().MetaGet(metaFormatKey); err != nil {
 		_ = w2.Close()
 		return fmt.Errorf("t4: read meta format: %w", err)
-	} else if metaOn || (n.db.Load().LastSequence() == 0 && !testhook.LegacyNewDatabases.Load()) {
+	} else if metaOn || (opening && n.db.Load().LastSequence() == 0 && !testhook.LegacyNewDatabases.Load()) {
 		peerSrv.SetMinFollowerWALFormat(wal.WALFormatVersion)
 	}
 	lis, err := net.Listen("tcp", n.cfg.PeerListenAddr)
@@ -339,6 +342,11 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 // when a follower forwards a write. Dispatches to the appropriate Node method.
 // Since HandleForward runs on the leader, all write methods execute directly.
 func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*peer.ForwardResponse, error) {
+	if testhook.V1Leader.Load() {
+		if err := v1ForwardSupported(req); err != nil {
+			return nil, err
+		}
+	}
 	switch req.Op {
 	case peer.ForwardPut:
 		rev, err := n.Put(ctx, req.Key, req.Value, req.Lease)
@@ -418,6 +426,31 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		}, nil
 	}
 	return nil, fmt.Errorf("t4: unknown forward op %d", req.Op)
+}
+
+// v1ForwardSupported reports whether a v1.1 leader understands req: it had no
+// meta forward ops, txn conditions up to TxnCondLease, and txn ops up to
+// TxnDelete. It ignored anything newer instead of rejecting it.
+func v1ForwardSupported(req *peer.ForwardRequest) error {
+	if req.Op > peer.ForwardTxn {
+		return fmt.Errorf("t4: forward op %d is unknown to a v1.1 leader", req.Op)
+	}
+	if req.TxnReq == nil {
+		return nil
+	}
+	for _, c := range req.TxnReq.Conditions {
+		if TxnCondTarget(c.Target) > TxnCondLease {
+			return fmt.Errorf("t4: txn condition target %d is unknown to a v1.1 leader", c.Target)
+		}
+	}
+	for _, ops := range [][]peer.TxnOpMsg{req.TxnReq.Success, req.TxnReq.Failure} {
+		for _, op := range ops {
+			if TxnOpType(op.Type) > TxnDelete {
+				return fmt.Errorf("t4: txn op type %d is unknown to a v1.1 leader", op.Type)
+			}
+		}
+	}
+	return nil
 }
 
 // commitLoop is the group-commit pipeline for leader/single-node writes.

@@ -4,20 +4,28 @@
 // Databases created by a release with the meta keyspace keep this state in
 // meta keys, where writes consume no revision, as in etcd. Databases created
 // by earlier releases keep it in reserved keys of the revisioned data
-// keyspace, where every write consumes a revision. A database's mode is fixed
-// when it is created (see t4.MetaDisabled); writes still select the keyspace
-// with that condition inside the transaction, so a write can never land in
-// the wrong one.
+// keyspace, where every write consumes a revision.
+//
+// A database's mode is fixed before it serves its first write (see
+// t4.Node.MetaEnabled), so each call picks the requests for its mode up
+// front. In the legacy mode it sends exactly the requests earlier releases
+// send: during a rolling upgrade a follower on this release forwards them to
+// a leader that may still run an earlier release, which does not understand
+// meta ops or meta conditions.
 package sysstate
 
 import (
 	"context"
+	"errors"
 
 	"github.com/t4db/t4"
 )
 
 // Node is the subset of t4.Node used by this package.
 type Node interface {
+	Put(ctx context.Context, key string, value []byte, lease int64) (int64, error)
+	Create(ctx context.Context, key string, value []byte, lease int64) (int64, error)
+	Delete(ctx context.Context, key string) (int64, error)
 	Txn(ctx context.Context, req t4.TxnRequest) (t4.TxnResponse, error)
 	Get(key string, opts ...t4.ReadOption) (*t4.KeyValue, error)
 	List(prefix string, opts ...t4.ReadOption) ([]*t4.KeyValue, error)
@@ -38,66 +46,75 @@ type Change struct {
 	Delete bool
 }
 
-// Apply commits ops (ordinary data writes) atomically with the state changes.
+// Apply commits ops (ordinary puts and deletes) atomically with the state
+// changes.
 func Apply(ctx context.Context, n Node, ops []t4.TxnOp, changes ...Change) error {
-	legacy := append([]t4.TxnOp(nil), ops...)
-	meta := append([]t4.TxnOp(nil), ops...)
-	for _, c := range changes {
-		if c.Delete {
-			legacy = append(legacy, t4.TxnOp{Type: t4.TxnDelete, Key: c.Key})
-			meta = append(meta, t4.TxnOp{Type: t4.TxnMetaDelete, Key: c.Key})
-		} else {
-			legacy = append(legacy, t4.TxnOp{Type: t4.TxnPut, Key: c.Key, Value: c.Value})
-			meta = append(meta, t4.TxnOp{Type: t4.TxnMetaPut, Key: c.Key, Value: c.Value})
-		}
+	on, err := n.MetaEnabled()
+	if err != nil {
+		return err
 	}
-	_, err := n.Txn(ctx, t4.TxnRequest{
-		Conditions: []t4.TxnCondition{t4.MetaDisabled()},
-		Success:    legacy,
-		Failure:    meta,
-	})
+	all := append([]t4.TxnOp(nil), ops...)
+	for _, c := range changes {
+		op := t4.TxnOp{Type: t4.TxnPut, Key: c.Key, Value: c.Value}
+		switch {
+		case c.Delete && on:
+			op = t4.TxnOp{Type: t4.TxnMetaDelete, Key: c.Key}
+		case c.Delete:
+			op = t4.TxnOp{Type: t4.TxnDelete, Key: c.Key}
+		case on:
+			op.Type = t4.TxnMetaPut
+		}
+		all = append(all, op)
+	}
+	_, err = n.Txn(ctx, t4.TxnRequest{Success: all})
 	return err
 }
 
 // Put stores value under key.
 func Put(ctx context.Context, n Node, key string, value []byte) error {
-	return Apply(ctx, n, nil, Change{Key: key, Value: value})
+	on, err := n.MetaEnabled()
+	if err != nil {
+		return err
+	}
+	if on {
+		return Apply(ctx, n, nil, Change{Key: key, Value: value})
+	}
+	_, err = n.Put(ctx, key, value, 0)
+	return err
 }
 
 // Delete removes key. Removing a missing key is not an error.
 func Delete(ctx context.Context, n Node, key string) error {
-	return Apply(ctx, n, nil, Change{Key: key, Delete: true})
+	on, err := n.MetaEnabled()
+	if err != nil {
+		return err
+	}
+	if on {
+		return Apply(ctx, n, nil, Change{Key: key, Delete: true})
+	}
+	_, err = n.Delete(ctx, key)
+	return err
 }
 
 // Create stores value under key only if key does not exist yet. It reports
 // whether the value was stored.
 func Create(ctx context.Context, n Node, key string, value []byte) (bool, error) {
-	for {
-		on, err := n.MetaEnabled()
-		if err != nil {
-			return false, err
-		}
-		cond := t4.TxnCondition{Key: key, Target: t4.TxnCondVersion, Result: t4.TxnCondEqual, Version: 0}
-		op := t4.TxnOp{Type: t4.TxnPut, Key: key, Value: value}
-		mode := t4.MetaDisabled()
-		if on {
-			cond.Target = t4.TxnCondMetaExists
-			op.Type = t4.TxnMetaPut
-			mode.Result = t4.TxnCondNotEqual
-		}
-		resp, err := n.Txn(ctx, t4.TxnRequest{
-			Conditions: []t4.TxnCondition{mode, cond},
-			Success:    []t4.TxnOp{op},
-		})
-		if err != nil || resp.Succeeded {
-			return resp.Succeeded, err
-		}
-		// The failed condition is either key existing or the mode having
-		// changed since it was read; only the latter is worth a retry.
-		if now, err := n.MetaEnabled(); err != nil || now == on {
-			return false, err
-		}
+	on, err := n.MetaEnabled()
+	if err != nil {
+		return false, err
 	}
+	if !on {
+		_, err := n.Create(ctx, key, value, 0)
+		if errors.Is(err, t4.ErrKeyExists) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+	resp, err := n.Txn(ctx, t4.TxnRequest{
+		Conditions: []t4.TxnCondition{{Key: key, Target: t4.TxnCondMetaExists, Result: t4.TxnCondEqual, Version: 0}},
+		Success:    []t4.TxnOp{{Type: t4.TxnMetaPut, Key: key, Value: value}},
+	})
+	return resp.Succeeded, err
 }
 
 // Get returns key's value from local state.

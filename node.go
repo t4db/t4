@@ -773,7 +773,7 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 	}
 
 	if won {
-		return n.becomeLeader(bgCtx, lock, rec)
+		return n.becomeLeader(bgCtx, lock, rec, true)
 	}
 
 	n.observeTerm(rec.Term)
