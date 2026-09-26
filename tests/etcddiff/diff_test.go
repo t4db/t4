@@ -89,7 +89,7 @@ func startT4(t *testing.T) string {
 	}
 	gs := grpc.NewServer(t4etcd.NewServerOptions(nil, nil)...)
 	t4etcd.New(node, authStore, tokens).Register(gs)
-	go gs.Serve(lis)
+	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	return lis.Addr().String()
 }

@@ -36,7 +36,7 @@ func serveEtcd(t *testing.T, node *t4.Node) *clientv3.Client {
 	}
 	gs := grpc.NewServer(NewServerOptions(nil, nil)...)
 	New(node, nil, nil).Register(gs)
-	go gs.Serve(lis)
+	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 
 	cli, err := clientv3.New(clientv3.Config{
