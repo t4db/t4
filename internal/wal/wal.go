@@ -71,6 +71,13 @@ type WAL struct {
 	uploadC     chan uploadTask
 	wg          sync.WaitGroup
 	cancelLoops context.CancelFunc // cancels rotationLoop and uploadLoop
+
+	// pending holds sealed segments whose upload has not been confirmed, by
+	// object key. Synchronous-upload mode uploads them before the active
+	// segment, so object storage never holds an acknowledged write while
+	// missing an earlier one.
+	pendingMu sync.Mutex
+	pending   map[string]string // object key → local path
 }
 
 type uploadTask struct {
@@ -89,6 +96,7 @@ func New(opts ...Option) *WAL {
 		segMaxSize: DefaultSegmentMaxSize,
 		segMaxAge:  DefaultSegmentMaxAge,
 		uploadC:    make(chan uploadTask, 64),
+		pending:    make(map[string]string),
 	}
 	for _, o := range opts {
 		o(w)
@@ -337,6 +345,12 @@ func (w *WAL) rotateSyncLocked(rollbackSize int64, rollbackEntryCount int) error
 	if seg == nil || seg.EntryCount() == 0 {
 		return nil
 	}
+	if err := w.uploadPendingLocked(); err != nil {
+		if rollbackErr := seg.rollback(rollbackSize, rollbackEntryCount); rollbackErr != nil {
+			return fmt.Errorf("wal: upload of earlier segments failed and rollback failed: upload: %w; rollback: %v", err, rollbackErr)
+		}
+		return err
+	}
 	nextRev := seg.FirstRev() + int64(seg.EntryCount())
 	objKey := ObjectKey(seg.Term(), seg.FirstRev())
 	localPath := seg.Path()
@@ -361,6 +375,47 @@ func (w *WAL) rotateSyncLocked(rollbackSize int64, rollbackEntryCount int) error
 	return nil
 }
 
+func (w *WAL) addPending(objKey, localPath string) {
+	w.pendingMu.Lock()
+	w.pending[objKey] = localPath
+	w.pendingMu.Unlock()
+}
+
+func (w *WAL) donePending(objKey string) {
+	w.pendingMu.Lock()
+	delete(w.pending, objKey)
+	w.pendingMu.Unlock()
+}
+
+// uploadPendingLocked uploads the sealed segments whose asynchronous upload
+// has not been confirmed, oldest first (object keys sort by term, then first
+// sequence). The uploader is idempotent, so racing the upload loop on the
+// same segment is harmless; a segment whose local file is already gone was
+// uploaded by that loop. Must be called with w.mu held.
+func (w *WAL) uploadPendingLocked() error {
+	w.pendingMu.Lock()
+	keys := make([]string, 0, len(w.pending))
+	for k := range w.pending {
+		keys = append(keys, k)
+	}
+	paths := make(map[string]string, len(keys))
+	for _, k := range keys {
+		paths[k] = w.pending[k]
+	}
+	w.pendingMu.Unlock()
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		err := w.uploader(w.uploadCtx, paths[k], k)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			w.log.Errorf("wal: sync upload of earlier segment %q → %q: %v", paths[k], k, err)
+			return fmt.Errorf("wal: upload earlier segment %s: %w", k, err)
+		}
+		w.donePending(k)
+	}
+	return nil
+}
+
 // rotateLocked seals the active segment and opens a fresh one.
 // Must be called with w.mu held.
 func (w *WAL) rotateLocked() {
@@ -377,6 +432,7 @@ func (w *WAL) rotateLocked() {
 	}
 	if w.uploader != nil {
 		objKey := ObjectKey(seg.Term(), seg.FirstRev())
+		w.addPending(objKey, seg.Path())
 		select {
 		case w.uploadC <- uploadTask{localPath: seg.Path(), objectKey: objKey}:
 		default:
@@ -423,6 +479,7 @@ func (w *WAL) rotationLoop(ctx context.Context) {
 				}
 				if w.uploader != nil {
 					objKey := ObjectKey(old.Term(), old.FirstRev())
+					w.addPending(objKey, old.Path())
 					select {
 					case w.uploadC <- uploadTask{localPath: old.Path(), objectKey: objKey}:
 					default:
@@ -456,6 +513,7 @@ func (w *WAL) uploadLoop(ctx context.Context) {
 				// If the local file is gone the segment was already uploaded and
 				// cleaned up (or discarded as empty). Retrying cannot help.
 				if errors.Is(err, os.ErrNotExist) {
+					w.donePending(task.objectKey)
 					continue
 				}
 				// Re-queue with a delay so we don't spin on transient S3 errors.
@@ -469,7 +527,9 @@ func (w *WAL) uploadLoop(ctx context.Context) {
 					case <-ctx.Done():
 					}
 				}(task)
+				continue
 			}
+			w.donePending(task.objectKey)
 		case <-ctx.Done():
 			return
 		}
@@ -572,6 +632,7 @@ func (w *WAL) SealAndFlush(nextSeq int64) error {
 	w.active = sw
 	if w.uploader != nil {
 		objKey := ObjectKey(old.Term(), old.FirstRev())
+		w.addPending(objKey, old.Path())
 		w.uploadC <- uploadTask{localPath: old.Path(), objectKey: objKey}
 	}
 	return nil
