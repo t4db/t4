@@ -12,6 +12,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
@@ -359,6 +360,22 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		rev := n.nextRev
 		n.mu.Unlock()
 		return &peer.ForwardResponse{Revision: rev, Succeeded: true}, nil
+
+	case peer.ForwardMetaPut:
+		err := n.MetaPut(ctx, req.Key, req.Value)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardMetaDelete:
+		err := n.MetaDelete(ctx, req.Key)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardGetSequence:
+		// Every acknowledged write has been applied before its caller is
+		// released, so the applied sequence covers all of them. Meta writes
+		// have no optimistic pending state, unlike ForwardGetRevision.
+		return &peer.ForwardResponse{Revision: n.db.Load().LastSequence(), Succeeded: true}, nil
 
 	case peer.ForwardTxn:
 		if req.TxnReq == nil {
@@ -810,6 +827,13 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 		n.log.Errorf("t4: checkpoint flush pebble: %v", err)
 		return 0, false
 	}
+	// Decided under the fence, so it matches the pinned copy below.
+	cpFormat, err := n.checkpointFormat()
+	if err != nil {
+		n.fenceMu.Unlock()
+		n.log.Errorf("t4: checkpoint format: %v", err)
+		return 0, false
+	}
 	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
 	if err != nil {
 		n.fenceMu.Unlock()
@@ -831,11 +855,11 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := n.cp.WriteDirWithRegistry(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := n.cp.WriteDirWithRegistry(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry(), cpFormat); err != nil {
 			n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 			return 0, false
 		}
-	} else if err := n.cp.WriteDir(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
+	} else if err := n.cp.WriteDir(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore, cpFormat); err != nil {
 		n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 		return 0, false
 	}
@@ -867,6 +891,20 @@ func (n *Node) gcContext(ctx context.Context) (context.Context, context.CancelFu
 	}
 	gcCtx, cancel := context.WithDeadline(ctx, limit)
 	return gcCtx, cancel, true
+}
+
+// checkpointFormat returns the checkpoint format needed to represent the
+// current store: the meta keyspace requires FormatVersionMeta so that binaries
+// predating it refuse the checkpoint rather than restore without that state.
+func (n *Node) checkpointFormat() (uint32, error) {
+	hasMeta, err := n.db.Load().HasMeta()
+	if err != nil {
+		return 0, err
+	}
+	if hasMeta {
+		return checkpoint.FormatVersionMeta, nil
+	}
+	return checkpoint.FormatVersionBase, nil
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {
