@@ -9,7 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
 	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/internal/peer"
+	"github.com/t4db/t4/internal/testhook"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -37,50 +44,109 @@ func metaCtx(t *testing.T) context.Context {
 	return c
 }
 
-func enableMetaForTest(t *testing.T, n *Node) {
+// openLegacyNode opens a node that creates databases the way releases before
+// the meta keyspace did, so the database keeps that format for good.
+func openLegacyNode(t *testing.T, store object.Store, dataDir string) *Node {
 	t.Helper()
-	if err := n.enableMeta(metaCtx(t)); err != nil {
-		t.Fatalf("enableMeta: %v", err)
-	}
+	testhook.LegacyNewDatabases.Store(true)
+	defer testhook.LegacyNewDatabases.Store(false)
+	return openMetaNode(t, store, dataDir)
 }
 
-func TestMetaDisabledUntilEnabled(t *testing.T) {
-	n := openMetaNode(t, object.NewMem(), t.TempDir())
+// TestMetaFormatFixedAtCreation checks that a new database gets the meta
+// keyspace as its first entry, while a database created in the legacy format
+// keeps it: no meta writes, and nothing an older release could not read.
+func TestMetaFormatFixedAtCreation(t *testing.T) {
 	ctx := metaCtx(t)
 
-	if ok, err := n.MetaEnabled(); err != nil || ok {
-		t.Fatalf("MetaEnabled = %v, %v; want false", ok, err)
+	n := openMetaNode(t, object.NewMem(), t.TempDir())
+	if ok, err := n.MetaEnabled(); err != nil || !ok {
+		t.Fatalf("new database: MetaEnabled = %v, %v; want true", ok, err)
 	}
-	if err := n.MetaPut(ctx, "k", []byte("v")); !errors.Is(err, ErrMetaDisabled) {
-		t.Fatalf("MetaPut: want ErrMetaDisabled, got %v", err)
+	if rev, seq := n.CurrentRevision(), n.db.Load().LastSequence(); rev != 0 || seq != 1 {
+		t.Fatalf("new database: rev=%d seq=%d, want the format marker as the only entry (rev=0 seq=1)", rev, seq)
 	}
-	if err := n.MetaDelete(ctx, "k"); !errors.Is(err, ErrMetaDisabled) {
-		t.Fatalf("MetaDelete: want ErrMetaDisabled, got %v", err)
+	if err := n.MetaPut(ctx, "k", []byte("v")); err != nil {
+		t.Fatalf("new database: MetaPut: %v", err)
 	}
-	_, err := n.Txn(ctx, TxnRequest{Success: []TxnOp{
+
+	store, dataDir := object.NewMem(), t.TempDir()
+	legacy := openLegacyNode(t, store, dataDir)
+	if ok, err := legacy.MetaEnabled(); err != nil || ok {
+		t.Fatalf("legacy database: MetaEnabled = %v, %v; want false", ok, err)
+	}
+	if err := legacy.MetaPut(ctx, "k", []byte("v")); !errors.Is(err, ErrMetaDisabled) {
+		t.Fatalf("legacy MetaPut: want ErrMetaDisabled, got %v", err)
+	}
+	if err := legacy.MetaDelete(ctx, "k"); !errors.Is(err, ErrMetaDisabled) {
+		t.Fatalf("legacy MetaDelete: want ErrMetaDisabled, got %v", err)
+	}
+	_, err := legacy.Txn(ctx, TxnRequest{Success: []TxnOp{
 		{Type: TxnPut, Key: "data", Value: []byte("v")},
 		{Type: TxnMetaPut, Key: "k", Value: []byte("v")},
 	}})
 	if !errors.Is(err, ErrMetaDisabled) {
-		t.Fatalf("Txn with meta op: want ErrMetaDisabled, got %v", err)
+		t.Fatalf("legacy Txn with meta op: want ErrMetaDisabled, got %v", err)
 	}
-	if kv, _ := n.Get("data"); kv != nil {
+	if kv, _ := legacy.Get("data"); kv != nil {
 		t.Fatal("rejected txn partially applied")
 	}
-
-	enableMetaForTest(t, n)
-	enableMetaForTest(t, n) // idempotent
-	if ok, err := n.MetaEnabled(); err != nil || !ok {
-		t.Fatalf("MetaEnabled = %v, %v; want true", ok, err)
+	if _, err := legacy.Put(ctx, "data", []byte("v"), 0); err != nil {
+		t.Fatal(err)
 	}
-	if err := n.MetaPut(ctx, "k", []byte("v")); err != nil {
-		t.Fatalf("MetaPut after enable: %v", err)
+	legacy.maybeCheckpoint(ctx)
+	if got := manifestFormat(t, store); got != checkpoint.FormatVersionBase {
+		t.Fatalf("legacy checkpoint format = %d, want %d", got, checkpoint.FormatVersionBase)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoSegmentAboveFormat(t, store, 2)
+
+	// Reopened by this release, an existing database keeps its format.
+	for _, dir := range []string{dataDir, t.TempDir()} {
+		reopened := openMetaNode(t, store, dir)
+		if ok, err := reopened.MetaEnabled(); err != nil || ok {
+			t.Fatalf("reopened legacy database: MetaEnabled = %v, %v; want false", ok, err)
+		}
+		if kv, _ := reopened.Get("data"); kv == nil {
+			t.Fatal("reopened legacy database lost data")
+		}
+		if err := reopened.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertNoSegmentAboveFormat checks that every uploaded WAL segment declares
+// at most format max, i.e. an older release can still read them.
+func assertNoSegmentAboveFormat(t *testing.T, store object.Store, max byte) {
+	t.Helper()
+	keys, err := store.List(context.Background(), "wal/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) == 0 {
+		t.Fatal("no uploaded WAL segments")
+	}
+	for _, key := range keys {
+		rc, err := store.Get(context.Background(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b[2] > max {
+			t.Fatalf("segment %s declares format %d, want <= %d", key, b[2], max)
+		}
 	}
 }
 
 func TestMetaKeyValidation(t *testing.T) {
 	n := openMetaNode(t, object.NewMem(), t.TempDir())
-	enableMetaForTest(t, n)
 	ctx := metaCtx(t)
 
 	if err := n.MetaPut(ctx, metaFormatKey, []byte("x")); err == nil {
@@ -118,7 +184,6 @@ func TestMetaKeyValidation(t *testing.T) {
 // as if they had not happened.
 func TestMetaOpsDoNotConsumeRevisions(t *testing.T) {
 	n := openMetaNode(t, object.NewMem(), t.TempDir())
-	enableMetaForTest(t, n)
 	ctx := metaCtx(t)
 
 	events, err := n.Watch(ctx, "", 0)
@@ -199,12 +264,6 @@ func TestMetaSurvivesRestartAndRestore(t *testing.T) {
 	if _, err := n.Put(ctx, "a", []byte("1"), 0); err != nil {
 		t.Fatal(err)
 	}
-	n.maybeCheckpoint(ctx)
-	if got := manifestFormat(t, store); got != checkpoint.FormatVersionBase {
-		t.Fatalf("checkpoint format before meta = %d, want %d", got, checkpoint.FormatVersionBase)
-	}
-
-	enableMetaForTest(t, n)
 	if err := n.MetaPut(ctx, "lease/1", []byte("ttl=10")); err != nil {
 		t.Fatal(err)
 	}
@@ -324,14 +383,6 @@ func TestMetaOnFollower(t *testing.T) {
 	}
 	ctx := metaCtx(t)
 
-	if err := follower.MetaPut(ctx, "k", []byte("v")); !errors.Is(err, ErrMetaDisabled) {
-		t.Fatalf("follower MetaPut before enable: want ErrMetaDisabled, got %v", err)
-	}
-	if err := follower.enableMeta(ctx); !errors.Is(err, ErrNotLeader) {
-		t.Fatalf("follower enableMeta: want ErrNotLeader, got %v", err)
-	}
-	enableMetaForTest(t, leader)
-
 	rev := leader.CurrentRevision()
 	if err := follower.MetaPut(ctx, "k", []byte("v")); err != nil {
 		t.Fatalf("follower MetaPut: %v", err)
@@ -363,4 +414,149 @@ func TestMetaOnFollower(t *testing.T) {
 	if got := leader.CurrentRevision(); got != rev {
 		t.Fatalf("leader revision moved from %d to %d on meta-only writes", rev, got)
 	}
+}
+
+func TestTxnMetaExistsCondition(t *testing.T) {
+	ctx := metaCtx(t)
+	legacy := openLegacyNode(t, object.NewMem(), t.TempDir())
+	if resp, err := legacy.Txn(ctx, TxnRequest{Conditions: []TxnCondition{MetaDisabled()}}); err != nil || !resp.Succeeded {
+		t.Fatalf("MetaDisabled on a legacy database: %+v, %v", resp, err)
+	}
+	n := openMetaNode(t, object.NewMem(), t.TempDir())
+	if resp, err := n.Txn(ctx, TxnRequest{Conditions: []TxnCondition{MetaDisabled()}}); err != nil || resp.Succeeded {
+		t.Fatalf("MetaDisabled on a new database: %+v, %v", resp, err)
+	}
+
+	absent := TxnCondition{Key: "k", Target: TxnCondMetaExists, Result: TxnCondEqual, Version: 0}
+	create := TxnRequest{Conditions: []TxnCondition{absent}, Success: []TxnOp{{Type: TxnMetaPut, Key: "k", Value: []byte("v")}}}
+	if resp, err := n.Txn(ctx, create); err != nil || !resp.Succeeded {
+		t.Fatalf("create absent: %+v, %v", resp, err)
+	}
+	if resp, err := n.Txn(ctx, create); err != nil || resp.Succeeded {
+		t.Fatalf("create existing: %+v, %v", resp, err)
+	}
+	// A data key of the same name does not count as a meta key.
+	if _, err := n.Put(ctx, "d", []byte("v"), 0); err != nil {
+		t.Fatal(err)
+	}
+	absent.Key = "d"
+	if resp, err := n.Txn(ctx, TxnRequest{Conditions: []TxnCondition{absent}}); err != nil || !resp.Succeeded {
+		t.Fatalf("meta condition on a data key: %+v, %v", resp, err)
+	}
+}
+
+// TestMetaCreateIfAbsentIsAtomic races create-if-absent transactions on one
+// key: in-flight meta writes must be visible to the condition, so exactly one
+// wins even though none has been applied when the others are evaluated.
+func TestMetaCreateIfAbsentIsAtomic(t *testing.T) {
+	n := openMetaNode(t, object.NewMem(), t.TempDir())
+	ctx := metaCtx(t)
+
+	for round := 0; round < 20; round++ {
+		key := fmt.Sprintf("lease/%d", round)
+		req := TxnRequest{
+			Conditions: []TxnCondition{{Key: key, Target: TxnCondMetaExists, Result: TxnCondEqual, Version: 0}},
+			Success:    []TxnOp{{Type: TxnMetaPut, Key: key, Value: []byte("v")}},
+		}
+		const racers = 8
+		wins := make(chan bool, racers)
+		start := make(chan struct{})
+		for i := 0; i < racers; i++ {
+			go func() {
+				<-start
+				resp, err := n.Txn(ctx, req)
+				if err != nil {
+					t.Error(err)
+				}
+				wins <- resp.Succeeded
+			}()
+		}
+		close(start)
+		won := 0
+		for i := 0; i < racers; i++ {
+			if <-wins {
+				won++
+			}
+		}
+		if won != 1 {
+			t.Fatalf("round %d: %d create-if-absent txns succeeded, want 1", round, won)
+		}
+	}
+}
+
+// followAsOldBinary opens a WAL stream the way a release without the
+// wal_format field does (WALFormat 0). The stream is cancelled after a second,
+// so a Recv on an accepted stream cannot hang the test.
+func followAsOldBinary(t *testing.T, addr, nodeID string, fromSeq int64) peer.WalStream_FollowClient {
+	t.Helper()
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(peer.Codec{})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(func() { cancel(); _ = conn.Close() })
+	stream, err := peer.NewWalStreamClient(conn).Follow(ctx, &peer.FollowRequest{FromRevision: fromSeq, NodeID: nodeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stream
+}
+
+// TestOldFollowersRefusedByNewDatabases checks that a leader of a database
+// with the meta keyspace never streams to a follower that cannot read it,
+// including after a restart, while a legacy database still serves them.
+func TestOldFollowersRefusedByNewDatabases(t *testing.T) {
+	open := func(t *testing.T, legacy bool, cfg Config) *Node {
+		t.Helper()
+		testhook.LegacyNewDatabases.Store(legacy)
+		n, err := Open(cfg)
+		testhook.LegacyNewDatabases.Store(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = n.Close() })
+		waitForLeaderNodeLocal(t, []*Node{n}, 10*time.Second)
+		return n
+	}
+	newCfg := func(t *testing.T) Config {
+		return Config{
+			DataDir:        t.TempDir(),
+			ObjectStore:    object.NewMem(),
+			NodeID:         "leader",
+			PeerListenAddr: freeAddrLocal(t),
+		}
+	}
+	recv := func(n *Node, addr string) error {
+		stream := followAsOldBinary(t, addr, "old-follower", n.db.Load().LastSequence()+1)
+		_, err := stream.Recv()
+		return err
+	}
+	refused := func(err error) bool {
+		return status.Code(err) == codes.FailedPrecondition && strings.Contains(err.Error(), "wal_format_unsupported")
+	}
+
+	t.Run("new database", func(t *testing.T) {
+		cfg := newCfg(t)
+		n := open(t, false, cfg)
+		if err := recv(n, cfg.PeerListenAddr); !refused(err) {
+			t.Fatalf("old follower: want wal_format_unsupported, got %v", err)
+		}
+		if err := n.Close(); err != nil {
+			t.Fatal(err)
+		}
+		n = open(t, false, cfg)
+		if err := recv(n, cfg.PeerListenAddr); !refused(err) {
+			t.Fatalf("old follower after restart: want wal_format_unsupported, got %v", err)
+		}
+	})
+	t.Run("legacy database", func(t *testing.T) {
+		cfg := newCfg(t)
+		n := open(t, true, cfg)
+		// Accepted: the stream stays open until its deadline.
+		if err := recv(n, cfg.PeerListenAddr); refused(err) || status.Code(err) != codes.DeadlineExceeded {
+			t.Fatalf("old follower of a legacy database: want an open stream, got %v", err)
+		}
+	})
 }

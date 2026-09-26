@@ -290,6 +290,10 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		// not blocked while we reconcile SSTs below.
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
+		// Only possible if the previous leader died before writing anything.
+		if err := n.initMetaAtGenesis(bgCtx); err != nil {
+			n.log.Errorf("t4: promoted leader: %v", err)
+		}
 		if n.autoCompactEnabled() {
 			n.bgWg.Add(1)
 			go func() { defer n.bgWg.Done(); n.autoCompactLoop(bgCtx) }()
