@@ -163,6 +163,16 @@ func TestRestoreCheckpointFromEncryptedS3Smoke(t *testing.T) {
 		t.Fatalf("restore without encryption key unexpectedly succeeded:\n%s", plainRestoreOut.String())
 	}
 
+	wrongKeyPath := writeObjectStoreEncryptionKeyFile(t, bytes.Repeat([]byte{0xa5}, 32))
+	wrongRestoreOut := &bytes.Buffer{}
+	wrongRestoreCmd := cli.NewRootCmd()
+	wrongRestoreCmd.SetOut(wrongRestoreOut)
+	wrongRestoreCmd.SetErr(wrongRestoreOut)
+	wrongRestoreCmd.SetArgs(append([]string{"restore", "checkpoint", "--data-dir", t.TempDir()}, append(restoreS3CLIArgs(o), "--object-store-encryption-key-file", wrongKeyPath)...))
+	if err := wrongRestoreCmd.Execute(); err == nil {
+		t.Fatalf("restore with wrong encryption key unexpectedly succeeded:\n%s", wrongRestoreOut.String())
+	}
+
 	keyPath := writeObjectStoreEncryptionKeyFile(t, keyBytes)
 	args := append(restoreS3CLIArgs(o), "--object-store-encryption-key-file", keyPath)
 
