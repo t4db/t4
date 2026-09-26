@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/internal/sysstate"
 )
 
 const (
@@ -67,39 +68,42 @@ func ttlRemaining(rec *leaseRecord, now time.Time) int64 {
 	return secs
 }
 
-func decodeLease(kv *t4.KeyValue) (*leaseRecord, error) {
-	if kv == nil {
-		return nil, nil
-	}
+func decodeLease(value []byte) (*leaseRecord, error) {
 	var rec leaseRecord
-	if err := json.Unmarshal(kv.Value, &rec); err != nil {
+	if err := json.Unmarshal(value, &rec); err != nil {
 		return nil, status.Errorf(codes.Internal, "decode lease: %v", err)
 	}
 	return &rec, nil
 }
+
+// Lease records are system state (see internal/sysstate): meta keys in
+// databases created with the meta keyspace, where granting, keeping alive, and
+// revoking a lease without keys consume no revision, as in etcd; revisioned
+// data keys in databases created before it.
 
 func (s *Server) getLease(ctx context.Context, id int64, linearizable bool) (*leaseRecord, error) {
 	if err := validateLeaseID(id); err != nil {
 		return nil, err
 	}
 	var (
-		kv  *t4.KeyValue
-		err error
+		value []byte
+		found bool
+		err   error
 	)
 	if linearizable {
-		kv, err = s.node.LinearizableGet(ctx, leaseKey(id))
+		value, found, err = sysstate.LinearizableGet(ctx, s.node, leaseKey(id))
 	} else {
-		kv, err = s.node.Get(leaseKey(id))
+		value, found, err = sysstate.Get(s.node, leaseKey(id))
 	}
 	if err != nil {
 		return nil, err
 	}
-	rec, err := decodeLease(kv)
-	if err != nil {
-		return nil, err
-	}
-	if rec == nil {
+	if !found {
 		return nil, status.Error(codes.NotFound, "lease not found")
+	}
+	rec, err := decodeLease(value)
+	if err != nil {
+		return nil, err
 	}
 	if time.Now().UnixNano() >= rec.ExpiryUnixNs {
 		return nil, status.Error(codes.NotFound, "lease not found")
@@ -112,34 +116,29 @@ func (s *Server) putLease(ctx context.Context, rec *leaseRecord) error {
 	if err != nil {
 		return status.Errorf(codes.Internal, "marshal lease: %v", err)
 	}
-	if _, err := s.node.Put(ctx, leaseKey(rec.ID), data, 0); err != nil {
-		return err
-	}
-	return nil
+	return sysstate.Put(ctx, s.node, leaseKey(rec.ID), data)
 }
 
 func (s *Server) listLeases(ctx context.Context, linearizable bool) ([]*leaseRecord, error) {
 	var (
-		kvs []*t4.KeyValue
+		kvs []t4.MetaKV
 		err error
 	)
 	if linearizable {
-		kvs, err = s.node.LinearizableList(ctx, leasePrefix)
+		kvs, err = sysstate.LinearizableList(ctx, s.node, leasePrefix)
 	} else {
-		kvs, err = s.node.List(leasePrefix)
+		kvs, err = sysstate.List(s.node, leasePrefix)
 	}
 	if err != nil {
 		return nil, err
 	}
 	out := make([]*leaseRecord, 0, len(kvs))
 	for _, kv := range kvs {
-		rec, err := decodeLease(kv)
+		rec, err := decodeLease(kv.Value)
 		if err != nil {
 			return nil, err
 		}
-		if rec != nil {
-			out = append(out, rec)
-		}
+		out = append(out, rec)
 	}
 	return out, nil
 }
@@ -202,15 +201,11 @@ func (s *Server) revokeLease(ctx context.Context, leaseID int64) error {
 	if err != nil {
 		return err
 	}
-	ops := make([]t4.TxnOp, 0, len(keys)+1)
+	ops := make([]t4.TxnOp, 0, len(keys))
 	for _, key := range keys {
 		ops = append(ops, t4.TxnOp{Type: t4.TxnDelete, Key: key})
 	}
-	ops = append(ops, t4.TxnOp{Type: t4.TxnDelete, Key: leaseKey(leaseID)})
-	if _, err := s.node.Txn(ctx, t4.TxnRequest{Success: ops}); err != nil {
-		return err
-	}
-	return nil
+	return sysstate.Apply(ctx, s.node, ops, sysstate.Change{Key: leaseKey(leaseID), Delete: true})
 }
 
 func (s *Server) maybeStartLeaseLoop() {

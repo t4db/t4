@@ -51,6 +51,9 @@ const (
 	TxnCondCreate                       // compare CreateRevision
 	TxnCondValue                        // compare Value bytes
 	TxnCondLease                        // compare Lease ID
+	// TxnCondMetaExists compares whether Key exists in the meta keyspace,
+	// using Version: 1 if it exists, 0 if it does not.
+	TxnCondMetaExists
 )
 
 // TxnCondResult is the comparison operator for a TxnCondition.
@@ -155,10 +158,21 @@ type writeReq struct {
 	walStart, walEnd       time.Time
 	quorumStart, quorumEnd time.Time
 	batchSize              int
+
+	// metaToken owns this request's entries in Node.pendingMeta (0 = none).
+	metaToken uint64
 }
 
 func newWriteReq(ctx context.Context, e wal.Entry) *writeReq {
 	return &writeReq{entry: e, done: make(chan error, 1), ctx: ctx}
+}
+
+// pendingMeta tracks an in-flight meta write so that meta existence
+// conditions evaluated under n.mu see writes not yet applied to Pebble. token
+// identifies the write request that owns the entry (writeReq.metaToken).
+type pendingMeta struct {
+	token   uint64
+	deleted bool
 }
 
 // pendingKV tracks an in-flight write that has been assigned a revision and
@@ -212,6 +226,10 @@ type Node struct {
 	// them for that write's outcome (see awaitObservedWrites).
 	batchDone      chan struct{}
 	abortedBatches uint64
+	// pendingMeta holds in-flight meta keyspace writes; metaTokenSeq issues
+	// their tokens. Protected by mu.
+	pendingMeta  map[string]pendingMeta
+	metaTokenSeq uint64
 
 	// writeC is the channel to the commit loop (group-commit WAL + Pebble apply).
 	// Only used when the node is leader or single.
@@ -693,6 +711,7 @@ func Open(cfg Config) (*Node, error) {
 		nextRev:     db.CurrentRevision(),
 		nextSeq:     nextSeq,
 		pending:     make(map[string]pendingKV),
+		pendingMeta: make(map[string]pendingMeta),
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,
 		fenceReqC:   make(chan struct{}, 1),
@@ -743,6 +762,10 @@ func Open(cfg Config) (*Node, error) {
 	if n.loadRole() != roleFollower {
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
+		if err := n.initMetaAtGenesis(bgCtx); err != nil {
+			_ = n.Close()
+			return nil, err
+		}
 	}
 	if n.loadRole() != roleFollower && cfg.ObjectStore != nil && cfg.CheckpointInterval > 0 {
 		n.bgWg.Add(1)
