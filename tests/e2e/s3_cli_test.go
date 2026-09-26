@@ -21,6 +21,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	clientv3 "go.etcd.io/etcd/client/v3"
+
+	"github.com/t4db/t4/internal/checkpoint"
 )
 
 type s3TestConfig struct {
@@ -31,6 +33,10 @@ type s3TestConfig struct {
 	access   string
 	secret   string
 	region   string
+	// encKey and encKeyFile are set when the prefix uses object-store
+	// encryption; s3Args then passes the key file to every command.
+	encKey     []byte
+	encKeyFile string
 }
 
 func TestS3CLISmoke(t *testing.T) {
@@ -38,21 +44,44 @@ func TestS3CLISmoke(t *testing.T) {
 		t.Skip("set T4_E2E_S3=1 to run the S3-backed CLI smoke test")
 	}
 
+	buildCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	bin := envOr("T4_SMOKE_BIN", "")
+	if bin == "" {
+		bin = buildT4(t, buildCtx, t.TempDir())
+	}
+	bucket := envOr("S3_BUCKET", fmt.Sprintf("t4-smoke-%d", time.Now().UnixNano()))
+	prefix := envOr("T4_SMOKE_PREFIX", fmt.Sprintf("smoke-%d", time.Now().UnixNano()))
+
+	t.Run("plaintext", func(t *testing.T) {
+		runS3CLISmoke(t, bin, bucket, prefix+"-plaintext", nil)
+	})
+	t.Run("encrypted", func(t *testing.T) {
+		runS3CLISmoke(t, bin, bucket, prefix+"-encrypted", bytes.Repeat([]byte{0x3c}, 32))
+	})
+}
+
+// runS3CLISmoke drives the t4 binary through run, restore, status, branch and
+// gc against one S3 prefix. When encKey is non-nil every command gets the key
+// via --object-store-encryption-key-file, and the raw bucket contents are
+// checked to be encrypted.
+func runS3CLISmoke(t *testing.T, bin, bucket, prefix string, encKey []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	workDir := t.TempDir()
 	cfg := s3TestConfig{
-		bin:      envOr("T4_SMOKE_BIN", ""),
+		bin:      bin,
 		endpoint: envOr("S3_ENDPOINT", "http://127.0.0.1:9000"),
-		bucket:   envOr("S3_BUCKET", fmt.Sprintf("t4-smoke-%d", time.Now().UnixNano())),
-		prefix:   envOr("T4_SMOKE_PREFIX", fmt.Sprintf("smoke-%d", time.Now().UnixNano())),
+		bucket:   bucket,
+		prefix:   prefix,
 		access:   envOr("S3_ACCESS_KEY", "t4testadmin"),
 		secret:   envOr("S3_SECRET_KEY", "t4testadmin"),
 		region:   envOr("S3_REGION", "us-east-1"),
 	}
-	if cfg.bin == "" {
-		cfg.bin = buildT4(t, ctx, workDir)
+	if encKey != nil {
+		cfg.encKey = encKey
+		cfg.encKeyFile = writeObjectStoreEncryptionKeyFile(t, encKey)
 	}
 
 	if err := ensureBucket(ctx, cfg); err != nil {
@@ -119,6 +148,13 @@ func TestS3CLISmoke(t *testing.T) {
 		t.Fatalf("pinned checkpoint %s lists no SSTs; nothing to protect", branchKey)
 	}
 	t.Logf("branch pinned checkpoint %s protects %d SST(s)", branchKey, len(pinnedSSTs))
+
+	if encKey != nil {
+		assertPrefixEncrypted(t, ctx, s3cli, cfg,
+			[]string{"wal/", "checkpoint/", checkpoint.ManifestKey, registryKey},
+			"value-0", "/smoke/")
+		assertEncryptedCLIRejectsBadKeys(t, ctx, cfg, workDir)
+	}
 
 	// Write more data so a newer checkpoint is uploaded, leaving branchKey
 	// as an older (only-reachable-through-the-branch) checkpoint. Without
@@ -226,10 +262,20 @@ func s3GetObject(ctx context.Context, client *minio.Client, cfg s3TestConfig, re
 	return io.ReadAll(obj)
 }
 
+// s3ReadObject downloads a prefix-relative object key and, when cfg uses
+// object-store encryption, decrypts it.
+func s3ReadObject(ctx context.Context, client *minio.Client, cfg s3TestConfig, relKey string) ([]byte, error) {
+	body, err := s3GetObject(ctx, client, cfg, relKey)
+	if err != nil || cfg.encKey == nil {
+		return body, err
+	}
+	return decryptObject(ctx, cfg.encKey, relKey, body)
+}
+
 // checkpointSSTs reads the checkpoint manifest at relKey and returns the union
 // of its own_store and ancestor_store SST keys (prefix-relative).
 func checkpointSSTs(ctx context.Context, client *minio.Client, cfg s3TestConfig, relKey string) ([]string, error) {
-	body, err := s3GetObject(ctx, client, cfg, relKey)
+	body, err := s3ReadObject(ctx, client, cfg, relKey)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +295,7 @@ func checkpointSSTs(ctx context.Context, client *minio.Client, cfg s3TestConfig,
 // latestCheckpointSSTs returns the SST keys referenced by the current
 // manifest/latest pointer's checkpoint.
 func latestCheckpointSSTs(ctx context.Context, client *minio.Client, cfg s3TestConfig) ([]string, error) {
-	body, err := s3GetObject(ctx, client, cfg, "manifest/latest")
+	body, err := s3ReadObject(ctx, client, cfg, "manifest/latest")
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +493,7 @@ func runT4(ctx context.Context, cfg s3TestConfig, args ...string) (string, error
 }
 
 func s3Args(cfg s3TestConfig) []string {
-	return []string{
+	args := []string{
 		"--s3-bucket", cfg.bucket,
 		"--s3-prefix", cfg.prefix,
 		"--s3-endpoint", cfg.endpoint,
@@ -455,6 +501,10 @@ func s3Args(cfg s3TestConfig) []string {
 		"--s3-access-key-id", cfg.access,
 		"--s3-secret-access-key", cfg.secret,
 	}
+	if cfg.encKeyFile != "" {
+		args = append(args, "--object-store-encryption-key-file", cfg.encKeyFile)
+	}
+	return args
 }
 
 func stopNode(cmd *exec.Cmd) {

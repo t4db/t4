@@ -175,15 +175,36 @@ func (s *encryptedConditionalStore) GetETag(ctx context.Context, key string) (*G
 }
 
 func (s *encryptedConditionalStore) PutIfAbsent(ctx context.Context, key string, r io.Reader) error {
-	return s.putEncrypted(ctx, key, r, func(er io.Reader) error {
-		return s.inner.PutIfAbsent(ctx, key, er)
-	})
+	body, err := s.encryptToBuffer(ctx, key, r)
+	if err != nil {
+		return err
+	}
+	return s.inner.PutIfAbsent(ctx, key, body)
 }
 
 func (s *encryptedConditionalStore) PutIfMatch(ctx context.Context, key string, r io.Reader, matchETag string) error {
-	return s.putEncrypted(ctx, key, r, func(er io.Reader) error {
-		return s.inner.PutIfMatch(ctx, key, er, matchETag)
-	})
+	body, err := s.encryptToBuffer(ctx, key, r)
+	if err != nil {
+		return err
+	}
+	return s.inner.PutIfMatch(ctx, key, body, matchETag)
+}
+
+// encryptToBuffer encrypts r fully in memory. Conditional puts must not stream:
+// an unknown-length body makes S3 clients fall back to a multipart upload,
+// where If-Match / If-None-Match is not enforced atomically at completion, so
+// two racing writers could both succeed. Conditional objects (leader lock,
+// manifests, branch registry) are small, so buffering is cheap.
+func (s *encryptedStore) encryptToBuffer(ctx context.Context, key string, r io.Reader) (*bytes.Reader, error) {
+	k, err := s.kp.Key(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("object: encrypt key: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := encryptStream(key, &buf, r, k, s.kp.KeyID()); err != nil {
+		return nil, fmt.Errorf("object: encrypt %q: %w", key, err)
+	}
+	return bytes.NewReader(buf.Bytes()), nil
 }
 
 func (s *encryptedVersionedStore) GetVersioned(ctx context.Context, key, versionID string) (io.ReadCloser, error) {
