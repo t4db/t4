@@ -388,7 +388,11 @@ func txnCondMatches(cond TxnCondition, existing *istore.KeyValue) bool {
 	default:
 		return false
 	}
-	switch cond.Result {
+	return compareInt64(lhs, rhs, cond.Result)
+}
+
+func compareInt64(lhs, rhs int64, r TxnCondResult) bool {
+	switch r {
 	case TxnCondEqual:
 		return lhs == rhs
 	case TxnCondNotEqual:
@@ -445,7 +449,7 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err er
 		return TxnResponse{}, ErrClosed
 	}
 	prepareStart := time.Now()
-	e, succeeded, deletedKeys, stats, err := n.prepareTxn(req)
+	e, succeeded, deletedKeys, stats, metaToken, err := n.prepareTxn(req, false)
 	prepareDuration := time.Since(prepareStart)
 	kind := stats.kind()
 	compare := txnCompareLabel(succeeded)
@@ -466,6 +470,7 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err er
 		return TxnResponse{Succeeded: succeeded, Revision: curRev}, nil
 	}
 	wr := newWriteReq(ctx, e)
+	wr.metaToken = metaToken
 	n.writeC <- wr
 	n.mu.Unlock()
 	observeTxnPreparation(lockWait, prepareDuration, kind)
@@ -620,12 +625,41 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 // prepareTxn evaluates all conditions and prepares the WAL entry for the
 // selected branch. Must be called under n.mu.
 //
-// Returns a zero-valued Entry (Op==0) when the branch has no write ops.
-func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{}, txnStats, error) {
+// Returns a zero-valued Entry (Op==0) when the branch has no write ops. When
+// the entry contains meta ops, the returned token owns their pendingMeta
+// entries and must be set as the write request's metaToken.
+//
+// internal is set only by initMetaAtGenesis: it allows meta ops before the
+// meta keyspace is enabled and writes to the reserved format key.
+func (n *Node) prepareTxn(req TxnRequest, internal bool) (wal.Entry, bool, map[string]struct{}, txnStats, uint64, error) {
+	e, succeeded, deletedKeys, stats, err := n.prepareTxnEntry(req, internal)
+	if err != nil || e.Op == 0 {
+		return e, succeeded, deletedKeys, stats, 0, err
+	}
+	token, err := n.trackPendingMetaLocked(&e)
+	return e, succeeded, deletedKeys, stats, token, err
+}
+
+func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, map[string]struct{}, txnStats, error) {
 	// Evaluate conditions.
 	succeeded := true
 	readCache := make(map[string]*istore.KeyValue, len(req.Conditions))
 	for _, cond := range req.Conditions {
+		if cond.Target == TxnCondMetaExists {
+			exists, err := n.metaExistsLocked(cond.Key)
+			if err != nil {
+				return wal.Entry{}, false, nil, txnStats{}, err
+			}
+			var v int64
+			if exists {
+				v = 1
+			}
+			if !compareInt64(v, cond.Version, cond.Result) {
+				succeeded = false
+				break
+			}
+			continue
+		}
 		existing, ok := readCache[cond.Key]
 		if !ok {
 			var err error
@@ -666,11 +700,13 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		switch op.Type {
 		case TxnPut, TxnDelete:
 		case TxnMetaPut, TxnMetaDelete:
-			if err := validateMetaKey(op.Key); err != nil {
-				return wal.Entry{}, false, nil, txnStats{}, err
-			}
-			if err := n.requireMetaLocked(); err != nil {
-				return wal.Entry{}, false, nil, txnStats{}, err
+			if !internal {
+				if err := validateMetaKey(op.Key); err != nil {
+					return wal.Entry{}, false, nil, txnStats{}, err
+				}
+				if err := n.requireMetaLocked(); err != nil {
+					return wal.Entry{}, false, nil, txnStats{}, err
+				}
 			}
 			walOp := wal.OpMetaPut
 			if op.Type == TxnMetaDelete {
@@ -916,10 +952,11 @@ func (n *Node) clearPendingBatch(batch []*writeReq) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for _, req := range batch {
-		// Meta ops never enter the pending map, and they carry the revision of
-		// the preceding data write: matching them against pending entries
-		// would drop an in-flight data key of the same name too early.
+		// Meta ops are tracked in pendingMeta by token, not in pending: they
+		// carry the revision of the preceding data write, so matching them
+		// against pending would drop an in-flight data key of the same name.
 		if req.entry.Op.IsMeta() {
+			n.clearPendingMetaLocked(req.entry.Key, req.metaToken)
 			continue
 		}
 		if req.entry.Op == wal.OpTxn {
@@ -928,6 +965,7 @@ func (n *Node) clearPendingBatch(batch []*writeReq) {
 			if ops, err := wal.DecodeTxnOps(req.entry.Value); err == nil {
 				for _, op := range ops {
 					if op.Op.IsMeta() {
+						n.clearPendingMetaLocked(op.Key, req.metaToken)
 						continue
 					}
 					if p, ok := n.pending[op.Key]; ok && p.rev == req.entry.Revision {

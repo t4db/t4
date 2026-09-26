@@ -237,6 +237,10 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		// is the same behaviour as during a normal checkpoint interval.
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
+		// Only possible if the previous leader died before writing anything.
+		if err := n.initMetaAtGenesis(bgCtx); err != nil {
+			n.log.Errorf("t4: promoted leader: %v", err)
+		}
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
 			n.bgWg.Add(1)
 			go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()

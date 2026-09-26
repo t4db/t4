@@ -3,14 +3,13 @@ package etcd
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"time"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/t4db/t4"
+	"github.com/t4db/t4/internal/sysstate"
 )
 
 // LeaseGrant creates or reserves a lease ID with a real expiry time.
@@ -68,11 +67,12 @@ func (s *Server) createLease(ctx context.Context, rec *leaseRecord) error {
 	if err != nil {
 		return status.Errorf(codes.Internal, "marshal lease: %v", err)
 	}
-	if _, err := s.node.Create(ctx, leaseKey(rec.ID), data, 0); err != nil {
-		if errors.Is(err, t4.ErrKeyExists) {
-			return status.Errorf(codes.AlreadyExists, "lease %d already exists", rec.ID)
-		}
+	created, err := sysstate.Create(ctx, s.node, leaseKey(rec.ID), data)
+	if err != nil {
 		return status.Errorf(codes.Internal, "create lease: %v", err)
+	}
+	if !created {
+		return status.Errorf(codes.AlreadyExists, "lease %d already exists", rec.ID)
 	}
 	return nil
 }
