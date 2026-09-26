@@ -200,7 +200,7 @@ func TestAuthResponsesCarryHeader(t *testing.T) {
 	}
 	srv := grpc.NewServer(t4etcd.NewServerOptions(nil, nil)...)
 	t4etcd.New(node, authStore, tokens).Register(srv)
-	go srv.Serve(lis)
+	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	cli := newEtcdClient(t, lis.Addr().String())
 
