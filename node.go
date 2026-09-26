@@ -37,6 +37,9 @@ var (
 	ErrClosed         = errors.New("t4: node is closed")
 	ErrCompacted      = istore.ErrCompacted
 	ErrFutureRevision = istore.ErrFutureRevision
+	// ErrMetaDisabled is returned by meta keyspace writes before the cluster
+	// has been upgraded to a WAL format that supports them.
+	ErrMetaDisabled = errors.New("t4: meta keyspace is not enabled for this database")
 )
 
 // TxnCondTarget identifies which field of a key's metadata is compared.
@@ -79,8 +82,10 @@ type TxnCondition struct {
 type TxnOpType uint8
 
 const (
-	TxnPut    TxnOpType = iota // upsert
-	TxnDelete                  // unconditional delete
+	TxnPut        TxnOpType = iota // upsert
+	TxnDelete                      // unconditional delete
+	TxnMetaPut                     // set a meta keyspace key (see Node.MetaPut)
+	TxnMetaDelete                  // delete a meta keyspace key (see Node.MetaDelete)
 )
 
 // TxnOp is one write operation in a transaction's Then or Else branch.
@@ -1023,21 +1028,9 @@ func (n *Node) WatchSendTimeout() time.Duration { return n.cfg.WatchSendTimeout 
 // current revision, then wait until this node has applied at least that far.
 // Returns nil immediately if the node is the leader or running single-node.
 func (n *Node) syncWithLeader(ctx context.Context) error {
-	cli := n.leaderCli.Load()
-	if cli == nil {
-		// If the background context has been cancelled the node is either
-		// shutting down or has been fenced (leader superseded by a new term).
-		// Serving a read from our local stale Pebble would violate
-		// linearizability — return an error so the client retries elsewhere.
-		if n.bgCtx.Err() != nil {
-			return ErrClosed
-		}
-		if n.loadRole() == roleFollower {
-			return ErrNoLeader
-		}
-		// Leader or single node: local state is current only while a
-		// leader is sure it still is one.
-		return n.checkLease()
+	cli, err := n.readIndexClient()
+	if cli == nil || err != nil {
+		return err
 	}
 	resp, err := cli.ForwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardGetRevision})
 	if err != nil {
@@ -1054,6 +1047,29 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 		return fmt.Errorf("t4: read sync: wait for local revision %d: %w", resp.Revision, err)
 	}
 	return nil
+}
+
+// readIndexClient returns the client to ask for a read index. A nil client
+// with a nil error means this node is the leader or single-node and its local
+// state is already up to date.
+func (n *Node) readIndexClient() (*peer.Client, error) {
+	cli := n.leaderCli.Load()
+	if cli == nil {
+		// If the background context has been cancelled the node is either
+		// shutting down or has been fenced (leader superseded by a new term).
+		// Serving a read from our local stale Pebble would violate
+		// linearizability — return an error so the client retries elsewhere.
+		if n.bgCtx.Err() != nil {
+			return nil, ErrClosed
+		}
+		if n.loadRole() == roleFollower {
+			return nil, ErrNoLeader
+		}
+		// Leader or single node: local state is current only while a
+		// leader is sure it still is one.
+		return nil, n.checkLease()
+	}
+	return cli, nil
 }
 
 func isLeaderUnavailable(err error) bool {
