@@ -15,6 +15,7 @@ import (
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
+	"github.com/t4db/t4/internal/testhook"
 	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
 )
@@ -78,6 +79,15 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	w2.Start(bgCtx)
 
 	peerSrv := peer.NewServer(n.cfg.PeerBufferSize, n.log)
+	// A database with the meta keyspace, or a new one about to get it (see
+	// initMetaAtGenesis), has WAL entries that followers below format 3 would
+	// misapply: refuse them before serving.
+	if _, metaOn, err := n.db.Load().MetaGet(metaFormatKey); err != nil {
+		_ = w2.Close()
+		return fmt.Errorf("t4: read meta format: %w", err)
+	} else if metaOn || (n.db.Load().LastSequence() == 0 && !testhook.LegacyNewDatabases.Load()) {
+		peerSrv.SetMinFollowerWALFormat(wal.WALFormatVersion)
+	}
 	lis, err := net.Listen("tcp", n.cfg.PeerListenAddr)
 	if err != nil {
 		_ = w2.Close()
@@ -102,6 +112,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.nextSeq = nextSeq
 	n.pending = make(map[string]pendingKV)
+	n.pendingMeta = make(map[string]pendingMeta)
 	n.mu.Unlock()
 
 	// Install the forward handler after role is set to leader so that

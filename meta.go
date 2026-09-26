@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/t4db/t4/internal/peer"
 	istore "github.com/t4db/t4/internal/store"
+	"github.com/t4db/t4/internal/testhook"
 	"github.com/t4db/t4/internal/wal"
 )
 
@@ -16,12 +18,14 @@ import (
 // does not advance the revision. It is replicated through the WAL like any
 // other write and survives checkpoints, restores, and branches.
 //
-// Meta writes require WAL format 3, which older binaries refuse to read. They
-// are therefore rejected with ErrMetaDisabled until the database has been
-// explicitly upgraded, which records metaFormatKey.
+// Meta writes require WAL format 3, which older binaries refuse to read. Only
+// databases created by a release that supports them have the meta keyspace
+// enabled (see initMetaAtGenesis); in older databases meta writes fail with
+// ErrMetaDisabled.
 
-// metaFormatKey marks a database whose WAL may contain meta ops. It is written
-// once, by the upgrade, and is reserved: user writes to it are rejected.
+// metaFormatKey marks a database whose WAL may contain meta ops. It is the
+// first entry of such a database and is reserved: user writes to it are
+// rejected.
 const metaFormatKey = "\x00t4/format"
 
 // MetaKV is one entry of the meta keyspace.
@@ -36,7 +40,7 @@ func (n *Node) MetaPut(ctx context.Context, key string, value []byte) error {
 	if err := validateMetaKey(key); err != nil {
 		return err
 	}
-	return n.writeMeta(ctx, wal.OpMetaPut, key, value, true)
+	return n.writeMeta(ctx, wal.OpMetaPut, key, value)
 }
 
 // MetaDelete removes key from the meta keyspace. Deleting a missing key is not
@@ -46,7 +50,7 @@ func (n *Node) MetaDelete(ctx context.Context, key string) error {
 	if err := validateMetaKey(key); err != nil {
 		return err
 	}
-	return n.writeMeta(ctx, wal.OpMetaDelete, key, nil, true)
+	return n.writeMeta(ctx, wal.OpMetaDelete, key, nil)
 }
 
 // MetaEnabled reports whether this database accepts meta keyspace writes.
@@ -58,14 +62,60 @@ func (n *Node) MetaEnabled() (bool, error) {
 	return ok, err
 }
 
-// enableMeta records metaFormatKey, after which meta writes are accepted. It
-// must run on the leader and is idempotent. Callers are responsible for making
-// sure every node that may apply the WAL understands format 3.
-func (n *Node) enableMeta(ctx context.Context) error {
-	if n.loadRole() == roleFollower {
-		return ErrNotLeader
+// MetaDisabled returns a TxnCondition that holds while the meta keyspace is
+// not enabled. System state that lives in reserved data keys in databases
+// created before the meta keyspace, and in meta keys otherwise, can use it to
+// pick the keyspace atomically with the write:
+//
+//	If: MetaDisabled(), Then: data-keyspace ops, Else: meta ops
+func MetaDisabled() TxnCondition {
+	return TxnCondition{Key: metaFormatKey, Target: TxnCondMetaExists, Result: TxnCondEqual, Version: 0}
+}
+
+// initMetaAtGenesis enables the meta keyspace in a database that has no WAL
+// entries yet, so that every database created by this release uses it from
+// its first write. Databases created by earlier releases keep their format:
+// their lease and auth state stays in revisioned keys, and older releases can
+// still open them. The format marker is written with writes paused, so it is
+// the database's first entry.
+//
+// It runs on a leader or single node with the commit loop started, before the
+// node serves writes (in Open) or right after promotion.
+func (n *Node) initMetaAtGenesis(ctx context.Context) (err error) {
+	if testhook.LegacyNewDatabases.Load() {
+		return nil
 	}
-	return n.writeMeta(ctx, wal.OpMetaPut, metaFormatKey, []byte("3"), false)
+	n.fenceMu.Lock()
+	defer n.fenceMu.Unlock()
+	if n.closed.Load() {
+		return ErrClosed
+	}
+	if n.db.Load().LastSequence() != 0 {
+		return nil
+	}
+
+	start := time.Now()
+	n.mu.Lock()
+	if n.closed.Load() {
+		n.mu.Unlock()
+		return ErrClosed
+	}
+	e, _, _, _, metaToken, err := n.prepareTxn(TxnRequest{Success: []TxnOp{
+		{Type: TxnMetaPut, Key: metaFormatKey, Value: []byte(strconv.Itoa(wal.WALFormatVersion))},
+	}}, true)
+	if err != nil {
+		n.mu.Unlock()
+		return fmt.Errorf("t4: enable meta keyspace: %w", err)
+	}
+	wr := newWriteReq(ctx, e)
+	wr.metaToken = metaToken
+	n.writeC <- wr
+	n.mu.Unlock()
+	if _, err := n.await(ctx, wr, "txn", start, "", e.Revision); err != nil {
+		return fmt.Errorf("t4: enable meta keyspace: %w", err)
+	}
+	n.log.Infof("t4: new database created with the meta keyspace (WAL format %d)", wal.WALFormatVersion)
+	return nil
 }
 
 func validateMetaKey(key string) error {
@@ -78,7 +128,7 @@ func validateMetaKey(key string) error {
 	return nil
 }
 
-func (n *Node) writeMeta(ctx context.Context, op wal.Op, key string, value []byte, gated bool) (err error) {
+func (n *Node) writeMeta(ctx context.Context, op wal.Op, key string, value []byte) (err error) {
 	ctx, span := n.tracer.Start(ctx, "t4."+opLabel(op))
 	defer func() { endSpan(span, err) }()
 
@@ -104,16 +154,20 @@ func (n *Node) writeMeta(ctx context.Context, op wal.Op, key string, value []byt
 		n.mu.Unlock()
 		return ErrClosed
 	}
-	if gated {
-		if err := n.requireMetaLocked(); err != nil {
-			n.mu.Unlock()
-			return err
-		}
+	if err := n.requireMetaLocked(); err != nil {
+		n.mu.Unlock()
+		return err
 	}
 	// Like Compact, a meta entry carries the last assigned revision without
 	// consuming a new one.
 	e := wal.Entry{Revision: n.nextRev, Term: n.term, Op: op, Key: key, Value: value}
+	metaToken, err := n.trackPendingMetaLocked(&e)
+	if err != nil {
+		n.mu.Unlock()
+		return err
+	}
 	req := newWriteReq(ctx, e)
+	req.metaToken = metaToken
 	n.writeC <- req
 	n.mu.Unlock()
 	_, err = n.await(ctx, req, opLabel(op), start, "", e.Revision)
@@ -123,7 +177,7 @@ func (n *Node) writeMeta(ctx context.Context, op wal.Op, key string, value []byt
 // requireMetaLocked returns ErrMetaDisabled unless meta writes are enabled.
 // Must be called under n.mu on the leader.
 func (n *Node) requireMetaLocked() error {
-	_, ok, err := n.db.Load().MetaGet(metaFormatKey)
+	ok, err := n.metaExistsLocked(metaFormatKey)
 	if err != nil {
 		return err
 	}
@@ -131,6 +185,53 @@ func (n *Node) requireMetaLocked() error {
 		return ErrMetaDisabled
 	}
 	return nil
+}
+
+// metaExistsLocked reports whether key exists in the meta keyspace, including
+// in-flight writes not yet applied. Must be called under n.mu on the leader.
+func (n *Node) metaExistsLocked(key string) (bool, error) {
+	if p, ok := n.pendingMeta[key]; ok {
+		return !p.deleted, nil
+	}
+	_, ok, err := n.db.Load().MetaGet(key)
+	return ok, err
+}
+
+// trackPendingMetaLocked records e's meta ops in pendingMeta under a fresh
+// token and returns it, or 0 when e has no meta ops. Must be called under n.mu.
+func (n *Node) trackPendingMetaLocked(e *wal.Entry) (uint64, error) {
+	var ops []wal.TxnSubOp
+	switch {
+	case e.Op.IsMeta():
+		ops = []wal.TxnSubOp{{Op: e.Op, Key: e.Key}}
+	case e.Op == wal.OpTxn:
+		all, err := wal.DecodeTxnOps(e.Value)
+		if err != nil {
+			return 0, err
+		}
+		ops = all
+	}
+	var token uint64
+	for _, op := range ops {
+		if !op.Op.IsMeta() {
+			continue
+		}
+		if token == 0 {
+			n.metaTokenSeq++
+			token = n.metaTokenSeq
+		}
+		n.pendingMeta[op.Key] = pendingMeta{token: token, deleted: op.Op == wal.OpMetaDelete}
+	}
+	return token, nil
+}
+
+// clearPendingMetaLocked drops key's pendingMeta entry if token still owns it;
+// a newer in-flight write to the same key keeps its entry. Must be called
+// under n.mu.
+func (n *Node) clearPendingMetaLocked(key string, token uint64) {
+	if p, ok := n.pendingMeta[key]; ok && p.token == token {
+		delete(n.pendingMeta, key)
+	}
 }
 
 // MetaGet returns the value of key in the meta keyspace from local state; ok

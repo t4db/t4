@@ -9,13 +9,15 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/t4db/t4"
 	"github.com/t4db/t4/internal/metrics"
+	"github.com/t4db/t4/internal/sysstate"
 )
 
 const (
-	// authPrefix is the reserved Pebble key namespace for auth data.
-	// The null byte ensures no normal etcd client key can collide.
+	// authPrefix is the reserved key namespace for auth state. The null byte
+	// ensures no normal etcd client key can collide. The state is stored
+	// through internal/sysstate: in data keys in databases created before the
+	// meta keyspace, in meta keys otherwise.
 	authPrefix   = "\x00auth/"
 	enabledKey   = "\x00auth/enabled"
 	usersPrefix  = "\x00auth/users/"
@@ -26,12 +28,7 @@ const (
 )
 
 // node is the subset of t4.Node used by Store.
-type node interface {
-	Put(ctx context.Context, key string, value []byte, lease int64) (int64, error)
-	Get(key string, opts ...t4.ReadOption) (*t4.KeyValue, error)
-	List(prefix string, opts ...t4.ReadOption) ([]*t4.KeyValue, error)
-	Delete(ctx context.Context, key string) (int64, error)
-}
+type node = sysstate.Node
 
 // Store persists auth state (users, roles, enabled flag) in Pebble via a
 // t4 Node.  All writes flow through the WAL, so followers stay in sync
@@ -144,7 +141,7 @@ func (s *Store) DeleteUser(ctx context.Context, name string) error {
 	if _, err := s.getUser(name); err != nil {
 		return fmt.Errorf("user %q not found", name)
 	}
-	if _, err := s.n.Delete(ctx, usersPrefix+name); err != nil {
+	if err := sysstate.Delete(ctx, s.n, usersPrefix+name); err != nil {
 		return err
 	}
 	delete(s.users, name)
@@ -250,7 +247,7 @@ func (s *Store) DeleteRole(ctx context.Context, name string) error {
 	if _, err := s.getRole(name); err != nil {
 		return fmt.Errorf("role %q not found", name)
 	}
-	if _, err := s.n.Delete(ctx, rolesPrefix+name); err != nil {
+	if err := sysstate.Delete(ctx, s.n, rolesPrefix+name); err != nil {
 		return err
 	}
 	delete(s.roles, name)
@@ -332,16 +329,16 @@ func (s *Store) CheckPermission(userName, key string, pt PermType) error {
 // ── Internal helpers (caller holds mu) ───────────────────────────────────────
 
 func (s *Store) load() error {
-	kv, err := s.n.Get(enabledKey)
+	v, ok, err := sysstate.Get(s.n, enabledKey)
 	if err != nil {
 		return fmt.Errorf("load auth state: %w", err)
 	}
-	if kv != nil {
-		s.enabled = string(kv.Value) == "1"
+	if ok {
+		s.enabled = string(v) == "1"
 	}
 
 	// Warm the in-memory caches.
-	userKVs, err := s.n.List(usersPrefix)
+	userKVs, err := sysstate.List(s.n, usersPrefix)
 	if err != nil {
 		return fmt.Errorf("load users: %w", err)
 	}
@@ -353,7 +350,7 @@ func (s *Store) load() error {
 		s.users[u.Name] = u
 	}
 
-	roleKVs, err := s.n.List(rolesPrefix)
+	roleKVs, err := sysstate.List(s.n, rolesPrefix)
 	if err != nil {
 		return fmt.Errorf("load roles: %w", err)
 	}
@@ -373,7 +370,7 @@ func (s *Store) setEnabled(ctx context.Context, on bool) error {
 	if on {
 		v = "1"
 	}
-	if _, err := s.n.Put(ctx, enabledKey, []byte(v), 0); err != nil {
+	if err := sysstate.Put(ctx, s.n, enabledKey, []byte(v)); err != nil {
 		return err
 	}
 	s.enabled = on
@@ -393,7 +390,7 @@ func (s *Store) putUser(ctx context.Context, u User) error {
 	if err != nil {
 		return fmt.Errorf("encode user: %w", err)
 	}
-	if _, err := s.n.Put(ctx, usersPrefix+u.Name, data, 0); err != nil {
+	if err := sysstate.Put(ctx, s.n, usersPrefix+u.Name, data); err != nil {
 		return err
 	}
 	s.users[u.Name] = u
@@ -421,7 +418,7 @@ func (s *Store) putRole(ctx context.Context, r Role) error {
 	if err != nil {
 		return fmt.Errorf("encode role: %w", err)
 	}
-	if _, err := s.n.Put(ctx, rolesPrefix+r.Name, data, 0); err != nil {
+	if err := sysstate.Put(ctx, s.n, rolesPrefix+r.Name, data); err != nil {
 		return err
 	}
 	s.roles[r.Name] = r
