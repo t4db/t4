@@ -19,6 +19,7 @@ These are the failure modes the binary refuses rather than silently corrupting s
 |---|---|
 | Checkpoint `format_version` newer than this binary understands | Startup refuses to restore. Operator must roll the binary forward. |
 | WAL frame magic / version newer than this binary understands | Startup refuses to replay. Same remedy. |
+| WAL entry with an op code this binary does not know (local replay, S3 replay, or the leader's peer stream) | Replay or apply is refused. A follower stops replicating and logs an error instead of retrying or attempting a leader takeover; it does not apply the entry. Same remedy. |
 | `manifest/latest` references a checkpoint missing referenced SSTs | Startup error. Recoverable from an earlier checkpoint via `t4 restore`. |
 | Branch registry entry points at a checkpoint older than the safe `format_version` | GC refuses to reclaim. Inspect with `t4 inspect`. |
 
