@@ -107,15 +107,19 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 			if err != nil {
 				cancel()
 				if errors.Is(err, t4.ErrCompacted) {
+					// As etcd does: acknowledge the watch, then cancel it with
+					// the compact revision. clientv3 only reports
+					// ErrCompacted, with CompactRevision, for this pair.
 					select {
-					case sendCh <- []*etcdserverpb.WatchResponse{{
-						Header:          s.header(),
-						WatchId:         id,
-						Created:         true,
-						Canceled:        true,
-						CancelReason:    "mvcc: required revision has been compacted",
-						CompactRevision: toEtcdRevision(s.node.CompactRevision()),
-					}}:
+					case sendCh <- []*etcdserverpb.WatchResponse{
+						{Header: s.header(), WatchId: id, Created: true},
+						{
+							Header:          s.header(),
+							WatchId:         id,
+							Canceled:        true,
+							CompactRevision: toEtcdRevision(s.node.CompactRevision()),
+						},
+					}:
 					case <-ctx.Done():
 						return nil
 					}

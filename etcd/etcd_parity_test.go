@@ -6,6 +6,7 @@ package etcd_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 
@@ -245,5 +247,30 @@ func TestAuthResponsesCarryHeader(t *testing.T) {
 		if h == nil || h.Revision != cur.Header.Revision {
 			t.Errorf("%s: header %v, want one with the current revision %d", name, h, cur.Header.Revision)
 		}
+	}
+}
+
+// TestWatchBelowCompactionReportsErrCompacted: etcd acknowledges a watch
+// that starts below the compaction revision and then cancels it with the
+// compact revision, which clientv3 reports as ErrCompacted.
+func TestWatchBelowCompactionReportsErrCompacted(t *testing.T) {
+	_, cli := newWatchNode(t)
+	ctx := parityCtx(t)
+
+	var last int64
+	for i := 0; i < 3; i++ {
+		resp, err := cli.Put(ctx, "/c", fmt.Sprint(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = resp.Header.Revision
+	}
+	if _, err := cli.Compact(ctx, last); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := <-cli.Watch(ctx, "/c", clientv3.WithRev(2))
+	if !errors.Is(resp.Err(), rpctypes.ErrCompacted) || resp.CompactRevision != last {
+		t.Fatalf("watch below compaction: err=%v compactRevision=%d, want ErrCompacted at %d", resp.Err(), resp.CompactRevision, last)
 	}
 }
