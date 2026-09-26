@@ -62,16 +62,6 @@ func (n *Node) MetaEnabled() (bool, error) {
 	return ok, err
 }
 
-// MetaDisabled returns a TxnCondition that holds while the meta keyspace is
-// not enabled. System state that lives in reserved data keys in databases
-// created before the meta keyspace, and in meta keys otherwise, can use it to
-// pick the keyspace atomically with the write:
-//
-//	If: MetaDisabled(), Then: data-keyspace ops, Else: meta ops
-func MetaDisabled() TxnCondition {
-	return TxnCondition{Key: metaFormatKey, Target: TxnCondMetaExists, Result: TxnCondEqual, Version: 0}
-}
-
 // initMetaAtGenesis enables the meta keyspace in a database that has no WAL
 // entries yet, so that every database created by this release uses it from
 // its first write. Databases created by earlier releases keep their format:
@@ -79,8 +69,10 @@ func MetaDisabled() TxnCondition {
 // still open them. The format marker is written with writes paused, so it is
 // the database's first entry.
 //
-// It runs on a leader or single node with the commit loop started, before the
-// node serves writes (in Open) or right after promotion.
+// It runs in Open on a leader or single node, with the commit loop started
+// and before the node serves writes, so a database's mode is fixed before its
+// first write. A leader promoted later on an empty store (its predecessor
+// never wrote) keeps the legacy format instead.
 func (n *Node) initMetaAtGenesis(ctx context.Context) (err error) {
 	if testhook.LegacyNewDatabases.Load() {
 		return nil
@@ -91,6 +83,13 @@ func (n *Node) initMetaAtGenesis(ctx context.Context) (err error) {
 		return ErrClosed
 	}
 	if n.db.Load().LastSequence() != 0 {
+		// A write forwarded by a follower got in first: the database keeps
+		// the legacy format, which followers on earlier releases can read.
+		if n.peerSrv != nil {
+			if _, metaOn, err := n.db.Load().MetaGet(metaFormatKey); err == nil && !metaOn {
+				n.peerSrv.SetMinFollowerWALFormat(0)
+			}
+		}
 		return nil
 	}
 
