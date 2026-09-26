@@ -18,14 +18,17 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	key := string(r.Key)
 	rangeEnd := string(r.RangeEnd)
 	readRev := fromEtcdRevision(r.Revision)
-	header := func() *etcdserverpb.ResponseHeader { return s.rangeHeader(readRev) }
+	// Like etcd, the header reports the current revision even for a read at
+	// an older one; clients that asked for a revision already know it.
+	header := s.header
 
 	if r.Revision > 0 {
 		if compactRev := s.node.CompactRevision(); compactRev > 0 && readRev < compactRev {
 			return nil, rpctypes.ErrGRPCCompacted
 		}
 		if readRev == 0 {
-			return &etcdserverpb.RangeResponse{Header: s.headerAt(0)}, nil
+			// Wire revision 1 is the empty store before any write.
+			return &etcdserverpb.RangeResponse{Header: header()}, nil
 		}
 	}
 
@@ -55,7 +58,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		}
 		resp := &etcdserverpb.RangeResponse{Header: header()}
 		if kv != nil {
-			resp.Kvs = []*mvccpb.KeyValue{kvToProtoForRange(kv, r.KeysOnly)}
+			resp.Kvs = []*mvccpb.KeyValue{kvToProtoForRange(kv, r)}
 			resp.Count = 1
 		}
 		return resp, nil
@@ -96,7 +99,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		}
 		kvs := make([]*mvccpb.KeyValue, 0, len(all))
 		for _, kv := range all {
-			kvs = append(kvs, kvToProtoForRange(kv, r.KeysOnly))
+			kvs = append(kvs, kvToProtoForRange(kv, r))
 		}
 		if r.Limit <= 0 {
 			total = int64(len(kvs))
@@ -134,7 +137,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		if r.Limit > 0 && int64(len(kvs)) >= r.Limit {
 			continue
 		}
-		kvs = append(kvs, kvToProtoForRange(kv, r.KeysOnly))
+		kvs = append(kvs, kvToProtoForRange(kv, r))
 	}
 
 	return &etcdserverpb.RangeResponse{
@@ -334,6 +337,32 @@ func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserv
 }
 
 // convertCompare converts a single etcd Compare into a t4 TxnCondition.
+// compareRevision maps the etcd wire revision on the right-hand side of a
+// ModRevision/CreateRevision compare onto t4's internal clock so the compare
+// gives etcd's answer. An absent key compares as 0 in both clocks, and a
+// present key's wire revision is its internal one plus 1 (see
+// toEtcdRevision), so wire revisions >= 2 map exactly. The others have no
+// internal equivalent and need care: wire 1 lies between "absent" and the
+// first real revision, and negative values lie below every key.
+func compareRevision(wire int64, result t4.TxnCondResult) int64 {
+	switch {
+	case wire >= 2:
+		return wire - 1
+	case wire == 0:
+		return 0
+	case wire < 0:
+		return -1 // below every key, absent ones included
+	}
+	switch result {
+	case t4.TxnCondLess:
+		return 1 // "< 1" holds exactly for absent keys
+	case t4.TxnCondGreater:
+		return 0 // "> 1" holds exactly for present keys
+	default:
+		return -1 // no key equals 1
+	}
+}
+
 func convertCompare(cmp *etcdserverpb.Compare) (t4.TxnCondition, error) {
 	if err := validateUserKey(string(cmp.Key)); err != nil {
 		return t4.TxnCondition{}, err
@@ -356,13 +385,13 @@ func convertCompare(cmp *etcdserverpb.Compare) (t4.TxnCondition, error) {
 	switch cmp.Target {
 	case etcdserverpb.Compare_MOD:
 		c.Target = t4.TxnCondMod
-		c.ModRevision = fromEtcdRevision(cmp.GetModRevision())
+		c.ModRevision = compareRevision(cmp.GetModRevision(), c.Result)
 	case etcdserverpb.Compare_VERSION:
 		c.Target = t4.TxnCondVersion
 		c.Version = cmp.GetVersion()
 	case etcdserverpb.Compare_CREATE:
 		c.Target = t4.TxnCondCreate
-		c.CreateRevision = fromEtcdRevision(cmp.GetCreateRevision())
+		c.CreateRevision = compareRevision(cmp.GetCreateRevision(), c.Result)
 	case etcdserverpb.Compare_VALUE:
 		c.Target = t4.TxnCondValue
 		c.Value = []byte(cmp.GetValue())
@@ -465,13 +494,6 @@ func (s *Server) Compact(ctx context.Context, r *etcdserverpb.CompactionRequest)
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-func (s *Server) rangeHeader(readRev int64) *etcdserverpb.ResponseHeader {
-	if readRev > 0 {
-		return s.headerAt(readRev)
-	}
-	return s.header()
-}
-
 // rangeGet / rangeExists / rangeList / rangeCount dispatch to the linearizable
 // or local variant of each read, removing the repeated if/else fork from Range.
 func (s *Server) rangeGet(ctx context.Context, lin bool, key string, opts ...t4.ReadOption) (*t4.KeyValue, error) {
@@ -515,10 +537,15 @@ func kvError(err error) error {
 	}
 }
 
-func kvToProtoForRange(kv *t4.KeyValue, keysOnly bool) *mvccpb.KeyValue {
+func kvToProtoForRange(kv *t4.KeyValue, r *etcdserverpb.RangeRequest) *mvccpb.KeyValue {
 	pb := kvToProto(kv)
-	if keysOnly {
+	if r.KeysOnly {
 		pb.Value = nil
+		// etcd serves keys-only reads from its in-memory index, which has no
+		// lease, unless the results must be sorted by value.
+		if r.SortTarget != etcdserverpb.RangeRequest_VALUE {
+			pb.Lease = 0
+		}
 	}
 	return pb
 }

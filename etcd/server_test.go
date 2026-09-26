@@ -125,7 +125,7 @@ func TestRangeAtRevisionSingleKey(t *testing.T) {
 	ctx := context.Background()
 
 	oldRev := put(t, srv, "/mvcc/key", "old")
-	put(t, srv, "/mvcc/key", "new")
+	newRev := put(t, srv, "/mvcc/key", "new")
 
 	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
 		Key:      []byte("/mvcc/key"),
@@ -134,8 +134,9 @@ func TestRangeAtRevisionSingleKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Header.Revision != oldRev {
-		t.Fatalf("header revision: want %d got %d", oldRev, r.Header.Revision)
+	// As in etcd, the header reports the current revision, not the one read.
+	if r.Header.Revision != newRev {
+		t.Fatalf("header revision: want %d got %d", newRev, r.Header.Revision)
 	}
 	if len(r.Kvs) != 1 || string(r.Kvs[0].Value) != "old" {
 		t.Fatalf("Range at old revision: got %+v", r.Kvs)
