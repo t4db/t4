@@ -13,7 +13,7 @@ import (
 
 // Segment file format:
 //
-//	[4:  magic    "T4\x01\n"]
+//	[4:  magic    "T4\x02\n"]  ← third byte is the format version
 //	[8:  term     uint64 BE]
 //	[8:  firstRev int64  BE]      ← first WAL sequence in this segment (legacy name)
 //	[entry frames ... ]

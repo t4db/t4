@@ -286,9 +286,27 @@ Both components are zero-padded decimal strings:
 wal/0000000001/00000000000000000042
 ```
 
+## WAL Segment Header
+
+Each WAL segment starts with a 20-byte header. Integers are big-endian.
+
+```text
+[4 bytes] magic "T4" <format-version byte> "\n"
+[8 bytes] term uint64
+[8 bytes] first_sequence int64
+```
+
+The third magic byte is the WAL format version. Current writers emit format `2` (`T4\x02\n`). Readers accept every
+format up to the newest they know and refuse newer segments (see [Upgrade](upgrade.md#what-fails-closed)).
+
+| Format | Change                                                                                   |
+|-------:|------------------------------------------------------------------------------------------|
+|    `1` | Original format.                                                                         |
+|    `2` | Entries carry a WAL sequence `id` separate from `revision`, and an etcd-style `version`. |
+
 ## WAL Entry Frame
 
-Each WAL segment is a sequence of framed entries. Integers are big-endian.
+After the header, a segment is a sequence of framed entries. Integers are big-endian.
 
 ```text
 [4 bytes] payload_len uint32
@@ -305,11 +323,17 @@ Payload layout:
 [8 bytes] lease int64
 [8 bytes] create_revision int64
 [8 bytes] prev_revision int64
+[8 bytes] id int64                 (format 2+)
+[8 bytes] version int64            (format 2+)
 [4 bytes] key_len uint32
 [4 bytes] val_len uint32
 [key_len bytes] key bytes
 [val_len bytes] value bytes
 ```
+
+`id` is the WAL sequence: it increases by one for every entry, including metadata-only entries such as compaction.
+`revision` is the user-visible revision and does not advance for metadata-only entries. In format 1 the sequence is
+the revision.
 
 Operation codes:
 
@@ -323,24 +347,30 @@ Operation codes:
 
 For transaction entries, the outer entry has an empty key and stores encoded sub-operations in `value`.
 
+A reader that meets an op code it does not know must fail closed: it refuses to replay the segment or apply the
+entry, rather than guessing its meaning. Future releases may add op codes only together with a mechanism that keeps
+them away from binaries that cannot read them.
+
 ## WAL Transaction Payload
 
 Transaction payloads are encoded as:
 
 ```text
-[4 bytes] count uint32
+[4 bytes] count uint32             (high bit set: sub-operations include version)
 repeat count times:
   [1 byte ] op
   [8 bytes] lease int64
   [8 bytes] create_revision int64
   [8 bytes] prev_revision int64
+  [8 bytes] version int64          (only when the high bit of count is set)
   [4 bytes] key_len uint32
   [4 bytes] val_len uint32
   [key_len bytes] key bytes
   [val_len bytes] value bytes
 ```
 
-Sub-operation `op` must be create, update, or delete.
+The sub-operation count is `count & 0x7fffffff`. Sub-operation `op` must be create, update, or delete; any other
+code is rejected.
 
 ## etcd Compatibility
 

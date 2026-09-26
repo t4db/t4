@@ -7,6 +7,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -24,6 +25,33 @@ const (
 	// are encoded in Value using EncodeTxnOps / DecodeTxnOps.
 	OpTxn Op = 5
 )
+
+// ErrUnknownOp is returned when a WAL entry or txn sub-operation carries an op
+// code this binary does not understand. It usually means the entry was written
+// by a newer T4 release. Callers must fail closed: guessing the semantics of an
+// unknown op (for example, treating it as a put) silently corrupts state.
+var ErrUnknownOp = errors.New("wal: unknown op (written by a newer T4 release?)")
+
+// Known reports whether o is an entry-level op code understood by this binary.
+func (o Op) Known() bool { return o >= OpCreate && o <= OpTxn }
+
+// knownTxnSubOp reports whether o is valid inside an OpTxn payload.
+func knownTxnSubOp(o Op) bool { return o == OpCreate || o == OpUpdate || o == OpDelete }
+
+// ValidateEntry checks that e and, for OpTxn, every sub-operation carry op
+// codes understood by this binary. It returns an error wrapping ErrUnknownOp
+// otherwise.
+func ValidateEntry(e *Entry) error {
+	if !e.Op.Known() {
+		return fmt.Errorf("%w: op=%d seq=%d rev=%d", ErrUnknownOp, e.Op, e.Sequence(), e.Revision)
+	}
+	if e.Op == OpTxn {
+		if _, err := decodeTxnOps(e.Value, false); err != nil {
+			return fmt.Errorf("seq=%d rev=%d: %w", e.Sequence(), e.Revision, err)
+		}
+	}
+	return nil
+}
 
 // Entry is one record in the write-ahead log.
 type Entry struct {
@@ -98,8 +126,15 @@ func EncodeTxnOps(ops []TxnSubOp) []byte {
 	return buf
 }
 
-// DecodeTxnOps decodes a byte slice produced by EncodeTxnOps.
+// DecodeTxnOps decodes a byte slice produced by EncodeTxnOps. It returns an
+// error wrapping ErrUnknownOp if any sub-operation has an unknown op code.
 func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
+	return decodeTxnOps(b, true)
+}
+
+// decodeTxnOps parses and validates a txn payload. When keep is false it only
+// validates framing and op codes, without allocating the decoded ops.
+func decodeTxnOps(b []byte, keep bool) ([]TxnSubOp, error) {
 	if len(b) < 4 {
 		return nil, fmt.Errorf("wal: txn ops payload too short (%d bytes)", len(b))
 	}
@@ -110,27 +145,40 @@ func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
 	if versioned {
 		fixedSize = txnSubOpFixedSize
 	}
-	ops := make([]TxnSubOp, 0, count)
+	var ops []TxnSubOp
+	if keep {
+		ops = make([]TxnSubOp, 0, count)
+	}
 	off := 4
 	for i := 0; i < count; i++ {
 		if len(b)-off < fixedSize {
 			return nil, fmt.Errorf("wal: txn sub-op %d header truncated", i)
 		}
-		o := TxnSubOp{}
-		o.Op = Op(b[off])
-		o.Lease = int64(binary.BigEndian.Uint64(b[off+1:]))
-		o.CreateRevision = int64(binary.BigEndian.Uint64(b[off+9:]))
-		o.PrevRevision = int64(binary.BigEndian.Uint64(b[off+17:]))
+		op := Op(b[off])
+		if !knownTxnSubOp(op) {
+			return nil, fmt.Errorf("%w: txn sub-op %d has op=%d", ErrUnknownOp, i, op)
+		}
 		keyLenOffset := off + 25
 		if versioned {
-			o.Version = int64(binary.BigEndian.Uint64(b[off+25:]))
 			keyLenOffset = off + 33
 		}
 		keyLen := int(binary.BigEndian.Uint32(b[keyLenOffset:]))
 		valLen := int(binary.BigEndian.Uint32(b[keyLenOffset+4:]))
+		hdr := off
 		off += fixedSize
 		if len(b)-off < keyLen+valLen {
 			return nil, fmt.Errorf("wal: txn sub-op %d payload truncated (need %d, have %d)", i, keyLen+valLen, len(b)-off)
+		}
+		if !keep {
+			off += keyLen + valLen
+			continue
+		}
+		o := TxnSubOp{Op: op}
+		o.Lease = int64(binary.BigEndian.Uint64(b[hdr+1:]))
+		o.CreateRevision = int64(binary.BigEndian.Uint64(b[hdr+9:]))
+		o.PrevRevision = int64(binary.BigEndian.Uint64(b[hdr+17:]))
+		if versioned {
+			o.Version = int64(binary.BigEndian.Uint64(b[hdr+25:]))
 		}
 		o.Key = string(b[off : off+keyLen])
 		off += keyLen
@@ -245,6 +293,9 @@ func unmarshalEntryVersion(b []byte, version int) (*Entry, error) {
 	}
 	e := &Entry{}
 	e.Op = Op(b[0])
+	if !e.Op.Known() {
+		return nil, fmt.Errorf("%w: op=%d", ErrUnknownOp, e.Op)
+	}
 	e.Revision = int64(binary.BigEndian.Uint64(b[1:9]))
 	e.Term = binary.BigEndian.Uint64(b[9:17])
 	e.Lease = int64(binary.BigEndian.Uint64(b[17:25]))

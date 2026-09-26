@@ -185,6 +185,9 @@ func (w *WAL) ReplayLocal(db RecoveryStore, afterSeq int64) error {
 		}
 		entries, readErr := sr.ReadAll()
 		closer()
+		if errors.Is(readErr, ErrUnknownOp) {
+			return fmt.Errorf("wal: replay local segment %q: %w", path, readErr)
+		}
 		if readErr != nil {
 			w.log.Warnf("wal: partial local segment %q: %v", path, readErr)
 		}
