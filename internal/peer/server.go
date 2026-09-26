@@ -357,7 +357,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 		}
 	}()
 
-	s.log.Infof("peer: follower %q connected (fromRev=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, len(snapshot))
+	s.log.Infof("peer: follower %q connected (fromRev=%d, walFormat=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, req.WALFormat, len(snapshot))
 
 	// Spawn a goroutine to read ACK messages from the follower on the bidi
 	// stream. The main goroutine continues sending WalEntryMsgs concurrently.
