@@ -38,6 +38,18 @@
       (.endpoints (into-array String [(str "http://" (name node) ":3379")]))
       (.build)))
 
+;; ── Errors ─────────────────────────────────────────────────────────────────────
+;;
+;; A read that errors changed nothing, so it is a definite :fail. A write or
+;; CAS that errors may still have been applied: the leader can commit it and
+;; the reply be lost (a partition cuts a forwarded write's response, or the
+;; leader loses its lease after committing). It must be :info, or Knossos
+;; treats the write as never having happened and flags a later read of its
+;; value as a violation.
+
+(defn- error-type [op]
+  (if (= :read (:f op)) :fail :info))
+
 ;; ── Register operations ───────────────────────────────────────────────────────
 ;;
 ;; A single key holds a small integer.  Three operations:
@@ -114,11 +126,10 @@
         (assoc op :type :info :error :timeout))
 
       (catch io.grpc.StatusRuntimeException e
-        ;; UNAVAILABLE = node is partitioned; :fail lets Jepsen account for it.
-        (assoc op :type :fail :error (str (.getStatus e))))
+        (assoc op :type (error-type op) :error (str (.getStatus e))))
 
       (catch Exception e
-        (assoc op :type :fail :error (.getMessage e)))))
+        (assoc op :type (error-type op) :error (.getMessage e)))))
 
   (teardown! [this test])
 
@@ -226,10 +237,10 @@
         (assoc op :type :info :error :timeout))
 
       (catch io.grpc.StatusRuntimeException e
-        (assoc op :type :fail :error (str (.getStatus e))))
+        (assoc op :type (error-type op) :error (str (.getStatus e))))
 
       (catch Exception e
-        (assoc op :type :fail :error (.getMessage e)))))
+        (assoc op :type (error-type op) :error (.getMessage e)))))
 
   (teardown! [this test])
 
