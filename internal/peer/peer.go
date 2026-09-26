@@ -244,6 +244,9 @@ const (
 	ForwardCompact                    // compact up to Revision
 	ForwardGetRevision                // ReadIndex: returns the leader's current revision
 	ForwardTxn                        // multi-key atomic transaction
+	ForwardMetaPut                    // set a meta keyspace key
+	ForwardMetaDelete                 // delete a meta keyspace key
+	ForwardGetSequence                // ReadIndex for the meta keyspace: returns the leader's applied WAL sequence
 )
 
 // KVMsg is the wire representation of a key-value record.
@@ -271,7 +274,7 @@ type TxnCondMsg struct {
 
 // TxnOpMsg is the wire representation of a TxnOp (one branch operation).
 type TxnOpMsg struct {
-	Type  uint8  `json:"type"` // 0=put, 1=delete
+	Type  uint8  `json:"type"` // 0=put, 1=delete, 2=meta put, 3=meta delete
 	Key   string `json:"key"`
 	Value []byte `json:"value,omitempty"`
 	Lease int64  `json:"lease,omitempty"`
