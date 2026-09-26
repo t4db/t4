@@ -245,20 +245,17 @@ func (s *S3Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 }
 
 // GetETag returns the object body and its current ETag.
+// The body and the ETag come from the same GET, so they always describe the
+// same version of the object.
 func (s *S3Store) GetETag(ctx context.Context, key string) (*GetWithETag, error) {
-	obj, err := s.client.GetObject(ctx, s.bucket, s.key(key), minio.GetObjectOptions{})
+	body, info, _, err := minio.Core{Client: s.client}.GetObject(ctx, s.bucket, s.key(key), minio.GetObjectOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("object/s3: get-etag %q: %w", key, err)
-	}
-	info, err := obj.Stat()
-	if err != nil {
-		_ = obj.Close()
 		if isNotFound(err) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("object/s3: get-etag %q: %w", key, err)
 	}
-	return &GetWithETag{Body: obj, ETag: info.ETag}, nil
+	return &GetWithETag{Body: body, ETag: info.ETag}, nil
 }
 
 // PutIfAbsent writes to key only if it does not exist (If-None-Match: *).
@@ -302,18 +299,18 @@ func (s *S3Store) getVersioned(ctx context.Context, key, versionID, label string
 	if versionID != "" {
 		opts.VersionID = versionID
 	}
-	obj, err := s.client.GetObject(ctx, s.bucket, s.key(key), opts)
+	// One GET returns the body and surfaces a missing key. A separate stat
+	// first would make minio-go condition the GET on the stat's ETag, which
+	// fails with 412 if the object is overwritten in between, as the
+	// manifest and the leader lock routinely are.
+	body, _, _, err := minio.Core{Client: s.client}.GetObject(ctx, s.bucket, s.key(key), opts)
 	if err != nil {
-		return nil, fmt.Errorf("object/s3: %s %q: %w", label, key, err)
-	}
-	if _, err := obj.Stat(); err != nil {
-		_ = obj.Close()
 		if isNotFound(err) || (versionID != "" && isInvalidVersion(err)) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("object/s3: %s %q: %w", label, key, err)
 	}
-	return obj, nil
+	return body, nil
 }
 
 // isInvalidVersion reports whether err is the S3/MinIO response for a
