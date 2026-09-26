@@ -244,10 +244,11 @@ func (p *pair) state() {
 // workload drives both backends with the same random operations.
 type workload struct {
 	*pair
-	rnd     *rand.Rand
-	leases  []clientv3.LeaseID
-	nextID  clientv3.LeaseID
-	compact int64 // latest compaction revision
+	rnd       *rand.Rand
+	leases    []clientv3.LeaseID
+	nextID    clientv3.LeaseID
+	compact   int64 // latest compaction revision
+	noCompact bool  // skip compaction (it may overtake a replicator)
 }
 
 func (w *workload) key() string { return "/k/" + strconv.Itoa(w.rnd.Intn(16)) }
@@ -369,7 +370,7 @@ func (w *workload) step() {
 		w.desc = "keys only from key"
 		w.get(w.key(), clientv3.WithFromKey(), clientv3.WithKeysOnly())
 	case 18:
-		if w.rnd.Intn(4) != 0 || w.lastRev-w.compact < 10 {
+		if w.noCompact || w.rnd.Intn(4) != 0 || w.lastRev-w.compact < 10 {
 			return
 		}
 		rev := w.lastRev - 5
