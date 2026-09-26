@@ -514,7 +514,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 		}
 	}()
 
-	s.log.Infof("peer: follower %q connected (fromRev=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, len(snapshot))
+	s.log.Infof("peer: follower %q connected (fromRev=%d, walFormat=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, req.WALFormat, len(snapshot))
 
 	var lastHeard atomic.Int64 // unix nanos of the follower's last message
 	lastHeard.Store(time.Now().UnixNano())
