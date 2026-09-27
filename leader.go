@@ -80,6 +80,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	w2.Start(bgCtx)
 
 	peerSrv := peer.NewServer(n.cfg.PeerBufferSize, n.log)
+	peerSrv.SetTerm(rec.Term)
 	lis, err := net.Listen("tcp", n.cfg.PeerListenAddr)
 	if err != nil {
 		_ = w2.Close()
@@ -100,7 +101,10 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.peerLis = lis
 	n.peerGRPC = grpcSrv
 	n.leaderCli.Store(nil) // leader does not forward writes
-	n.extendLease(lockWriteStart)
+	n.extendLease(lockWriteStart, false)
+	n.leasePeers.Store(peerSrv)
+	n.termStartSeq.Store(nextSeq)
+	n.fenceSeq.Store(-1)
 	n.storeRole(roleLeader)
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.nextSeq = nextSeq
@@ -156,24 +160,24 @@ func (n *Node) recoverLocalWALBeforeLeadership(walDir string) error {
 
 // watchLoop keeps this node's leadership valid and detects when it is lost.
 //
-// Every peer.FollowerRetryInterval, and immediately when a follower
-// disconnects, it renews the leader lease (see lease.go): it reads the lock,
-// then rewrites it with a fresh LastSeenNano and CommittedRev, conditioned
-// on the ETag it read, so a TakeOver in between is detected. Renewal never
-// pauses, whether or not followers are connected: a follower that loses its
-// stream must always see a live leader as live. If the lock has been taken,
-// the node steps down.
+// It renews the lock (see lease.go): it reads the lock, then rewrites it with
+// the time the renewal started, how long it stays valid and the election
+// fence, conditioned on the ETag it read, so a TakeOver in between is
+// detected and the node steps down. It renews every slowRenewInterval while
+// every follower is demonstrably hearing it, every fastRenewInterval
+// otherwise, at once when it leaves slow mode, and whenever the commit loop
+// needs the fence moved.
 func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) {
 	var disconnectC <-chan struct{}
 	if n.peerSrv != nil {
 		disconnectC = n.peerSrv.DisconnectC
 	}
-	renewTicker := time.NewTicker(peer.FollowerRetryInterval)
-	defer renewTicker.Stop()
-	// Config.LeaderWatchInterval predates continuous renewal; it now only
-	// adds a renewal of its own.
-	watchTicker := time.NewTicker(n.cfg.LeaderWatchInterval)
-	defer watchTicker.Stop()
+	check := time.NewTicker(leaderCheckInterval)
+	defer check.Stop()
+	slowInterval := slowRenewInterval
+	if w := n.cfg.LeaderWatchInterval; w > 0 && w < slowInterval {
+		slowInterval = w
+	}
 
 	// stepDown fences writes while cancelling the node's background work,
 	// then stops the peer server so followers lose their streams and find
@@ -189,12 +193,11 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		}
 	}
 
-	// renew renews the lease; it returns false after stepping down. It does
-	// not take fenceMu: writes waiting on follower acknowledgements must not
-	// delay it, or a live leader's liveness record goes stale. Safety instead
-	// comes from the lease, which every write acknowledgement and
-	// linearizable read checks.
-	renew := func(reason string) bool {
+	// renew writes the lock once; it returns false after stepping down. It
+	// does not take fenceMu: writes waiting on follower acknowledgements
+	// must not delay it. Safety comes from the lease, which every write
+	// acknowledgement and linearizable read checks.
+	renew := func(reason string, slow bool) bool {
 		// A fenced node (Close in flight, commitLoop dead from a fatal
 		// error, …) must not assert liveness it cannot back up; whichever
 		// path set n.closed tears down the peer server.
@@ -214,40 +217,78 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 			stepDown(reason, fmt.Sprintf("lock superseded (current: %+v)", rec))
 			return false
 		}
+		// Sequence before revision: the revision read afterwards covers it.
+		seq := n.db.Load().LastSequence()
+		rev := n.db.Load().CurrentRevision()
+		if wantSeq, wantRev := n.fenceWanted(); wantSeq > seq {
+			seq = wantSeq
+			if wantRev > rev {
+				rev = wantRev
+			}
+		}
+		ttl := fastTTL
+		if slow {
+			ttl = slowTTL
+		}
 		tCtx, tCancel := context.WithTimeout(ctx, 5*time.Second)
-		err = lock.TouchIfMatch(tCtx, term, n.cfg.AdvertisePeerAddr, etag, n.db.Load().CurrentRevision())
+		err = lock.Renew(tCtx, term, n.cfg.AdvertisePeerAddr, etag, rev, start, ttl)
 		tCancel()
 		if errors.Is(err, object.ErrPreconditionFailed) {
-			stepDown(reason, "touch precondition failed — lock taken")
+			stepDown(reason, "renewal precondition failed — lock taken")
 			return false
 		}
 		if err != nil {
-			n.log.Warnf("t4: leader watch (%s): touch lock: %v", reason, err)
+			n.log.Warnf("t4: leader watch (%s): renew lock: %v", reason, err)
 			return true
 		}
-		n.extendLease(start)
+		n.extendLease(start, slow)
+		n.fenced(seq)
 		return true
 	}
 
-	if !renew("start") {
+	var lastAttempt time.Time
+	if !renew("start", false) {
 		return
 	}
+	lastAttempt = time.Now()
 	for {
+		reason := ""
 		select {
-		case <-renewTicker.C:
-			if !renew("renew") {
-				return
-			}
-		case <-watchTicker.C:
-			if !renew("periodic") {
-				return
-			}
+		case <-check.C:
 		case <-disconnectC:
-			n.log.Infof("t4: leader watch: follower disconnected — renewing lease")
-			if !renew("disconnect") {
-				return
-			}
+			reason = "disconnect"
+		case <-n.fenceReqC:
+			reason = "fence"
 		case <-ctx.Done():
+			return
+		}
+		now := time.Now()
+		slow := n.slowSafe(now)
+		g := n.lease.Load()
+		interval := fastRenewInterval
+		if slow {
+			interval = slowInterval
+		}
+		switch {
+		case now.Sub(lastAttempt) >= interval:
+			if reason == "" {
+				reason = "renew"
+			}
+		case g != nil && g.slow && !slow:
+			// The last renewal was slow but a follower may no longer
+			// hear this leader: the lease now runs from that renewal
+			// for fastTTL only and may have ended. Renew at once.
+			reason = "fast mode"
+		case n.fencePending():
+			reason = "fence"
+		default:
+			continue
+		}
+		if now.Sub(lastAttempt) < leaderCheckInterval {
+			continue // at most one attempt per check interval
+		}
+		lastAttempt = now
+		if !renew(reason, slow) {
 			return
 		}
 	}
@@ -344,6 +385,10 @@ func (n *Node) commitLoop(ctx context.Context) {
 	// Tracks the last durability mode pushed to the WAL so the toggle only
 	// fires on transitions rather than on every batch.
 	degraded := false
+
+	// Wait mode none opts out of replication durability, and with it of the
+	// election fence (lease.go).
+	fenceWrites := peer.WaitMode(n.cfg.FollowerWaitMode) != peer.WaitNone
 
 	defer func() {
 		// Fence the node first so new writers fail fast.
@@ -474,6 +519,11 @@ func (n *Node) commitLoop(ctx context.Context) {
 			if waitErr := n.peerSrv.WaitForFollowers(ctx, maxRev, peer.WaitMode(n.cfg.FollowerWaitMode)); waitErr != nil {
 				err = waitErr
 			}
+			// Election fence (lease.go): give every connected follower a
+			// moment to catch up before resorting to a lock write.
+			if err == nil && fenceWrites && n.fenceNeeded(maxRev) {
+				n.peerSrv.WaitForAll(ctx, maxRev, fenceAckWait)
+			}
 			quorumEnd = time.Now()
 		}
 		batchCancel() // release watcher goroutines
@@ -497,6 +547,15 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// leak stale pending revisions into a racing follow-up write.
 		n.clearPendingBatch(batch)
 
+		// A node that may lack this batch must be fenced out of elections
+		// before the batch is acknowledged. The batch is committed either
+		// way; a failure only withholds the acknowledgement.
+		ackErr := err
+		if err == nil && fenceWrites && n.peerSrv != nil && n.fenceNeeded(batch[len(batch)-1].entry.Sequence()) {
+			last := batch[len(batch)-1].entry
+			ackErr = n.awaitFence(ctx, last.Sequence(), last.Revision)
+		}
+
 		// Signal all callers, stamping the phase timings first. await turns
 		// these into child spans of the caller's span; writing them here and
 		// reading them there is safe because the done send below establishes
@@ -505,7 +564,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 			req.walStart, req.walEnd = walStart, walEnd
 			req.quorumStart, req.quorumEnd = quorumStart, quorumEnd
 			req.batchSize = len(batch)
-			req.done <- err
+			req.done <- ackErr
 		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

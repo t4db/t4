@@ -86,7 +86,7 @@ func TestTakeOverAfterLeaderDead(t *testing.T) {
 	}
 
 	// Simulate: node-2 detects leader dead via stream → calls TakeOver.
-	rec2, won2, err := l2.TakeOver(context.Background(), rec1.Term, rec1.CommittedRev)
+	rec2, won2, err := l2.TakeOver(context.Background(), rec1.Term, rec1.CommittedRev, nil)
 	if err != nil {
 		t.Fatalf("TakeOver: %v", err)
 	}
@@ -119,11 +119,11 @@ func TestTakeOverRace(t *testing.T) {
 	}
 	ch := make(chan result, 2)
 	go func() {
-		rec, won, _ := f1.TakeOver(context.Background(), 1, 0)
+		rec, won, _ := f1.TakeOver(context.Background(), 1, 0, nil)
 		ch <- result{rec, won}
 	}()
 	go func() {
-		rec, won, _ := f2.TakeOver(context.Background(), 1, 0)
+		rec, won, _ := f2.TakeOver(context.Background(), 1, 0, nil)
 		ch <- result{rec, won}
 	}()
 
@@ -168,7 +168,7 @@ func TestTermMonotonicity(t *testing.T) {
 		// Simulate a takeover on each iteration.
 		l := newLockShared(store, "node-1", "addr")
 		time.Sleep(time.Millisecond) // ensure distinct wall-clock instants
-		rec, won, err := l.TakeOver(context.Background(), lastTerm, committedRev)
+		rec, won, err := l.TakeOver(context.Background(), lastTerm, committedRev, nil)
 		if err != nil || !won {
 			t.Fatalf("iter %d: TakeOver won=%v err=%v", i, won, err)
 		}
@@ -188,7 +188,7 @@ func TestLeaderWatchDetectsSupersession(t *testing.T) {
 	rec1, _, _ := l1.TryAcquire(context.Background(), 0, 0)
 
 	// node-2 takes over.
-	rec2, won, _ := l2.TakeOver(context.Background(), rec1.Term, rec1.CommittedRev)
+	rec2, won, _ := l2.TakeOver(context.Background(), rec1.Term, rec1.CommittedRev, nil)
 	if !won {
 		t.Fatal("node-2 should win TakeOver")
 	}

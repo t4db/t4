@@ -15,7 +15,7 @@ This document describes how T4 behaves under various failure conditions, what da
 - No data is lost because nothing was durably stored.
 
 **Recovery:**
-- A follower wins election in ~6 s (2 × `FollowerRetryInterval` after `FollowerMaxRetries`; ~0.3 s with a graceful shutdown broadcast).
+- A follower wins election in ~7–10 s (it waits 7 s after it last heard the leader, and until its reconnect attempts are exhausted; ~0.3 s with a graceful shutdown broadcast).
 - The new leader loads the latest S3 checkpoint and replays any WAL segments ahead of it.
 - Clients retry against the new leader.
 
@@ -86,7 +86,8 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 
 **Outcome:**
 - WAL segment uploads and checkpoints queue in the background.
-- The leader renews its lock in S3 every 2 s. Each successful renewal extends its lease to 4 s after the renewal started. Once renewals fail for longer than that, the lease expires. The leader then stops acknowledging writes and serving linearizable reads, and returns `ErrNoLeader` (etcd: `Unavailable`), because it can no longer rule out that another node has taken over.
+- The leader cannot renew its lock. While its followers still hear it, none of them may take over, and the leader keeps serving on its last renewal: until 2 s before that renewal's validity ends, at most about a minute. After that it stops acknowledging writes and serving linearizable reads, and returns `ErrNoLeader` (etcd: `Unavailable`), because it can no longer rule out that another node has taken over.
+- Writes that need the election fence moved (after a follower leaves or falls behind) fail with the same error while S3 is down.
 - Followers cannot write a new lock either, so no election succeeds and there is no split brain. Serializable reads keep working on every node.
 
 **Recovery:**
@@ -120,7 +121,7 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 **Scenario:** a follower cannot reach the leader or S3, but the leader can still reach S3 and the other followers.
 
 1. Follower exhausts `--follower-max-retries` reconnect attempts.
-2. Follower reads the S3 lock. The leader renews `LastSeenNano` every 2 s, so it is fresh and the follower **does not promote**.
+2. Follower reads the S3 lock. The leader noticed the silence through missed heartbeats and renews the lock every 2 s, so the follower finds it fresh and **does not promote**.
 3. Leader continues writing with the remaining nodes.
 4. When the partition heals, the follower reconnects and resyncs from the leader's ring buffer.
 
@@ -132,17 +133,16 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 
 ### Leader partitioned from followers and S3
 
-1. The leader's lock renewals fail. Within 4 s its lease expires, and it stops acknowledging writes and serving linearizable reads.
-2. After 6 s without a renewal, the lock goes stale.
-3. Followers race to write a new lock with `If-Match: <etag>`. Only one wins.
-4. The new leader begins serving. By then the old leader has already stopped serving. When it reaches S3 again, it sees the new lock and steps down.
-5. The old leader's writes that were not acknowledged are dropped. A client retrying them gets an error, never a false success.
+1. The leader's lock renewals fail and it stops hearing its followers. Its lease falls back to 4 s after its last renewal, and it stops acknowledging writes and serving linearizable reads.
+2. 7 s after they last heard the leader, and once the lock has not been renewed for 6 s, followers race to write a new lock with `If-Match: <etag>`. Only one wins.
+3. The new leader begins serving. By then the old leader has already stopped serving. When it reaches S3 again, it sees the new lock and steps down.
+4. The old leader's writes that were not acknowledged are dropped. A client retrying them gets an error, never a false success.
 
-The lease relies on clocks: nodes' clocks may drift apart by less than 2 s over a 6 s window. NTP keeps drift far below that.
+The lease relies on clocks: any two nodes' clocks must differ by less than 2 s. NTP keeps them far closer.
 
-**Failover time:** ~6 s with default settings (2 × `FollowerRetryInterval` = 4 s, plus election time). ~0.3 s with graceful shutdown broadcast.
+**Failover time:** ~7 s with default settings. ~0.3 s with graceful shutdown broadcast.
 
-**Tested by:** `TestNetworkPartitionNoSplitBrain`, `TestFailoverTime`, `TestDeposedLeaderStopsServing`
+**Tested by:** `TestNetworkPartitionNoSplitBrain`, `TestFailoverTime`, `TestDeposedLeaderStopsServing`, `TestLeaderWithoutObjectStoreKeepsServing`, `TestTakeOverChecksTheRecordItReplaces`
 
 ---
 
@@ -206,7 +206,7 @@ T4_CHAOS_ROUNDS=100 go test -run TestChaos -timeout 600s
 |---|---|
 | Graceful leader shutdown (broadcast) | ~12 ms |
 | Graceful leader shutdown, follower missed the broadcast | next takeover attempt (the released lock carries no liveness to wait out) |
-| Crash failover (default settings) | ~6 s (2 × `FollowerRetryInterval` after `FollowerMaxRetries`) |
+| Crash failover (default settings) | ~7–10 s (7 s after followers last heard the leader, and their reconnect attempts exhausted) |
 | Follower reconnect after network heal | < 1 s |
 
 Tested by `TestFailoverTime`.

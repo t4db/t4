@@ -146,7 +146,7 @@ func (n *Node) lockReleased(ctx context.Context, lock *election.Lock) bool {
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	rec, err := lock.Read(rctx)
-	return err == nil && rec != nil && rec.LastSeenNano == 0
+	return err == nil && rec != nil && rec.Released()
 }
 
 // attemptPromotion tries to take over the leader lock after the stream dies.
@@ -162,29 +162,43 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Read the current lock before attempting TakeOver. If the leader recently
-	// wrote a liveness touch (LastSeenNano is fresh) AND the shutdown was not
-	// graceful, the leader may still have other followers and we are an
-	// isolated minority node — back off to prevent split-brain.
-	// On graceful shutdown we skip this check: the leader intentionally left,
-	// so its fresh LastSeenNano must not block election.
+	// Unless the leader left gracefully, it may only be presumed gone under
+	// the rules of mayTakeOver (lease.go), which depend on whether and when
+	// this node last heard it. TakeOver re-applies them to the record it
+	// replaces; checking here first avoids a pointless catch-up.
+	var heardTerm uint64
+	var heardAt time.Time
+	if cli := n.leaderCli.Load(); cli != nil {
+		heardTerm, heardAt = cli.LastHeard()
+	}
+	var allow func(*election.LockRecord) bool
+	if !graceful {
+		allow = func(rec *election.LockRecord) bool {
+			return mayTakeOver(rec, heardTerm, heardAt, time.Now())
+		}
+	}
 	existing, err := lock.Read(ctx)
 	if err != nil {
 		n.log.Errorf("t4: takeover: read lock: %v", err)
 		return nil, false
 	}
-	if !graceful && existing != nil && existing.LastSeenNano > 0 {
-		age := time.Since(time.Unix(0, existing.LastSeenNano))
-		if age < peer.LeaderLivenessTTL {
-			n.log.Infof("t4: takeover: leader liveness is fresh (%v ago) — backing off to avoid split-brain", age.Round(time.Millisecond))
-			// Back off from election, but do not keep retrying a stale endpoint.
-			// If the lock advertises a leader address, switch followLoop to it.
-			if existing.LeaderAddr != "" {
-				n.observeTerm(existing.Term)
-				return peer.NewClient(existing.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log, n.cfg.TracerProvider), false
+	if allow != nil && existing != nil && existing.NodeID != n.cfg.NodeID && !allow(existing) {
+		n.log.Infof("t4: takeover: leader may still be serving (renewed %v ago, valid until %v) — backing off to avoid split-brain",
+			time.Since(existing.Renewed()).Round(time.Millisecond), existing.ValidUntil().Format(time.RFC3339))
+		// Back off from election, but do not keep retrying a stale endpoint.
+		// If the lock advertises a leader address, switch followLoop to it.
+		if existing.LeaderAddr != "" {
+			n.observeTerm(existing.Term)
+			cli := peer.NewClient(existing.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log, n.cfg.TracerProvider)
+			// Still the leader this node knows: keep counting from when it
+			// last heard it, or a dead leader would look unknown and
+			// failover would wait out its full ValidUntil.
+			if existing.Term == heardTerm {
+				cli.SetLastHeard(heardTerm, heardAt)
 			}
-			return nil, false
+			return cli, false
 		}
+		return nil, false
 	}
 	// Revision fence: refuse to become leader if we are behind the last known
 	// committed revision. A node missing entries would either drop them (data
@@ -236,7 +250,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	}
 
 	takeoverStart := time.Now()
-	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), n.db.Load().CurrentRevision())
+	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), n.db.Load().CurrentRevision(), allow)
 	if err != nil {
 		n.log.Errorf("t4: takeover election error: %v", err)
 		return nil, false

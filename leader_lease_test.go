@@ -132,10 +132,9 @@ func TestLeaderHeartbeatNotBlockedByPendingWrites(t *testing.T) {
 	}
 }
 
-// TestDeposedLeaderStopsServing: a leader cut off from object storage cannot
-// renew its lock, so after the liveness TTL another node may take over. The
-// old leader, still reaching its followers, must by then have stopped
-// acknowledging writes and serving linearizable reads.
+// TestDeposedLeaderStopsServing: a leader cut off from object storage and
+// from its followers is replaced once its followers stop hearing it. By then
+// it must have stopped acknowledging writes and serving linearizable reads.
 func TestDeposedLeaderStopsServing(t *testing.T) {
 	cluster := newFailoverCluster(t, 3)
 	leader := cluster.leader(t, 10*time.Second)
@@ -153,15 +152,11 @@ func TestDeposedLeaderStopsServing(t *testing.T) {
 		}
 	}
 
-	// The leader loses object storage; its followers stay connected.
 	cluster.stores[leaderIdx].block()
-	time.Sleep(peer.LeaderLivenessTTL + 2*time.Second)
-
-	candidate := survivors[0]
-	lock := election.NewLock(cluster.shared, candidate.cfg.NodeID, candidate.cfg.AdvertisePeerAddr)
-	if _, promoted := candidate.attemptPromotion(candidate.bgCtx, lock, false); !promoted {
-		t.Fatal("precondition: expected the takeover from a leader without object storage to succeed")
-	}
+	cluster.proxies[leaderIdx].block()
+	start := time.Now()
+	waitForLeaderNodeLocal(t, survivors, 30*time.Second)
+	t.Logf("a survivor took over after %v", time.Since(start).Round(time.Millisecond))
 
 	wctx, wcancel := context.WithTimeout(ctx, 3*time.Second)
 	defer wcancel()
@@ -184,6 +179,42 @@ func TestDeposedLeaderStopsServing(t *testing.T) {
 	failing := TxnRequest{Conditions: []TxnCondition{{Key: "/k", Target: TxnCondVersion, Result: TxnCondEqual, Version: 99}}}
 	if _, err := leader.Txn(wctx, failing); !errors.Is(err, ErrNoLeader) {
 		t.Fatalf("deposed leader answered a failing Txn with %v, want ErrNoLeader", err)
+	}
+}
+
+// TestLeaderWithoutObjectStoreKeepsServing: a leader that loses object
+// storage but still hears all its followers stays the leader on its slow
+// lease; none of its followers may take over while they hear it.
+func TestLeaderWithoutObjectStoreKeepsServing(t *testing.T) {
+	cluster := newFailoverCluster(t, 3)
+	leader := cluster.leader(t, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rev, err := leader.Put(ctx, "/k", []byte("v"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	survivors := cluster.survivors(leader)
+	for _, n := range survivors {
+		if err := n.WaitForRevision(ctx, rev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Let the leader settle into slow mode with a fence covering the write.
+	time.Sleep(2 * time.Second)
+	if _, err := leader.Put(ctx, "/k", []byte("v2"), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	cluster.stores[cluster.indexOf(leader)].block()
+	time.Sleep(peer.LeaderLivenessTTL + 2*time.Second)
+	candidate := survivors[0]
+	lock := election.NewLock(cluster.shared, candidate.cfg.NodeID, candidate.cfg.AdvertisePeerAddr)
+	if _, promoted := candidate.attemptPromotion(candidate.bgCtx, lock, false); promoted {
+		t.Fatal("a follower that hears the leader took over")
+	}
+	if _, err := leader.Put(ctx, "/k", []byte("v3"), 0); err != nil {
+		t.Fatalf("leader with its followers but without object storage stopped serving: %v", err)
 	}
 }
 

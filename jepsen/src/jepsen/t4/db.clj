@@ -86,9 +86,6 @@
       ;; cross-node operations inconsistent from Knossos's perspective.
       :--peer-listen         (str "0.0.0.0:" peer-port)
       :--advertise-peer      (str (name node) ":" peer-port)
-      ;; Shorten the leader-watch interval so a zombie/split-brain leader is
-      ;; detected within ~10 s instead of the default 5 minutes.
-      :--leader-watch-interval-sec 10
       :--log-level           "warn")))
 
 (defn stop!

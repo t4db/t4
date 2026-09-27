@@ -66,6 +66,11 @@ type Client struct {
 	// attempt on a dead connection times out instead of hanging.
 	leaderHeartbeats atomic.Bool
 
+	// heardTerm and heardNano record the leader's term and when (local
+	// clock) this follower last received a heartbeat from it.
+	heardTerm atomic.Uint64
+	heardNano atomic.Int64
+
 	log peerLogger
 }
 
@@ -83,6 +88,23 @@ func NewClient(leaderAddr, nodeID string, maxRetries int, tlsCreds credentials.T
 		log = stdlibPeerLogger{}
 	}
 	return &Client{leaderAddr: leaderAddr, nodeID: nodeID, maxRetries: maxRetries, tlsCreds: tlsCreds, tp: tp, log: log}
+}
+
+// LastHeard returns the term of the leader this client last received a
+// heartbeat from and when. term is 0 if it never received one.
+func (c *Client) LastHeard() (term uint64, at time.Time) {
+	nano := c.heardNano.Load()
+	if nano == 0 {
+		return 0, time.Time{}
+	}
+	return c.heardTerm.Load(), time.Unix(0, nano)
+}
+
+// SetLastHeard seeds LastHeard, for a client that replaces another one
+// following the same leader.
+func (c *Client) SetLastHeard(term uint64, at time.Time) {
+	c.heardTerm.Store(term)
+	c.heardNano.Store(at.UnixNano())
 }
 
 // SetLeaderGoneCheck installs a check that Follow runs after each failed
@@ -219,8 +241,8 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 	// Once this leader is known to send heartbeats, a watchdog cancels the
 	// attempt when it goes silent. It runs from before the stream opens:
 	// on a dead connection opening the stream can block too.
-	var lastRecv atomic.Int64 // unix nanos of the last message from the leader
-	lastRecv.Store(time.Now().UnixNano())
+	var lastRecv atomic.Int64 // unix nanos of the last message from the leader; 0 until the first
+	streamStart := time.Now()
 	var silent atomic.Bool
 	go func() {
 		t := time.NewTicker(HeartbeatInterval)
@@ -230,8 +252,11 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 			case <-t.C:
 				// Buffered messages mean the leader was heard; the main
 				// loop below just has not caught up with them yet.
-				if c.leaderHeartbeats.Load() && len(msgC) == 0 &&
-					time.Since(time.Unix(0, lastRecv.Load())) > HeartbeatTimeout {
+				ref := streamStart
+				if heard := lastRecv.Load(); heard != 0 {
+					ref = time.Unix(0, heard)
+				}
+				if c.leaderHeartbeats.Load() && len(msgC) == 0 && time.Since(ref) > HeartbeatTimeout {
 					silent.Store(true)
 					streamCancel()
 					return
@@ -264,8 +289,11 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 	c.log.Infof("peer: connected to leader %s (fromRev=%d)", c.leaderAddr, fromRev)
 
 	// ACKs double as this follower's heartbeats: every HeartbeatInterval it
-	// repeats its latest ACK, which the leader treats as a no-op. gRPC
-	// forbids concurrent sends on one stream, hence sendMu.
+	// repeats its latest ACK, which the leader treats as a no-op. It sends
+	// them only while it hears the leader, so the leader hearing this
+	// follower proves the follower heard it less than HeartbeatTimeout
+	// earlier; the leader's lease relies on that. gRPC forbids concurrent
+	// sends on one stream, hence sendMu.
 	var sendMu sync.Mutex
 	var ackedSeq atomic.Int64
 	ackedSeq.Store(fromRev - 1)
@@ -280,6 +308,10 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 		for {
 			select {
 			case <-t.C:
+				heard := lastRecv.Load()
+				if heard == 0 || time.Since(time.Unix(0, heard)) >= HeartbeatTimeout {
+					continue
+				}
 				if err := sendAck(ackedSeq.Load()); err != nil {
 					return
 				}
@@ -304,6 +336,8 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 			}
 			if msg.Heartbeat {
 				c.leaderHeartbeats.Store(true)
+				c.heardTerm.Store(msg.Term)
+				c.heardNano.Store(time.Now().UnixNano())
 				continue
 			}
 			select {

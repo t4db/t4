@@ -205,3 +205,38 @@ func TestFollowerKeepsIdleStreamToOldLeader(t *testing.T) {
 		t.Fatal("entry not delivered on the long-idle stream")
 	}
 }
+
+// TestLeaderDropsStalledFollower: a follower whose WAL writes stall keeps
+// heartbeating, so it looks alive, but it stops acknowledging. The leader
+// must drop it rather than keep writes waiting for it indefinitely.
+func TestLeaderDropsStalledFollower(t *testing.T) {
+	srv := peer.NewServer(1000, nil)
+	cli := peer.NewClient(startServer(t, srv), "follower-1", 0, nil, nil, nil)
+	defer cli.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stall := make(chan struct{})
+	defer close(stall)
+	go func() {
+		_ = cli.Follow(ctx, 1, func([]wal.Entry) error {
+			select { // the disk hangs
+			case <-stall:
+			case <-ctx.Done():
+			}
+			return ctx.Err()
+		}, func([]wal.Entry) error { return nil })
+	}()
+	waitConnected(t, srv, 1)
+	time.Sleep(2 * peer.HeartbeatInterval) // heartbeats flowing
+
+	srv.Broadcast(makeEntry(1))
+	srv.BroadcastCommit(1, 1)
+	waitCtx, waitCancel := context.WithTimeout(t.Context(), peer.AckProgressTimeout+3*time.Second)
+	defer waitCancel()
+	start := time.Now()
+	if err := srv.WaitForFollowers(waitCtx, 1, peer.WaitAll); err != nil {
+		t.Fatalf("write still waiting for a stalled follower: %v", err)
+	}
+	t.Logf("stalled follower dropped after %v", time.Since(start).Round(time.Millisecond))
+}

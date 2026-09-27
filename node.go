@@ -214,9 +214,19 @@ type Node struct {
 	// follower-only (write forwarding); updated atomically when leader changes.
 	leaderCli atomic.Pointer[peer.Client]
 
-	// leaseDeadline is when this node's leader lease expires (see lease.go);
-	// nil until it first holds the lock.
-	leaseDeadline atomic.Pointer[time.Time]
+	// lease is this node's last successful lock write as leader (see
+	// lease.go); nil until it first holds the lock.
+	lease atomic.Pointer[leaseGrant]
+	// leasePeers is the peer server whose followers the lease depends on;
+	// nil unless leader.
+	leasePeers atomic.Pointer[peer.Server]
+	// fenceSeq is the sequence covered by the CommittedRev of this leader's
+	// last lock write; termStartSeq the last sequence it held when its term
+	// began. fence and fenceReqC coordinate fence moves (see lease.go).
+	fenceSeq     atomic.Int64
+	termStartSeq atomic.Int64
+	fence        fenceState
+	fenceReqC    chan struct{}
 
 	entriesSinceCheckpoint int64
 	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
@@ -657,7 +667,9 @@ func Open(cfg Config) (*Node, error) {
 		pending:     make(map[string]pendingKV),
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,
+		fenceReqC:   make(chan struct{}, 1),
 	}
+	n.fence.done = make(chan struct{})
 	n.log = log
 	n.cp = cp
 	n.db.Store(db)

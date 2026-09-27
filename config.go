@@ -209,9 +209,9 @@ type Config struct {
 	// server. Defaults to PeerListenAddr.
 	AdvertisePeerAddr string
 
-	// LeaderWatchInterval adds an extra lock renewal at this interval. The
-	// leader already renews its lock every 2 seconds, so this setting only
-	// matters if set below that. Default: 5 minutes.
+	// LeaderWatchInterval caps the interval at which a leader that hears all
+	// its followers renews its lock (20 seconds). Lowering it costs more
+	// object-storage requests and gains nothing for safety. Default: 5 minutes.
 	LeaderWatchInterval time.Duration
 
 	// FollowerMaxRetries is the number of consecutive stream failures a follower

@@ -106,27 +106,34 @@ t4 run \
 ### Leader election and failover
 
 - On startup each node reads the S3 lock. If absent, it issues an **atomic conditional PUT** (`If-None-Match: *`); only
-  one concurrent writer wins. The winner becomes the leader and records `LastSeenNano = now()` in the lock so followers
+  one concurrent writer wins. The winner becomes the leader and stamps the lock as renewed now so followers
   see it as immediately alive.
 - The leader streams WAL entries to all followers over the peer port (default 3380). Followers apply entries and serve
   local reads.
-- A follower that observes `--follower-max-retries` consecutive stream failures (~10 s at default 5 × 2 s) checks the
-  lock's `LastSeenNano`. If stale (older than `LeaderLivenessTTL` = 6 s), it attempts a takeover using
-  `If-Match: <etag>` — only the candidate that read the same ETag wins the race. The new leader records its own address
-  and `LastSeenNano`.
-- The leader renews the lock every 2 s for as long as it is leader, and immediately on a follower disconnect. Each
-  renewal reads the lock **with its ETag**, then — if still the owner — rewrites `LastSeenNano` using
+- Leader and followers exchange heartbeats on the WAL stream every 500 ms; either side drops a stream it has not heard
+  from for 2 s.
+- A follower that observes `--follower-max-retries` consecutive stream failures checks the lock. If it heard the
+  leader until recently, it may take over once it has not heard it for 7 s and the lock has not been renewed for 6 s;
+  any other node waits until the lock's validity has passed. The takeover uses `If-Match: <etag>` — only the candidate
+  that read the same ETag wins the race, and the check is made on that same record.
+- The leader renews the lock by reading it **with its ETag** and — if still the owner — rewriting it with
   `If-Match: <etag>`. If the renewal is rejected (`ErrPreconditionFailed`), a new leader has taken over: the old leader
-  steps down immediately.
-- The leader holds a **lease**: it acknowledges writes and serves linearizable reads only while its last successful
-  renewal started less than 4 s ago (`LeaderLivenessTTL` minus a 2 s safety margin). A leader that cannot reach S3
-  therefore stops serving before any follower is allowed to take over. This relies on node clocks differing by less
-  than 2 s; keep NTP running on all nodes.
+  steps down immediately. While it hears every follower it renews every 20 s (valid 60 s); as soon as a follower goes
+  silent or leaves, every 2 s (valid 6 s), until 5 minutes after the follower is back or gone.
+- The leader holds a **lease**: it acknowledges writes and serves linearizable reads only while its lease holds (see
+  [Consistency](consistency.md#split-brain-prevention)). A leader cut off from S3 and from its followers therefore
+  stops serving before any follower may take over; one cut off from S3 only keeps serving, for up to about a minute,
+  since its followers still hear it. This relies on node clocks differing by less than 2 s; keep NTP running on all
+  nodes.
+- Before acknowledging a write the leader makes sure no node lacking it can win an election: every connected follower
+  has it, or the committed revision recorded in the lock covers it (one extra lock write when a follower leaves or
+  falls more than 1 s behind).
 - Writes sent to a follower are automatically forwarded to the current leader and the result is returned to the caller.
 
-Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). Lease renewal
-costs 1 GET + 1 conditional PUT on the lock every 2 s per cluster (≈ 43,000 of each per day). In cluster mode, writes
-additionally require quorum ACK from all connected followers before returning to the caller.
+Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). A healthy cluster
+renews the lock every 20 s (≈ 4,300 GETs and conditional PUTs per day); 2 s renewals happen only while a follower is
+silent. In cluster mode, writes additionally require ACKs from followers per `--follower-wait-mode` before returning
+to the caller.
 
 ### Adding a node to a running cluster
 
@@ -852,32 +859,34 @@ ACK across nodes is never lost even if all S3 state is gone.
 
 ### Network partitions (cluster mode)
 
-T4 uses S3 as the split-brain arbiter. The leader refreshes a `LastSeenNano` timestamp in the S3 leader lock every
-`FollowerRetryInterval` (2 s) for as long as it is leader. A follower only promotes itself if it cannot reach the leader
-**and** the lock is older than `LeaderLivenessTTL` (6 s). The leader stops serving once it has gone 4 s without a
-successful renewal, so it never serves alongside a new leader.
+T4 uses S3 as the split-brain arbiter, and heartbeats to keep S3 traffic low. The leader renews the lock every 20 s
+while it hears every follower and every 2 s otherwise. A follower that lost the leader promotes only once it has not
+heard it for 7 s and the lock has not been renewed for 6 s, which a live leader prevents by renewing every 2 s as soon
+as it notices the silence. A leader that cannot renew stops serving before anyone may take over.
 
 **Follower partitioned from leader, leader can still reach S3:**
 
 1. Follower loses the peer stream; both sides notice within 2 s through missed heartbeats.
-2. Leader keeps refreshing `LastSeenNano` every 2 s either way.
-3. Follower exhausts `--follower-max-retries` reconnect attempts (~4 s at the default of 2 × 2 s).
-4. Follower reads the S3 lock — `LastSeenNano` is ≤ 2 s old → backs off, **does not promote**.
-5. Follower keeps retrying the peer connection; leader keeps writing.
-6. When the partition heals the follower reconnects and resyncs. **No split-brain. No data loss.**
+2. Leader renews the lock at once and then every 2 s.
+3. Follower exhausts `--follower-max-retries` reconnect attempts and reads the lock — renewed within 2 s → backs off,
+   **does not promote**.
+4. Follower keeps retrying the peer connection; leader keeps writing.
+5. When the partition heals the follower reconnects and resyncs. **No split-brain. No data loss.**
 
-**Leader partitioned from S3:**
+**Leader partitioned from S3, followers still connected:**
 
-1. Leader can no longer refresh `LastSeenNano`.
-2. Within 4 s of its last successful refresh its lease lapses: it stops acknowledging writes and serving linearizable
-   reads, and returns "no leader" errors instead.
-3. After `LeaderLivenessTTL` (6 s) the lock goes stale. A follower that has lost the leader attempts a conditional PUT
+The leader keeps serving: its followers hear it and none may take over. Its lease lasts until 2 s before its last
+renewal's validity ends (at most about a minute). When S3 is back, the next renewal extends it.
+
+**Leader partitioned from S3 and from its followers:**
+
+1. Followers stop hearing the leader; the leader stops hearing them. Its lease falls back to 4 s after its last
+   renewal: it stops acknowledging writes and serving linearizable reads, and returns "no leader" errors instead.
+2. 7 s after they last heard it, and once the lock has not been renewed for 6 s, a follower attempts a conditional PUT
    (`If-Match: <etag>`) on the lock — only one candidate wins this atomic race.
-4. New leader begins streaming WAL entries.
-5. Former leader keeps retrying; once it reaches S3 again it sees the new lock and steps down.
-6. The election fence (the committed revision the leader records at each refresh) keeps a node that is behind the
-   former leader from taking over. A write acknowledged after the leader's last successful refresh (at most 4 s of
-   writes) can still be lost if the node that takes over never received it.
+3. New leader begins streaming WAL entries.
+4. Former leader keeps retrying; once it reaches S3 again it sees the new lock and steps down.
+5. The election fence keeps every node lacking an acknowledged write from taking over.
 
 **Writes during a follower partition:**
 

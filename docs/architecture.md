@@ -153,25 +153,27 @@ Heartbeats are negotiated when the stream opens, so nodes with and without heart
 
 **TakeOver (follower promoting itself):**
 1. Follower detects a dead leader when the WAL gRPC stream fails, or goes silent, `FollowerMaxRetries` consecutive times.
-2. Before attempting takeover, the follower reads the current lock. If `LastSeenNano` is younger than `LeaderLivenessTTL` (3 × `FollowerRetryInterval` = 6 s), the leader was recently alive — the follower is an isolated minority and backs off.
+2. Before attempting takeover, the follower checks the current lock. A follower that heard the leader's heartbeats (its term) within the last 5 minutes may promote once it has not heard it for 7 s and the lock has not been renewed for 6 s. Any other node waits until the lock's validity (`ValidUntilNano`) has passed. Otherwise the leader may still be serving and the follower backs off. The check is repeated in `TakeOver` on the record the conditional write replaces.
 3. If the lock has already advanced to a term higher than the follower's `floorTerm` (another candidate already won), the follower backs off and follows the new winner.
 4. Otherwise: read the lock ETag, then `PUT` with `If-Match: <etag>`. Only the candidate that read the same ETag wins; all others get a precondition failure and re-read to find the new leader.
 
 **Lease and stepdown:**
-- For as long as it is leader, the leader renews the lock every `FollowerRetryInterval` (2 s), and immediately when a follower disconnects: it reads the lock **with its ETag** and — if still the owner — rewrites `LastSeenNano = now()` and its committed revision using `If-Match: <etag>`. If a follower won a TakeOver between the Read and the write, the conditional PUT fails with `ErrPreconditionFailed` and the leader steps down immediately.
-- Renewal does not pause while followers are connected, and it does not wait for in-flight writes: a follower cut off by a partition must always find a live leader's `LastSeenNano` fresh, even if the leader never noticed the partition.
-- Each successful renewal extends the leader's **lease** to the time the renewal started plus `LeaderLivenessTTL` − 2 s. The leader acknowledges writes and serves linearizable reads (its own, and the ReadIndex it answers for followers) only while the lease is valid; otherwise it returns a "no leader" error. A TakeOver needs `LastSeenNano` to be 6 s old, so a leader that cannot renew has stopped serving at least 2 s before anyone can replace it, as long as node clocks differ by less than those 2 s.
-- If the lock no longer points to this node at any renewal, it steps down. The `LeaderWatchInterval` ticker adds an extra renewal but is no longer needed for detection.
+- The leader renews the lock by reading it **with its ETag** and — if still the owner — rewriting it with `If-Match: <etag>`: the time the renewal started (`RenewedNano`), until when it is valid (`ValidUntilNano`) and its committed revision. If a follower won a TakeOver in between, the conditional PUT fails with `ErrPreconditionFailed` and the leader steps down immediately. `LastSeenNano` is kept at `ValidUntilNano` − 6 s, so nodes of earlier releases back off exactly as long.
+- **Slow mode:** while every follower of this term is connected, exchanges heartbeats and was heard within 2 s, and none left in the last 5 minutes (without a GoodBye), the leader renews every 20 s and the lock stays valid for 60 s. Followers heartbeat only while they hear the leader, so none of them is about to take over.
+- **Fast mode** otherwise: the leader renews at once, then every 2 s, valid for 6 s. A follower that lost the leader waits 7 s, longer than the leader needs to notice the silence, and then finds the lock renewed within the last 2 s.
+- The leader's **lease** ends 2 s (the clock-skew margin) before the validity of its last renewal, and, when not in slow mode, 4 s after that renewal started. It acknowledges writes and serves linearizable reads (its own, and the ReadIndex it answers for followers) only while the lease holds; otherwise it returns a "no leader" error.
+- **Election fence:** before acknowledging a write, the leader makes sure that every node that may lack it is blocked by the committed revision recorded in the lock: connected followers that have not acknowledged it, followers that left, and nodes it never heard from. It waits up to 1 s for every connected follower, then moves the fence with a lock write. A follower that makes no ACK progress for 5 s is dropped.
+- `LeaderWatchInterval` caps the slow renewal interval.
 
 **S3 request budget:**
-Each renewal costs 1 GET + 1 conditional PUT, so a leader issues about 1 GET + 1 PUT every 2 s (≈ 43,000 of each per day), independently of load. Election writes otherwise happen only at startup and on takeover.
+Each renewal costs 1 GET + 1 conditional PUT. A healthy cluster renews every 20 s (≈ 4,300 of each per day). On top of that come one lock write per term start and per follower that leaves or falls behind, and 2 s renewals while a follower is silent and for 5 minutes after. Election writes otherwise happen only at startup and on takeover.
 
 ### CAP properties
 
 T4 is a **CP** system (Consistent + Partition-tolerant) that provides strong durability guarantees in cluster mode:
 
 - **No network partition**: reads are linearizable (followers use the ReadIndex pattern — they sync to the leader's revision before serving). Writes are always routed to the leader.
-- **Under network partition**: a follower that loses the leader promotes only once `LastSeenNano` is stale, which happens only if the leader cannot reach S3. Such a leader's lease has lapsed by then, so it has already stopped acknowledging writes and serving linearizable reads; once it reaches S3 again it sees the new lock and steps down. Linearizable reads on a partitioned follower return errors until reconnection — the system favours consistency over availability.
+- **Under network partition**: a follower that loses the leader promotes only if the leader has not renewed the lock since it noticed the silence, which happens only if the leader cannot reach S3. Such a leader's lease has lapsed by then, so it has already stopped acknowledging writes and serving linearizable reads; once it reaches S3 again it sees the new lock and steps down. Linearizable reads on a partitioned follower return errors until reconnection — the system favours consistency over availability.
 
 **Durability in cluster mode:** quorum commit means every acknowledged write exists on at least two nodes' WALs before the caller sees success. If all followers disconnect, the leader falls back to single-node mode — writes remain available and durable in the leader's local WAL; followers replay missed entries when they reconnect. S3 is disaster-recovery only (both nodes fail simultaneously); WAL uploads are async and do not affect write latency.
 
