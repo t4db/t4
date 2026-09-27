@@ -126,7 +126,7 @@ func newFailoverCluster(t *testing.T, size int) *failoverCluster {
 			PeerBufferSize:      1000,
 			CheckpointInterval:  300 * time.Millisecond,
 			SegmentMaxAge:       200 * time.Millisecond,
-			LeaderWatchInterval: 1 * time.Second,
+			LeaderWatchInterval: 2 * time.Second,
 		})
 		if err != nil {
 			t.Fatalf("open node-%d: %v", i, err)
@@ -284,7 +284,7 @@ func runEtcdWatchFailover(t *testing.T, gap, abrupt bool, drainPre, writePost in
 	}
 
 	// Drain drainPre events from the watch.
-	pre, lastSeenRev := drainEtcdEvents(t, wch, drainPre, 15*time.Second)
+	pre, rest, lastSeenRev := drainEtcdEvents(t, wch, drainPre, 15*time.Second)
 	if len(pre) != drainPre {
 		t.Fatalf("pre-drain: got %d events, want %d", len(pre), drainPre)
 	}
@@ -336,8 +336,14 @@ func runEtcdWatchFailover(t *testing.T, gap, abrupt bool, drainPre, writePost in
 	// Continue draining the same watch channel — clientv3 should
 	// transparently resume from the last delivered revision when the
 	// stream reconnects to a surviving endpoint.
+	// Events that arrived in the same response as the last drained one
+	// were delivered before the failover; the client resumes after them.
 	seen := make(map[int64]string, len(expected))
 	var lastResumeRev int64
+	for _, ev := range rest {
+		seen[ev.Kv.ModRevision] = string(ev.Kv.Key)
+		lastResumeRev = ev.Kv.ModRevision
+	}
 	deadline := time.After(30 * time.Second)
 loop:
 	for len(seen) < len(expected) {
@@ -391,34 +397,35 @@ loop:
 }
 
 // drainEtcdEvents reads events from a clientv3 watch channel until n events
-// have been received (or timeout). Returns the events drained and the highest
-// ModRevision among them.
-func drainEtcdEvents(t *testing.T, wch clientv3.WatchChan, n int, timeout time.Duration) ([]*clientv3.Event, int64) {
+// have been received (or timeout). Returns the events drained, the events
+// that arrived in the same response after the n-th (the client has received
+// them, so a resumed watch will not deliver them again), and the highest
+// ModRevision among the drained events.
+func drainEtcdEvents(t *testing.T, wch clientv3.WatchChan, n int, timeout time.Duration) (drained, rest []*clientv3.Event, lastRev int64) {
 	t.Helper()
-	out := make([]*clientv3.Event, 0, n)
-	var lastRev int64
+	drained = make([]*clientv3.Event, 0, n)
 	deadline := time.After(timeout)
-	for len(out) < n {
+	for len(drained) < n {
 		select {
 		case wr, ok := <-wch:
 			if !ok {
-				return out, lastRev
+				return drained, nil, lastRev
 			}
 			if err := wr.Err(); err != nil {
 				t.Fatalf("watch error during drain: %v", err)
 			}
-			for _, ev := range wr.Events {
-				out = append(out, ev)
+			for i, ev := range wr.Events {
+				drained = append(drained, ev)
 				if ev.Kv.ModRevision > lastRev {
 					lastRev = ev.Kv.ModRevision
 				}
-				if len(out) >= n {
-					return out, lastRev
+				if len(drained) >= n {
+					return drained, wr.Events[i+1:], lastRev
 				}
 			}
 		case <-deadline:
-			return out, lastRev
+			return drained, nil, lastRev
 		}
 	}
-	return out, lastRev
+	return drained, nil, lastRev
 }

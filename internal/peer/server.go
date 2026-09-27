@@ -5,13 +5,63 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/wal"
 )
+
+// ServerOptions returns the transport settings for the peer gRPC server.
+//
+// Keepalive: heartbeats keep a healthy connection busy, so pings go out only
+// when the follower has gone quiet. They catch the case heartbeats cannot: a
+// Follow loop blocked in Send because a partitioned follower stopped reading,
+// where only closing the connection unblocks it.
+//
+// ConnectionTimeout bounds the handshake of a new connection. The default of
+// 120 s lets a connection that never completes it, as through a partition,
+// hold up Server.Stop, and with it a leader stepping down, for two minutes.
+// 10 s leaves room for a TLS handshake over a slow link.
+func ServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    time.Second, // gRPC's minimum
+			Timeout: HeartbeatTimeout,
+		}),
+		grpc.ConnectionTimeout(10 * time.Second),
+	}
+}
+
+// errFollowerSilent ends a follower's stream when it stopped sending
+// heartbeats; the disconnect then releases writes waiting for its ACK.
+var errFollowerSilent = status.Error(codes.Unavailable, "follower heartbeat timeout")
+
+// AckProgressTimeout is how long a follower may go without ACKing further
+// while it has entries outstanding. Its heartbeats show that it is connected,
+// not that it is keeping up: a follower whose disk stalls keeps repeating its
+// last ACK. Dropping it releases writes waiting for it.
+const AckProgressTimeout = 5 * time.Second
+
+// errFollowerStalled ends the stream of a follower that stopped ACKing.
+var errFollowerStalled = status.Error(codes.Unavailable, "follower stopped acknowledging")
+
+// member is what the leader knows about a follower of its term, kept after
+// the follower's stream ends.
+type member struct {
+	connected  bool
+	heartbeats bool      // the current or last stream exchanges heartbeats
+	lastHeard  time.Time // last heartbeat or ACK on the current stream; zero until the first
+	departedAt time.Time // when the last stream ended; zero while connected
+	graceful   bool      // the last stream ended with a GoodBye
+	baseSeq    int64     // the follower had every entry up to this when its stream opened
+	lastAck    int64     // highest sequence ACKed, kept after the stream ends
+}
 
 type WaitMode string
 
@@ -68,6 +118,13 @@ type Server struct {
 	// never block and rapid-fire disconnects coalesce into a single check.
 	DisconnectC chan struct{}
 
+	// term is the leader's term, carried by heartbeats so that followers
+	// know whose liveness they are tracking.
+	term uint64
+
+	// members tracks every follower that has streamed from this leader.
+	members map[string]*member
+
 	log peerLogger
 }
 
@@ -84,6 +141,7 @@ func NewServer(cap int, log peerLogger) *Server {
 		gracefulGoodbyes: make(map[string]struct{}),
 		shutdownC:        make(chan struct{}),
 		DisconnectC:      make(chan struct{}, 1),
+		members:          make(map[string]*member),
 		log:              log,
 	}
 }
@@ -104,6 +162,89 @@ func (s *Server) SetStartRev(rev int64) {
 	s.mu.Lock()
 	s.startRev = rev
 	s.mu.Unlock()
+}
+
+// SetTerm records the leader's term, which heartbeats carry.
+func (s *Server) SetTerm(term uint64) {
+	s.mu.Lock()
+	s.term = term
+	s.mu.Unlock()
+}
+
+// SlowSafe reports whether every follower that may still consider this
+// leader its own is demonstrably hearing it: each connected follower
+// exchanges heartbeats and was heard within recent, and no follower's stream
+// ended without a GoodBye within departedWindow. Followers only send while they hear the
+// leader, so while SlowSafe holds none of them can be about to take over.
+func (s *Server) SlowSafe(now time.Time, recent, departedWindow time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.members {
+		if m.connected {
+			if !m.heartbeats || m.lastHeard.IsZero() || now.Sub(m.lastHeard) > recent {
+				return false
+			}
+		} else if !m.graceful && now.Sub(m.departedAt) < departedWindow {
+			return false
+		}
+	}
+	return true
+}
+
+// MaxSeqWithout returns the highest sequence that a follower of this leader
+// may hold without holding seq: the ACK of each connected follower that has
+// not ACKed seq, and the last ACK of each follower whose stream ended. It
+// returns -1 if every follower that ever streamed has ACKed seq.
+func (s *Server) MaxSeqWithout(seq int64) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	max := int64(-1)
+	for id, m := range s.members {
+		has := m.lastAck
+		if m.baseSeq > has {
+			has = m.baseSeq
+		}
+		if m.connected {
+			if ack := s.followerAckRevs[id]; ack > has {
+				has = ack
+			}
+			if has >= seq {
+				continue
+			}
+		}
+		if has > max {
+			max = has
+		}
+	}
+	return max
+}
+
+// WaitForAll waits until every follower connected at call time has ACKed seq
+// or disconnected, or until timeout. It reports whether they all did.
+func (s *Server) WaitForAll(ctx context.Context, seq int64, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		s.mu.Lock()
+		done := true
+		for id := range s.followers {
+			if s.followerAckRevs[id] < seq {
+				done = false
+				break
+			}
+		}
+		s.mu.Unlock()
+		if done {
+			return true
+		}
+		select {
+		case <-s.ackNotify:
+		case <-timer.C:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
 }
 
 // SetForwardHandler registers the handler that processes forwarded writes.
@@ -318,6 +459,13 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	}
 	ch := make(chan *WalEntryMsg, 512)
 	s.followers[req.NodeID] = ch
+	m := s.members[req.NodeID]
+	if m == nil {
+		m = &member{}
+		s.members[req.NodeID] = m
+	}
+	*m = member{connected: true, heartbeats: req.Heartbeats, baseSeq: req.FromRevision - 1, lastAck: m.lastAck}
+	term := s.term
 	var maxSent int64
 	if len(snapshot) > 0 {
 		maxSent = snapshot[len(snapshot)-1].Sequence()
@@ -332,12 +480,21 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 		s.mu.Lock()
 		if cur, ok := s.followers[req.NodeID]; ok && cur == ch {
 			owned = true
+			if ack := s.followerAckRevs[req.NodeID]; ack > m.lastAck {
+				m.lastAck = ack
+			}
+			m.connected = false
+			m.departedAt = time.Now()
 			delete(s.followers, req.NodeID)
 			delete(s.followerAckRevs, req.NodeID)
 			if _, ok := s.gracefulGoodbyes[req.NodeID]; ok {
 				delete(s.gracefulGoodbyes, req.NodeID)
 				graceful = true
 			}
+			// A follower that said goodbye is shutting down and will not
+			// take over, so it does not hold the leader in fast mode; it
+			// still counts for the election fence.
+			m.graceful = graceful
 			// Only trigger split-brain fencing for unexpected disconnects.
 			// A graceful GoodBye means the follower is shutting down intentionally
 			// and will not attempt a TakeOver.
@@ -359,6 +516,9 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 
 	s.log.Infof("peer: follower %q connected (fromRev=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, len(snapshot))
 
+	var lastHeard atomic.Int64 // unix nanos of the follower's last message
+	lastHeard.Store(time.Now().UnixNano())
+
 	// Spawn a goroutine to read ACK messages from the follower on the bidi
 	// stream. The main goroutine continues sending WalEntryMsgs concurrently.
 	// gRPC allows one goroutine to Send and another to Recv on the same stream.
@@ -368,11 +528,14 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			if err := stream.RecvMsg(ack); err != nil {
 				return // stream closed or context done
 			}
+			now := time.Now()
+			lastHeard.Store(now.UnixNano())
 			s.mu.Lock()
 			if cur, ok := s.followers[req.NodeID]; !ok || cur != ch {
 				s.mu.Unlock()
 				return
 			}
+			m.lastHeard = now
 			if ack.Revision > s.followerAckRevs[req.NodeID] {
 				s.followerAckRevs[req.NodeID] = ack.Revision
 			}
@@ -385,6 +548,19 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			s.notifyACK()
 		}
 	}()
+
+	// A follower that asked for heartbeats gets one at once, which tells it
+	// this leader sends them, and then one every HeartbeatInterval. It
+	// repeats its latest ACK as often, so silence means it is gone. The
+	// ticker also drives the ACK progress check for every follower.
+	tick := time.NewTicker(HeartbeatInterval)
+	defer tick.Stop()
+	if req.Heartbeats {
+		if err := stream.Send(&WalEntryMsg{Heartbeat: true, Term: term}); err != nil {
+			return err
+		}
+	}
+	ackSeen, lastProgress := int64(-1), time.Now()
 
 	for _, e := range snapshot {
 		if err := stream.Send(EntryToMsg(e)); err != nil {
@@ -419,6 +595,27 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				maxSent = msg.ID
 			}
 			if err := stream.Send(msg); err != nil {
+				return err
+			}
+		case now := <-tick.C:
+			s.mu.Lock()
+			ack := s.followerAckRevs[req.NodeID]
+			s.mu.Unlock()
+			if ack > ackSeen || ack >= maxSent {
+				ackSeen, lastProgress = ack, now
+			} else if stalled := now.Sub(lastProgress); stalled > AckProgressTimeout {
+				s.log.Warnf("peer: follower %q made no ACK progress for %v (acked=%d, sent=%d) — closing its stream",
+					req.NodeID, stalled.Round(time.Millisecond), ack, maxSent)
+				return errFollowerStalled
+			}
+			if !req.Heartbeats {
+				continue
+			}
+			if silent := now.Sub(time.Unix(0, lastHeard.Load())); silent > HeartbeatTimeout {
+				s.log.Warnf("peer: no heartbeat from follower %q for %v — closing its stream", req.NodeID, silent.Round(time.Millisecond))
+				return errFollowerSilent
+			}
+			if err := stream.Send(&WalEntryMsg{Heartbeat: true, Term: term}); err != nil {
 				return err
 			}
 		case <-s.shutdownC:

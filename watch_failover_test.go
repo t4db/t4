@@ -116,16 +116,15 @@ func newFailoverCluster(t *testing.T, size int) *failoverCluster {
 		proxy := newBlockableProxyLocal(t, listenAddr)
 		gs := newGatedStore(shared)
 		n, err := Open(Config{
-			DataDir:             t.TempDir(),
-			ObjectStore:         gs,
-			NodeID:              fmt.Sprintf("failover-node-%d", i),
-			PeerListenAddr:      listenAddr,
-			AdvertisePeerAddr:   proxy.Addr(),
-			FollowerMaxRetries:  2,
-			PeerBufferSize:      1000,
-			CheckpointInterval:  300 * time.Millisecond,
-			SegmentMaxAge:       200 * time.Millisecond,
-			LeaderWatchInterval: 1 * time.Second,
+			DataDir:            t.TempDir(),
+			ObjectStore:        gs,
+			NodeID:             fmt.Sprintf("failover-node-%d", i),
+			PeerListenAddr:     listenAddr,
+			AdvertisePeerAddr:  proxy.Addr(),
+			FollowerMaxRetries: 2,
+			PeerBufferSize:     1000,
+			CheckpointInterval: 300 * time.Millisecond,
+			SegmentMaxAge:      200 * time.Millisecond,
 		})
 		if err != nil {
 			t.Fatalf("open node-%d: %v", i, err)

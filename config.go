@@ -209,9 +209,13 @@ type Config struct {
 	// server. Defaults to PeerListenAddr.
 	AdvertisePeerAddr string
 
-	// LeaderWatchInterval is how often the leader reads the lock from S3 to
-	// detect if it has been superseded. Read-only; no renewals.
-	// Default: 5 minutes.
+	// LeaderWatchInterval is how often a leader that hears all its followers
+	// renews its lock; the lock then stays valid for three times as long.
+	// Longer intervals mean fewer object-storage requests, but a node that
+	// never heard the leader waits up to three intervals before taking over,
+	// and a leader cut off from object storage keeps serving its followers
+	// for as long. While a follower is silent the leader renews every 2
+	// seconds regardless. Minimum 2 seconds. Default: 20 seconds.
 	LeaderWatchInterval time.Duration
 
 	// FollowerMaxRetries is the number of consecutive stream failures a follower
@@ -350,7 +354,7 @@ func (c *Config) setDefaults() {
 		c.AdvertisePeerAddr = c.PeerListenAddr
 	}
 	if c.LeaderWatchInterval == 0 {
-		c.LeaderWatchInterval = 5 * time.Minute
+		c.LeaderWatchInterval = 20 * time.Second
 	}
 	if c.FollowerMaxRetries == 0 {
 		c.FollowerMaxRetries = 5

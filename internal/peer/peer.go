@@ -65,7 +65,7 @@ func IsLeaderShutdown(err error) bool {
 //	[prevRev   : int64  ]  @24
 //	[lease     : int64  ]  @32
 //	[op        : uint8  ]  @40
-//	[flags     : uint8  ]  @41  bit0 = shutdown, bit1 = commit
+//	[flags     : uint8  ]  @41  bit0 = shutdown, bit1 = commit, bit2 = heartbeat
 //	[reserved  : uint16 ]  @42
 //	[keyLen      : uint32 ]  @44
 //	[commitRev   : int64  ]  @48
@@ -131,6 +131,9 @@ func marshalWalEntryMsg(m *WalEntryMsg) ([]byte, error) {
 	if m.Commit {
 		buf[41] |= 1 << 1
 	}
+	if m.Heartbeat {
+		buf[41] |= 1 << 2
+	}
 	binary.LittleEndian.PutUint32(buf[44:], uint32(kl))
 	binary.LittleEndian.PutUint64(buf[48:], uint64(m.CommitRevision))
 	binary.LittleEndian.PutUint64(buf[56:], uint64(m.CommitStartRevision))
@@ -154,6 +157,7 @@ func unmarshalWalEntryMsg(data []byte, m *WalEntryMsg) error {
 	m.Op = data[40]
 	m.Shutdown = data[41]&1 != 0
 	m.Commit = data[41]&(1<<1) != 0
+	m.Heartbeat = data[41]&(1<<2) != 0
 	kl := int(binary.LittleEndian.Uint32(data[44:]))
 	m.CommitRevision = int64(binary.LittleEndian.Uint64(data[48:]))
 	m.CommitStartRevision = int64(binary.LittleEndian.Uint64(data[56:]))
@@ -177,9 +181,14 @@ func unmarshalWalEntryMsg(data []byte, m *WalEntryMsg) error {
 // FollowRequest is the single message sent by a follower to open a WAL stream.
 // FromRevision is a legacy field name; after the sequence/revision split it
 // carries the next WAL sequence requested by the follower.
+//
+// Heartbeats asks the leader to exchange heartbeats on the stream (see
+// HeartbeatInterval). Leaders that predate heartbeats ignore it and never
+// send one, and a leader never sends one to a follower that did not ask.
 type FollowRequest struct {
 	FromRevision int64  `json:"from_revision"`
 	NodeID       string `json:"node_id"`
+	Heartbeats   bool   `json:"heartbeats,omitempty"`
 }
 
 // AckMsg is sent by a follower to the leader on the bidi Follow stream to
@@ -193,7 +202,8 @@ type AckMsg struct {
 // WalEntryMsg is the wire representation of a wal.Entry. Receivers must use ID
 // for ordering/ACK semantics and Revision only as the user-visible revision.
 // Shutdown is a special flag: when true the leader is shutting down gracefully
-// and the follower should start a TakeOver election immediately.
+// and the follower should start a TakeOver election immediately. Heartbeat
+// marks a message that carries nothing but the leader's liveness.
 type WalEntryMsg struct {
 	ID                  int64  `json:"id,omitempty"`
 	Revision            int64  `json:"revision"`
@@ -209,6 +219,7 @@ type WalEntryMsg struct {
 	CommitStartRevision int64  `json:"commit_start_revision,omitempty"`
 	Commit              bool   `json:"commit,omitempty"`
 	Shutdown            bool   `json:"shutdown,omitempty"`
+	Heartbeat           bool   `json:"heartbeat,omitempty"`
 }
 
 func EntryToMsg(e *wal.Entry) *WalEntryMsg {

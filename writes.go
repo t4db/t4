@@ -79,6 +79,9 @@ func (n *Node) Put(ctx context.Context, key string, value []byte, lease int64) (
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
+	if err := n.checkLease(); err != nil {
+		return 0, err
+	}
 	start := time.Now()
 	n.mu.Lock()
 	if n.closed.Load() {
@@ -142,6 +145,9 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
+	if err := n.checkLease(); err != nil {
+		return 0, err
+	}
 	start := time.Now()
 	n.mu.Lock()
 	if n.closed.Load() {
@@ -190,6 +196,9 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
+	if err := n.checkLease(); err != nil {
+		return 0, nil, false, err
+	}
 	start := time.Now()
 	n.mu.Lock()
 	if n.closed.Load() {
@@ -248,6 +257,9 @@ func (n *Node) Delete(ctx context.Context, key string) (rev int64, err error) {
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
+	if err := n.checkLease(); err != nil {
+		return 0, err
+	}
 	start := time.Now()
 	n.mu.Lock()
 	if n.closed.Load() {
@@ -280,6 +292,9 @@ func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64)
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
+	if err := n.checkLease(); err != nil {
+		return 0, nil, false, err
+	}
 	start := time.Now()
 	n.mu.Lock()
 	if n.closed.Load() {
@@ -436,6 +451,9 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err er
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
+	if err := n.checkLease(); err != nil {
+		return TxnResponse{}, err
+	}
 	start := time.Now()
 	lockStart := time.Now()
 	n.mu.Lock()
@@ -823,6 +841,12 @@ func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.T
 	}
 	cleanPending()
 	n.recordCommitSpans(ctx, req)
+	if err == nil {
+		// The lease can lapse while the write waits for followers. A leader
+		// that may already have been replaced must not acknowledge it; the
+		// write is committed locally, so the outcome is unknown to the caller.
+		err = n.checkLease()
+	}
 	if err != nil {
 		metrics.WriteErrors.WithLabelValues(op).Inc()
 		return 0, fmt.Errorf("t4: commit: %w", err)
@@ -907,6 +931,9 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
+	if err := n.checkLease(); err != nil {
+		return err
+	}
 	start := time.Now()
 	n.mu.Lock()
 	if n.closed.Load() {

@@ -53,11 +53,15 @@ Default values are part of the v1 contract unless explicitly documented as tunin
 | `AutoCompactSampleInterval` | clamp(retention/7, 1 min, 24 h) when enabled |
 | `NodeID`              | hostname, or `node-0` if hostname lookup fails |
 | `AdvertisePeerAddr`   | `PeerListenAddr`                               |
-| `LeaderWatchInterval` | 5 min                                          |
+| `LeaderWatchInterval` | 20 s (see note below)                          |
 | `FollowerMaxRetries`  | 5                                              |
 | `FollowerWaitMode`    | `quorum`                                       |
 | `PeerBufferSize`      | 10,000                                         |
 | `WatchSendTimeout`    | 30 s                                           |
+
+`LeaderWatchInterval` changed meaning together with its default: it used to be how often the leader re-read the
+lock (default 5 min) and is now the leader's lock renewal interval while it hears all followers (default 20 s, minimum
+2 s). An explicitly configured value keeps working but now sets the renewal interval; values below 2 s are rejected.
 
 Environment variables documented in [Configuration](configuration) remain supported across v1.x. Command-line flags take
 precedence over environment variables.

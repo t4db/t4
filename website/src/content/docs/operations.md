@@ -112,24 +112,33 @@ t4 run \
 ### Leader election and failover
 
 - On startup each node reads the S3 lock. If absent, it issues an **atomic conditional PUT** (`If-None-Match: *`); only
-  one concurrent writer wins. The winner becomes the leader and records `LastSeenNano = now()` in the lock so followers
+  one concurrent writer wins. The winner becomes the leader and stamps the lock as renewed now so followers
   see it as immediately alive.
 - The leader streams WAL entries to all followers over the peer port (default 3380). Followers apply entries and serve
   local reads.
-- A follower that observes `--follower-max-retries` consecutive stream failures (~10 s at default 5 × 2 s) checks the
-  lock's `LastSeenNano`. If stale (older than `LeaderLivenessTTL` = 6 s), it attempts a takeover using
-  `If-Match: <etag>` — only the candidate that read the same ETag wins the race. The new leader records its own address
-  and `LastSeenNano`.
-- The former leader periodically re-reads the S3 lock (`--leader-watch-interval-sec`, default 300 s) and on every
-  follower disconnect. Each check reads the lock **with its ETag**, then — if still the owner — writes a liveness touch
-  using `If-Match: <etag>`. If the conditional touch is rejected (`ErrPreconditionFailed`), a new leader has taken over
-  between the Read and the Touch: the old leader steps down immediately. This closes the Read→Touch split-brain race
-  without a second round-trip.
+- Leader and followers exchange heartbeats on the WAL stream every 500 ms; either side drops a stream it has not heard
+  from for 2 s.
+- A follower that observes `--follower-max-retries` consecutive stream failures checks the lock. If it heard the
+  leader until recently, it may take over once it has not heard it for 7 s and the lock has not been renewed for 6 s;
+  any other node waits until the lock's validity has passed. The takeover uses `If-Match: <etag>` — only the candidate
+  that read the same ETag wins the race, and the check is made on that same record.
+- The leader renews the lock by reading it **with its ETag** and — if still the owner — rewriting it with
+  `If-Match: <etag>`. If the renewal is rejected (`ErrPreconditionFailed`), a new leader has taken over: the old leader
+  steps down immediately. While it hears every follower it renews every 20 s (valid 60 s); as soon as a follower goes
+  silent or leaves, every 2 s (valid 6 s), until 60 s after the follower is back or gone.
+- The leader holds a **lease**: it acknowledges writes and serves linearizable reads only while its lease holds (see
+  [Consistency](consistency#split-brain-prevention)). A leader cut off from S3 and from its followers therefore
+  stops serving before any follower may take over; one cut off from S3 only keeps serving, for up to about a minute,
+  since its followers still hear it. This relies on node clocks differing by less than 2 s; keep NTP running on all
+  nodes.
+- Before acknowledging a write the leader makes sure no node lacking it can win an election: every connected follower
+  has it, or the committed revision recorded in the lock covers it (one extra lock write when a follower leaves or
+  falls more than 1 s behind).
 - Writes sent to a follower are automatically forwarded to the current leader and the result is returned to the caller.
 
-Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). There is no TTL
-polling — the only S3 election writes are at startup, on leader takeover, and during liveness touches while followers
-are disconnected. In cluster mode, writes additionally require quorum ACK from all connected followers before returning
+Leader election uses atomic conditional PUT (`If-None-Match`/`If-Match` on the `leader-lock` object). A healthy cluster
+renews the lock every 20 s (≈ 4,300 GETs and conditional PUTs per day); 2 s renewals happen only while a follower is
+silent. In cluster mode, writes additionally require ACKs from followers per `--follower-wait-mode` before returning
 to the caller.
 
 ### S3 operation budget
@@ -142,20 +151,20 @@ The default settings are useful for estimating monthly S3 request volume:
 | `SegmentMaxAge` | 10 s | Up to 259,200 age-based WAL rotations/uploads with continuous writes |
 | `SegmentMaxSize` | 50 MB | Adds more WAL uploads if the workload writes 50 MB before 10 s elapses |
 | `CheckpointInterval` | 15 min | 2,880 checkpoint cycles |
-| `LeaderWatchInterval` | 5 min | 8,640 periodic leader lock reads |
-| `FollowerRetryInterval` | 2 s | 1,296,000 liveness poll ticks if a follower is disconnected all month |
+| Slow lock renewal | 20 s | 129,600 leader lock renewals (cluster mode, all followers heard) |
 
 In a healthy cluster, ordinary writes do not wait for S3. The steady-state S3 cost is mostly asynchronous WAL upload:
 
 | Source | Approximate monthly S3 operations |
 |--------|-----------------------------------|
 | WAL archive | ~259,200 PUTs for continuous low/medium write traffic, plus size-based rotations if WAL reaches 50 MB before 10 s |
-| Periodic leader lock watch | ~8,640 GETs |
+| Leader lock renewal (cluster mode) | ~129,600 GETs + ~129,600 conditional PUTs in a healthy cluster |
 | Checkpoints | 2,880 checkpoint cycles; each writes several small objects plus any new SST files for changed data |
 
-Follower disconnects add incident traffic, not baseline traffic. While a follower is disconnected, the leader performs a
-fenced liveness check/touch every 2 seconds: one GET plus one conditional PUT per tick. A month-long disconnect would be
-about 1,296,000 GETs and 1,296,000 PUTs.
+In cluster mode the leader renews its lock every 20 seconds while it hears every follower, one GET plus one
+conditional PUT per renewal. While a follower is silent, and for 60 seconds after, it renews every 2 seconds, so that
+the follower finds it alive (see [Consistency](consistency#split-brain-prevention)). A follower that leaves or falls
+behind costs one extra lock write to move the election fence. Single-node mode does not renew a lock.
 
 Single-node synchronous S3 durability has a different cost profile. With `WALSyncUpload=true`, each acknowledged
 `AppendBatch` is uploaded before returning, so the cost is close to one WAL PUT per write batch:

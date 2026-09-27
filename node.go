@@ -214,13 +214,27 @@ type Node struct {
 	// follower-only (write forwarding); updated atomically when leader changes.
 	leaderCli atomic.Pointer[peer.Client]
 
+	// lease is this node's last successful lock write as leader (see
+	// lease.go); nil until it first holds the lock.
+	lease atomic.Pointer[leaseGrant]
+	// leasePeers is the peer server whose followers the lease depends on;
+	// nil unless leader.
+	leasePeers atomic.Pointer[peer.Server]
+	// fenceSeq is the sequence covered by the CommittedRev of this leader's
+	// last lock write; termStartSeq the last sequence it held when its term
+	// began. fence and fenceReqC coordinate fence moves (see lease.go).
+	fenceSeq     atomic.Int64
+	termStartSeq atomic.Int64
+	fence        fenceState
+	fenceReqC    chan struct{}
+
 	entriesSinceCheckpoint int64
 	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
 	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
 	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample
 	tracer                 trace.Tracer
 
-	// bgCtx is cancelled by cancelBg — either on Close() or when fencedCheck
+	// bgCtx is cancelled by cancelBg — either on Close() or when a lock renewal
 	// detects that this node has been superseded as leader. When cancelled with
 	// leaderCli still nil, the node is shutting down or has been fenced; reads
 	// must return an error instead of serving data from stale local Pebble.
@@ -283,6 +297,9 @@ func applyObjectStoreEncryption(cfg *Config) error {
 // Open creates and starts a Node.
 func Open(cfg Config) (*Node, error) {
 	cfg.setDefaults()
+	if cfg.LeaderWatchInterval < minLeaderWatchInterval {
+		return nil, fmt.Errorf("t4: LeaderWatchInterval %v is below the minimum of %v", cfg.LeaderWatchInterval, minLeaderWatchInterval)
+	}
 
 	log := cfg.Logger
 	cp := checkpoint.New(log)
@@ -653,7 +670,9 @@ func Open(cfg Config) (*Node, error) {
 		pending:     make(map[string]pendingKV),
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,
+		fenceReqC:   make(chan struct{}, 1),
 	}
+	n.fence.done = make(chan struct{})
 	n.log = log
 	n.cp = cp
 	n.db.Store(db)
@@ -738,13 +757,14 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	acquireStart := time.Now()
 	rec, won, err := lock.TryAcquire(ctx, n.term, n.db.Load().CurrentRevision())
 	if err != nil {
 		return fmt.Errorf("t4: election: %w", err)
 	}
 
 	if won {
-		return n.becomeLeader(bgCtx, lock, rec)
+		return n.becomeLeader(bgCtx, lock, rec, acquireStart)
 	}
 
 	n.observeTerm(rec.Term)
@@ -790,16 +810,22 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 		n.log.Errorf("t4: graceful shutdown: wal close: %v", werr)
 	}
 
-	// 3. Touch the election lock with our true CurrentRevision so that
-	//    election.TakeOver fences any candidate whose local revision is
-	//    behind us. Without this the lock's CommittedRev reflects only
-	//    the last periodic touch, which can lag the actual durable rev
-	//    by an entire LeaderWatchInterval.
+	// 3. Release the election lock, recording our true CurrentRevision so
+	//    that election.TakeOver fences any candidate whose local revision
+	//    is behind us. Without this the lock's CommittedRev reflects only
+	//    the last renewal, which can lag the actual durable rev by up to
+	//    one renewal interval. Releasing clears LastSeenNano, so a follower
+	//    that misses the shutdown broadcast below does not wait out the
+	//    liveness TTL. If another node has already taken the lock, it is
+	//    left alone.
 	if n.cfg.ObjectStore != nil {
 		tCtx, tCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
-		if terr := lock.Touch(tCtx, n.term, n.cfg.AdvertisePeerAddr, n.db.Load().CurrentRevision()); terr != nil {
-			n.log.Warnf("t4: graceful shutdown: lock touch: %v", terr)
+		switch rerr := lock.Relinquish(tCtx, n.term, n.db.Load().CurrentRevision()); {
+		case errors.Is(rerr, election.ErrNotOwner):
+			n.log.Infof("t4: graceful shutdown: lock already held by a newer leader — leaving it")
+		case rerr != nil:
+			n.log.Warnf("t4: graceful shutdown: release lock: %v", rerr)
 		}
 		tCancel()
 	}
@@ -936,7 +962,9 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 		if n.loadRole() == roleFollower {
 			return ErrNoLeader
 		}
-		return nil // leader or single-node — already up-to-date
+		// Leader or single node: local state is current only while a
+		// leader is sure it still is one.
+		return n.checkLease()
 	}
 	resp, err := cli.ForwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardGetRevision})
 	if err != nil {

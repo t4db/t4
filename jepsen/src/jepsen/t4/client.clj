@@ -10,7 +10,7 @@
            ;;   CmpTarget – factory: (CmpTarget/modRevision n), (CmpTarget/value bs), …
            ;; CmpResult does NOT exist; use Cmp$Op instead.
            [io.etcd.jetcd.op Op Cmp Cmp$Op CmpTarget]
-           [io.etcd.jetcd.options PutOption]
+           [io.etcd.jetcd.options GetOption PutOption]
            [java.nio.charset StandardCharsets]
            [java.util.concurrent TimeUnit TimeoutException]))
 
@@ -37,6 +37,18 @@
   (-> (Client/builder)
       (.endpoints (into-array String [(str "http://" (name node) ":3379")]))
       (.build)))
+
+;; ── Errors ─────────────────────────────────────────────────────────────────────
+;;
+;; A read that errors changed nothing, so it is a definite :fail. A write or
+;; CAS that errors may still have been applied: the leader can commit it and
+;; the reply be lost (a partition cuts a forwarded write's response, or the
+;; leader loses its lease after committing). It must be :info, or Knossos
+;; treats the write as never having happened and flags a later read of its
+;; value as a violation.
+
+(defn- error-type [op]
+  (if (= :read (:f op)) :fail :info))
 
 ;; ── Register operations ───────────────────────────────────────────────────────
 ;;
@@ -114,11 +126,10 @@
         (assoc op :type :info :error :timeout))
 
       (catch io.grpc.StatusRuntimeException e
-        ;; UNAVAILABLE = node is partitioned; :fail lets Jepsen account for it.
-        (assoc op :type :fail :error (str (.getStatus e))))
+        (assoc op :type (error-type op) :error (str (.getStatus e))))
 
       (catch Exception e
-        (assoc op :type :fail :error (.getMessage e)))))
+        (assoc op :type (error-type op) :error (.getMessage e)))))
 
   (teardown! [this test])
 
@@ -133,7 +144,7 @@
 ;;
 ;; Three keys hold small integers. Operations exercise the etcd Txn surface:
 ;;
-;;   :read  → Txn(no compares, Then Get(a), Get(b), Get(c)) → {:a v :b v :c v}
+;;   :read  → one prefix Get over all three keys → {:a v :b v :c v}
 ;;   :write {:a v :b v :c v} → Txn(no compares, Then Put(a) Put(b) Put(c))
 ;;   :cas   [{:a old :b old :c old} {:a new :b new :c new}]
 ;;            → Txn(If k.value==old for every k, Then Put(k, new) for every k)
@@ -148,20 +159,19 @@
 
 (defn- multi-key-name [k] (str multi-key-prefix (name k)))
 
-(defn- get-value
-  "Returns the long value at key, or nil if absent."
-  [kv key-str]
-  (let [resp (-> (.get kv (->bs key-str))
-                 (.get timeout-ms TimeUnit/MILLISECONDS))]
-    (when (pos? (.getCount resp))
-      (-> resp .getKvs first .getValue bs-> Long/parseLong))))
-
 (defn do-multi-read
-  "Reads all three keys and returns {:a v :b v :c v} (nil for absent)."
+  "Reads all three keys and returns {:a v :b v :c v} (nil for absent). One
+  prefix Get reads them at a single revision; three separate Gets could
+  straddle a concurrent write and return a mix of two writes."
   [kv]
-  (reduce (fn [m k] (assoc m k (get-value kv (multi-key-name k))))
-          {}
-          multi-keys))
+  (let [resp (-> (.get kv (->bs multi-key-prefix)
+                       (-> (GetOption/builder) (.isPrefix true) (.build)))
+                 (.get timeout-ms TimeUnit/MILLISECONDS))
+        by-key (into {}
+                     (for [kv-entry (.getKvs resp)]
+                       [(bs-> (.getKey kv-entry))
+                        (-> kv-entry .getValue bs-> Long/parseLong)]))]
+    (into {} (for [k multi-keys] [k (get by-key (multi-key-name k))]))))
 
 (defn do-multi-write
   "Atomic multi-key blind write. values is a {:a v :b v :c v} map (all keys
@@ -226,10 +236,10 @@
         (assoc op :type :info :error :timeout))
 
       (catch io.grpc.StatusRuntimeException e
-        (assoc op :type :fail :error (str (.getStatus e))))
+        (assoc op :type (error-type op) :error (str (.getStatus e))))
 
       (catch Exception e
-        (assoc op :type :fail :error (.getMessage e)))))
+        (assoc op :type (error-type op) :error (.getMessage e)))))
 
   (teardown! [this test])
 
