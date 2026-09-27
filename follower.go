@@ -25,6 +25,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 	fromRev := n.db.Load().LastSequence() + 1
 
 	for {
+		cli.SetLeaderGoneCheck(func(ctx context.Context) bool { return n.lockReleased(ctx, lock) })
 		err := cli.Follow(
 			bgCtx,
 			fromRev,
@@ -134,6 +135,18 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			return
 		}
 	}
+}
+
+// lockReleased reports whether the leader lock has been released by a leader
+// that shut down gracefully (see election.Lock.Relinquish). A follower that
+// missed the shutdown broadcast learns this way that the leader is gone. A
+// live leader's lock always carries LastSeenNano, so this never lets a node
+// skip the liveness wait against a leader that is still serving.
+func (n *Node) lockReleased(ctx context.Context, lock *election.Lock) bool {
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	rec, err := lock.Read(rctx)
+	return err == nil && rec != nil && rec.LastSeenNano == 0
 }
 
 // attemptPromotion tries to take over the leader lock after the stream dies.

@@ -2,10 +2,13 @@ package t4
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/t4db/t4/internal/election"
+	"github.com/t4db/t4/internal/peer"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // TestGracefulShutdownReleasesLock: a leader that shuts down gracefully has
@@ -82,5 +85,62 @@ func TestGracefulShutdownKeepsNewerLeadersLock(t *testing.T) {
 	}
 	if rec == nil || rec.NodeID != newRec.NodeID || rec.Term != newRec.Term {
 		t.Fatalf("replaced leader's shutdown overwrote the lock: have %+v, want owner %s term %d", rec, newRec.NodeID, newRec.Term)
+	}
+}
+
+// TestFollowerTakesOverPromptlyFromReleasedLock: a follower that missed a
+// graceful shutdown broadcast learns from the released lock that the leader
+// is gone, instead of retrying the dead address FollowerMaxRetries times.
+func TestFollowerTakesOverPromptlyFromReleasedLock(t *testing.T) {
+	shared := object.NewMem()
+	nodes := make([]*Node, 3)
+	proxies := make([]*blockableProxyLocal, 3)
+	for i := range nodes {
+		listen := freeAddrLocal(t)
+		proxies[i] = newBlockableProxyLocal(t, listen)
+		n, err := Open(Config{
+			DataDir:           t.TempDir(),
+			ObjectStore:       shared,
+			NodeID:            fmt.Sprintf("release-node-%d", i),
+			PeerListenAddr:    listen,
+			AdvertisePeerAddr: proxies[i].Addr(),
+			// FollowerMaxRetries left at its default of 5.
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes[i] = n
+		t.Cleanup(func() { _ = n.Close() })
+	}
+	leader := waitForLeaderNodeLocal(t, nodes, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rev, err := leader.Put(ctx, "/k", []byte("v"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var survivors []*Node
+	leaderIdx := 0
+	for i, n := range nodes {
+		if n == leader {
+			leaderIdx = i
+			continue
+		}
+		if err := n.WaitForRevision(ctx, rev); err != nil {
+			t.Fatal(err)
+		}
+		survivors = append(survivors, n)
+	}
+	proxies[leaderIdx].block() // the followers miss the shutdown broadcast
+
+	start := time.Now()
+	if err := leader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForLeaderNodeLocal(t, survivors, 30*time.Second)
+	elapsed := time.Since(start)
+	t.Logf("new leader after %v", elapsed.Round(time.Millisecond))
+	if limit := 2*peer.FollowerRetryInterval + time.Second; elapsed > limit {
+		t.Fatalf("takeover from a released lock took %v, want under %v", elapsed.Round(time.Millisecond), limit)
 	}
 }

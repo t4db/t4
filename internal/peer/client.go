@@ -41,6 +41,10 @@ type Client struct {
 	connMu sync.Mutex
 	conn   *grpc.ClientConn // lazily initialised; nil after Close
 
+	// leaderGone, if set, is consulted after each failed Follow attempt; see
+	// SetLeaderGoneCheck.
+	leaderGone func(context.Context) bool
+
 	log peerLogger
 }
 
@@ -58,6 +62,14 @@ func NewClient(leaderAddr, nodeID string, maxRetries int, tlsCreds credentials.T
 		log = stdlibPeerLogger{}
 	}
 	return &Client{leaderAddr: leaderAddr, nodeID: nodeID, maxRetries: maxRetries, tlsCreds: tlsCreds, tp: tp, log: log}
+}
+
+// SetLeaderGoneCheck installs a check that Follow runs after each failed
+// attempt. When it reports that the leader has left for good, Follow returns
+// ErrLeaderShutdown at once instead of retrying a dead address. Must not be
+// called while Follow runs.
+func (c *Client) SetLeaderGoneCheck(f func(context.Context) bool) {
+	c.leaderGone = f
 }
 
 // Close releases the underlying gRPC connection.
@@ -134,6 +146,11 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Ent
 			consecutiveFailures++
 		}
 		fromRev = nextSeq
+
+		if consecutiveFailures > 0 && c.leaderGone != nil && c.leaderGone(ctx) {
+			c.log.Infof("peer: leader %s has left — starting election immediately", c.leaderAddr)
+			return ErrLeaderShutdown
+		}
 
 		if c.maxRetries > 0 && consecutiveFailures >= c.maxRetries {
 			c.log.Debugf("peer: leader unreachable after %d attempts", consecutiveFailures)
