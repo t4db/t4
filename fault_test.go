@@ -13,6 +13,8 @@ import (
 
 	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
+
+	"github.com/t4db/t4/internal/testutil"
 )
 
 var errInjected = errors.New("injected fault")
@@ -310,13 +312,7 @@ func waitForLeaderNodeLocal(t *testing.T, nodes []*Node, timeout time.Duration) 
 
 func freeAddrLocal(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return addr
+	return testutil.FreeAddr(t)
 }
 
 type blockableProxyLocal struct {

@@ -2,22 +2,17 @@ package t4
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
 	"github.com/t4db/t4/pkg/object"
+
+	"github.com/t4db/t4/internal/testutil"
 )
 
 func freeLocalAddr(t *testing.T) string {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := lis.Addr().String()
-	_ = lis.Close()
-	return addr
+	return testutil.FreeAddr(t)
 }
 
 func waitLeader(t *testing.T, n *Node) {
