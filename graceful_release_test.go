@@ -28,7 +28,13 @@ func TestGracefulShutdownReleasesLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The followers miss the shutdown broadcast.
+	// The followers miss the shutdown broadcast. They also cannot reach
+	// object storage until the lock has been checked: they would take the
+	// released lock over at once.
+	survivors := cluster.survivors(leader)
+	for _, n := range survivors {
+		cluster.stores[cluster.indexOf(n)].block()
+	}
 	cluster.proxies[cluster.indexOf(leader)].block()
 	if err := leader.Close(); err != nil {
 		t.Fatal(err)
@@ -44,10 +50,12 @@ func TestGracefulShutdownReleasesLock(t *testing.T) {
 	if rec.CommittedRev < rev {
 		t.Fatalf("released lock lost the election fence: CommittedRev=%d, want >= %d", rec.CommittedRev, rev)
 	}
-	// A follower that missed the broadcast takes the non-graceful path.
-	if _, promoted := candidate.attemptPromotion(candidate.bgCtx, lock, false); !promoted {
-		t.Fatal("follower could not take over at once from a leader that shut down gracefully")
+	// Followers that missed the broadcast take the released lock over at
+	// once, on the non-graceful path.
+	for _, n := range survivors {
+		cluster.stores[cluster.indexOf(n)].unblock()
 	}
+	waitForLeaderNodeLocal(t, survivors, 2*peer.FollowerRetryInterval+time.Second)
 }
 
 // TestGracefulShutdownKeepsNewerLeadersLock: a leader that has already been
