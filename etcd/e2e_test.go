@@ -16,6 +16,8 @@ import (
 	"github.com/t4db/t4"
 	t4etcd "github.com/t4db/t4/etcd"
 	"github.com/t4db/t4/pkg/object"
+
+	"github.com/t4db/t4/internal/testutil"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -71,16 +73,10 @@ func TestEtcdServerRejectsOversizedRequest(t *testing.T) {
 	}
 }
 
-// freeAddr returns a free localhost TCP address.
+// freeAddr returns a free localhost TCP address (see testutil.FreeAddr).
 func freeAddr(tb testing.TB) string {
 	tb.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		tb.Fatalf("freeAddr: %v", err)
-	}
-	addr := lis.Addr().String()
-	lis.Close()
-	return addr
+	return testutil.FreeAddr(tb)
 }
 
 // waitForLeader polls until one of the nodes reports IsLeader, then returns it.

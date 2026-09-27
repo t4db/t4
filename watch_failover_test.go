@@ -40,7 +40,7 @@ type gatedStore struct {
 
 func newGatedStore(inner object.ConditionalStore) *gatedStore { return &gatedStore{inner: inner} }
 
-func (g *gatedStore) block() { g.blocked.Store(true) }
+func (g *gatedStore) block()   { g.blocked.Store(true) }
 func (g *gatedStore) unblock() { g.blocked.Store(false) }
 
 var errStoreBlocked = errors.New("gated store: blocked")

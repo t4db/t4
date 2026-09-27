@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +13,8 @@ import (
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/pkg/object"
+
+	"github.com/t4db/t4/internal/testutil"
 )
 
 // snapshotStore wraps MemStore, recording a version ID for every Put so a
@@ -68,16 +69,10 @@ func (s *snapshotStore) versionOf(key string) string {
 	return s.latestByKey[key]
 }
 
-// freeAddrImpl allocates a random TCP port and releases it.
+// freeAddrImpl returns a free localhost TCP address (see testutil.FreeAddr).
 func freeAddrImpl(t testing.TB) string {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freeAddr: %v", err)
-	}
-	addr := lis.Addr().String()
-	lis.Close()
-	return addr
+	return testutil.FreeAddr(t)
 }
 
 // waitForLeaderNode polls until one of the nodes reports IsLeader.
