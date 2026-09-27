@@ -129,7 +129,7 @@ A remaining limitation: the committed revision in the lock is only as recent as 
 
 ### Follower partitioned from leader (leader can still reach S3)
 
-1. Follower loses the peer stream (the leader may not even notice).
+1. Follower loses the peer stream. Both sides notice within 2 s through missed heartbeats.
 2. Leader keeps renewing `LastSeenNano` every 2 s.
 3. Follower exhausts its retry budget (~4 s at default settings).
 4. Follower reads the S3 lock — `LastSeenNano` ≤ 2 s old → **does not promote**.

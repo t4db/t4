@@ -253,3 +253,29 @@ func TestFollowCleanupDoesNotDropReplacementFollower(t *testing.T) {
 		t.Fatal("timeout waiting for replacement stream to exit")
 	}
 }
+
+// TestNoHeartbeatsForOldFollower: a follower that did not ask for heartbeats
+// predates them. It would take a heartbeat for a WAL entry, and it never
+// sends one, so the leader must neither send it any nor time it out.
+func TestNoHeartbeatsForOldFollower(t *testing.T) {
+	srv := NewServer(16, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stream := newFakeFollowStream(ctx) // never sends an ACK
+	errC := make(chan error, 1)
+	go func() { errC <- srv.Follow(&FollowRequest{FromRevision: 1, NodeID: "old"}, stream) }()
+
+	deadline := time.After(2 * HeartbeatTimeout)
+	for {
+		select {
+		case msg := <-stream.sendC:
+			if msg.Heartbeat {
+				t.Fatal("leader sent a heartbeat to a follower that did not ask for them")
+			}
+		case err := <-errC:
+			t.Fatalf("leader closed the stream of a follower that sends no heartbeats: %v", err)
+		case <-deadline:
+			return
+		}
+	}
+}

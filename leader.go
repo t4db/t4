@@ -85,7 +85,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		_ = w2.Close()
 		return fmt.Errorf("t4: peer listen %s: %w", n.cfg.PeerListenAddr, err)
 	}
-	serverOpts := []grpc.ServerOption{grpc.ForceServerCodec(peer.Codec{})}
+	serverOpts := append([]grpc.ServerOption{grpc.ForceServerCodec(peer.Codec{})}, peer.ServerOptions()...)
 	if n.cfg.PeerServerTLS != nil {
 		serverOpts = append(serverOpts, grpc.Creds(n.cfg.PeerServerTLS))
 	}

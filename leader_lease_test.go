@@ -248,3 +248,59 @@ func TestNoTakeoverFromLiveLeader(t *testing.T) {
 		t.Fatal("leader lost leadership")
 	}
 }
+
+// TestWriteNotStuckOnSilentFollowers: a partition that silently drops the
+// leader's traffic to its followers breaks no connection. Heartbeats let the
+// leader notice and stop waiting for acknowledgements that cannot come, so
+// the write completes instead of hanging until the client gives up.
+func TestWriteNotStuckOnSilentFollowers(t *testing.T) {
+	shared := object.NewMem()
+	nodes := make([]*Node, 3)
+	proxies := make([]*stallingProxy, 3)
+	for i := range nodes {
+		listen := freeAddrLocal(t)
+		proxies[i] = newStallingProxy(t, listen)
+		n, err := Open(Config{
+			DataDir:           t.TempDir(),
+			ObjectStore:       shared,
+			NodeID:            fmt.Sprintf("node-%d", i),
+			PeerListenAddr:    listen,
+			AdvertisePeerAddr: proxies[i].Addr(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes[i] = n
+		t.Cleanup(func() { _ = n.Close() })
+	}
+	leader := waitForLeaderNodeLocal(t, nodes, 10*time.Second)
+	var leaderIdx int
+	for i, n := range nodes {
+		if n == leader {
+			leaderIdx = i
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rev, err := leader.Put(ctx, "/k", []byte("v"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes {
+		if err := n.WaitForRevision(ctx, rev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := leader.peerSrv.ConnectedFollowers(); c != 2 {
+		t.Fatalf("precondition: want 2 connected followers, have %d", c)
+	}
+
+	proxies[leaderIdx].stall()
+	wctx, wcancel := context.WithTimeout(ctx, peer.HeartbeatTimeout+5*time.Second)
+	defer wcancel()
+	start := time.Now()
+	if _, err := leader.Put(wctx, "/k", []byte("during-partition"), 0); err != nil {
+		t.Fatalf("write waiting on silent followers did not complete: %v", err)
+	}
+	t.Logf("write completed after %v", time.Since(start).Round(time.Millisecond))
+}

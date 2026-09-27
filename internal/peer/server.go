@@ -5,13 +5,42 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/wal"
 )
+
+// ServerOptions returns the transport settings for the peer gRPC server.
+//
+// Keepalive: heartbeats keep a healthy connection busy, so pings go out only
+// when the follower has gone quiet. They catch the case heartbeats cannot: a
+// Follow loop blocked in Send because a partitioned follower stopped reading,
+// where only closing the connection unblocks it.
+//
+// ConnectionTimeout bounds the handshake of a new connection. The default of
+// 120 s lets a connection that never completes it, as through a partition,
+// hold up Server.Stop, and with it a leader stepping down, for two minutes.
+// 10 s leaves room for a TLS handshake over a slow link.
+func ServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    time.Second, // gRPC's minimum
+			Timeout: HeartbeatTimeout,
+		}),
+		grpc.ConnectionTimeout(10 * time.Second),
+	}
+}
+
+// errFollowerSilent ends a follower's stream when it stopped sending
+// heartbeats; the disconnect then releases writes waiting for its ACK.
+var errFollowerSilent = status.Error(codes.Unavailable, "follower heartbeat timeout")
 
 type WaitMode string
 
@@ -359,6 +388,9 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 
 	s.log.Infof("peer: follower %q connected (fromRev=%d, snapshot=%d entries)", req.NodeID, req.FromRevision, len(snapshot))
 
+	var lastHeard atomic.Int64 // unix nanos of the follower's last message
+	lastHeard.Store(time.Now().UnixNano())
+
 	// Spawn a goroutine to read ACK messages from the follower on the bidi
 	// stream. The main goroutine continues sending WalEntryMsgs concurrently.
 	// gRPC allows one goroutine to Send and another to Recv on the same stream.
@@ -368,6 +400,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			if err := stream.RecvMsg(ack); err != nil {
 				return // stream closed or context done
 			}
+			lastHeard.Store(time.Now().UnixNano())
 			s.mu.Lock()
 			if cur, ok := s.followers[req.NodeID]; !ok || cur != ch {
 				s.mu.Unlock()
@@ -385,6 +418,19 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			s.notifyACK()
 		}
 	}()
+
+	// A follower that asked for heartbeats gets one at once, which tells it
+	// this leader sends them, and then one every HeartbeatInterval. It
+	// repeats its latest ACK as often, so silence means it is gone.
+	var heartbeatC <-chan time.Time
+	if req.Heartbeats {
+		t := time.NewTicker(HeartbeatInterval)
+		defer t.Stop()
+		heartbeatC = t.C
+		if err := stream.Send(&WalEntryMsg{Heartbeat: true}); err != nil {
+			return err
+		}
+	}
 
 	for _, e := range snapshot {
 		if err := stream.Send(EntryToMsg(e)); err != nil {
@@ -419,6 +465,14 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				maxSent = msg.ID
 			}
 			if err := stream.Send(msg); err != nil {
+				return err
+			}
+		case <-heartbeatC:
+			if silent := time.Since(time.Unix(0, lastHeard.Load())); silent > HeartbeatTimeout {
+				s.log.Warnf("peer: no heartbeat from follower %q for %v — closing its stream", req.NodeID, silent.Round(time.Millisecond))
+				return errFollowerSilent
+			}
+			if err := stream.Send(&WalEntryMsg{Heartbeat: true}); err != nil {
 				return err
 			}
 		case <-s.shutdownC:

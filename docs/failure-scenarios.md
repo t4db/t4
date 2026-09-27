@@ -44,7 +44,7 @@ This document describes how T4 behaves under various failure conditions, what da
 **Scenario:** a follower process dies while the leader and at least one other follower are healthy.
 
 **Outcome:**
-- Leader detects the disconnect immediately.
+- Leader detects the disconnect immediately, or within 2 s through missed heartbeats if the connection is not closed.
 - With default `FollowerWaitMode=quorum`, the leader needs ACKs from ⌊n/2⌋ + 1 nodes. In a 3-node cluster losing one follower still leaves the leader + 1 follower = quorum. Writes continue.
 - The crashed follower's writes that were in-flight are lost locally; but those writes were not quorum-ACKed, so they were not acknowledged to the client.
 

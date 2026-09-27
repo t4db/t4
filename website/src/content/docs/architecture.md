@@ -151,8 +151,13 @@ Election uses an S3 object (`leader-lock`) with atomic conditional PUT operation
 
 If the store does not implement the `ConditionalStore` interface (optional; see `pkg/object`), the node falls back to an unconditional write + 100 ms read-back to detect a race. All provided stores (`S3Store`, `Mem`) implement `ConditionalStore`.
 
+**Failure detection:**
+The leader and each follower exchange heartbeats on the WAL stream every 500 ms: the leader sends an empty heartbeat message, the follower repeats its latest ACK. Either side that hears nothing for 2 s drops the stream. This catches partitions that drop packets without breaking the TCP connection, which would otherwise leave both sides waiting indefinitely. When the leader drops a silent follower, writes stop waiting for that follower's ACK. As a backstop for a leader blocked sending to a follower that stopped reading, the peer server also uses gRPC keepalive pings, which close a connection that does not answer within 2 s.
+
+Heartbeats are negotiated when the stream opens, so nodes with and without heartbeat support can run in the same cluster during an upgrade; they simply do not exchange heartbeats with each other.
+
 **TakeOver (follower promoting itself):**
-1. Follower detects a dead leader when the WAL gRPC stream fails `FollowerMaxRetries` consecutive times.
+1. Follower detects a dead leader when the WAL gRPC stream fails, or goes silent, `FollowerMaxRetries` consecutive times.
 2. Before attempting takeover, the follower reads the current lock. If `LastSeenNano` is younger than `LeaderLivenessTTL` (3 × `FollowerRetryInterval` = 6 s), the leader was recently alive — the follower is an isolated minority and backs off.
 3. If the lock has already advanced to a term higher than the follower's `floorTerm` (another candidate already won), the follower backs off and follows the new winner.
 4. Otherwise: read the lock ETag, then `PUT` with `If-Match: <etag>`. Only the candidate that read the same ETag wins; all others get a precondition failure and re-read to find the new leader.

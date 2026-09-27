@@ -859,7 +859,7 @@ successful renewal, so it never serves alongside a new leader.
 
 **Follower partitioned from leader, leader can still reach S3:**
 
-1. Follower loses the peer stream; the leader may or may not detect the disconnect.
+1. Follower loses the peer stream; both sides notice within 2 s through missed heartbeats.
 2. Leader keeps refreshing `LastSeenNano` every 2 s either way.
 3. Follower exhausts `--follower-max-retries` reconnect attempts (~4 s at the default of 2 × 2 s).
 4. Follower reads the S3 lock — `LastSeenNano` is ≤ 2 s old → backs off, **does not promote**.
@@ -882,7 +882,7 @@ successful renewal, so it never serves alongside a new leader.
 **Writes during a follower partition:**
 
 While followers are disconnected, the leader's `WaitForFollowers` returns immediately (0 connected followers → 0 ACKs
-required). Writes proceed but are acknowledged only by the leader node. WAL segments continue to be uploaded to S3
+required). A follower the leader no longer hears from counts as disconnected after 2 s without heartbeats. Writes proceed but are acknowledged only by the leader node. WAL segments continue to be uploaded to S3
 asynchronously. If the leader fails while the partition persists and before the segments reach S3, those post-partition
 writes may be lost. For the highest write durability during a known partition, avoid acknowledging client writes until
 the partition heals, or use a 3-node cluster so quorum (2 of 3) can still be reached with one node partitioned.

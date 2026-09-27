@@ -3,13 +3,16 @@ package peer
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/wal"
 )
@@ -25,6 +28,19 @@ const FollowerRetryInterval = 2 * time.Second
 // followers, so a record younger than this means the leader was alive recently.
 // Using 3× the touch interval gives tolerance for timing jitter and S3 latency.
 const LeaderLivenessTTL = 3 * FollowerRetryInterval // 6 seconds
+
+// HeartbeatInterval is how often the leader and each follower send each other
+// a heartbeat on the Follow stream when both support it.
+const HeartbeatInterval = 500 * time.Millisecond
+
+// HeartbeatTimeout is how long either side of a Follow stream waits without
+// hearing anything from the other before it gives up on the stream. It
+// catches partitions that drop packets without breaking the connection.
+const HeartbeatTimeout = 4 * HeartbeatInterval
+
+// errLeaderSilent ends a Follow attempt when the leader stopped sending
+// heartbeats; the follower retries like after any other stream failure.
+var errLeaderSilent = status.Error(codes.Unavailable, "leader heartbeat timeout")
 
 // Client is the follower-side peer client.
 //
@@ -44,6 +60,11 @@ type Client struct {
 	// leaderGone, if set, is consulted after each failed Follow attempt; see
 	// SetLeaderGoneCheck.
 	leaderGone func(context.Context) bool
+
+	// leaderHeartbeats is set once the leader has sent a heartbeat. From
+	// then on every Follow attempt expects them from the start, so an
+	// attempt on a dead connection times out instead of hanging.
+	leaderHeartbeats atomic.Bool
 
 	log peerLogger
 }
@@ -78,6 +99,17 @@ func (c *Client) Close() {
 	defer c.connMu.Unlock()
 	if c.conn != nil {
 		c.conn.Close()
+		c.conn = nil
+	}
+}
+
+// resetConn drops the shared connection so the next call dials afresh. Used
+// when the connection has gone silent: gRPC may not notice that it is dead.
+func (c *Client) resetConn() {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if c.conn != nil {
+		_ = c.conn.Close()
 		c.conn = nil
 	}
 }
@@ -181,20 +213,83 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	defer streamCancel()
 
+	// msgC buffers entry and commit messages received from the stream.
+	msgC := make(chan *WalEntryMsg, 512)
+
+	// Once this leader is known to send heartbeats, a watchdog cancels the
+	// attempt when it goes silent. It runs from before the stream opens:
+	// on a dead connection opening the stream can block too.
+	var lastRecv atomic.Int64 // unix nanos of the last message from the leader
+	lastRecv.Store(time.Now().UnixNano())
+	var silent atomic.Bool
+	go func() {
+		t := time.NewTicker(HeartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				// Buffered messages mean the leader was heard; the main
+				// loop below just has not caught up with them yet.
+				if c.leaderHeartbeats.Load() && len(msgC) == 0 &&
+					time.Since(time.Unix(0, lastRecv.Load())) > HeartbeatTimeout {
+					silent.Store(true)
+					streamCancel()
+					return
+				}
+			case <-streamCtx.Done():
+				return
+			}
+		}
+	}()
+	// silenced turns an error caused by the watchdog into errLeaderSilent
+	// and drops the connection, which gRPC may not know is dead.
+	silenced := func(err error) error {
+		if !silent.Load() || ctx.Err() != nil {
+			return err
+		}
+		c.log.Warnf("peer: no heartbeat from leader %s for %v — reconnecting", c.leaderAddr, HeartbeatTimeout)
+		c.resetConn()
+		return errLeaderSilent
+	}
+
 	stream, err := NewWalStreamClient(conn).Follow(streamCtx, &FollowRequest{
 		FromRevision: fromRev,
 		NodeID:       c.nodeID,
+		Heartbeats:   true,
 	})
 	if err != nil {
-		return fromRev, err
+		return fromRev, silenced(err)
 	}
 
 	c.log.Infof("peer: connected to leader %s (fromRev=%d)", c.leaderAddr, fromRev)
 
-	// msgC buffers entry and commit messages received from the stream.
-	msgC := make(chan *WalEntryMsg, 512)
-	recvErrC := make(chan error, 1)
+	// ACKs double as this follower's heartbeats: every HeartbeatInterval it
+	// repeats its latest ACK, which the leader treats as a no-op. gRPC
+	// forbids concurrent sends on one stream, hence sendMu.
+	var sendMu sync.Mutex
+	var ackedSeq atomic.Int64
+	ackedSeq.Store(fromRev - 1)
+	sendAck := func(seq int64) error {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		return stream.SendAck(seq)
+	}
+	go func() {
+		t := time.NewTicker(HeartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				if err := sendAck(ackedSeq.Load()); err != nil {
+					return
+				}
+			case <-streamCtx.Done():
+				return
+			}
+		}
+	}()
 
+	recvErrC := make(chan error, 1)
 	go func() {
 		for {
 			msg, err := stream.Recv()
@@ -202,9 +297,14 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 				recvErrC <- err
 				return
 			}
+			lastRecv.Store(time.Now().UnixNano())
 			if msg.Shutdown {
 				recvErrC <- ErrLeaderShutdown
 				return
+			}
+			if msg.Heartbeat {
+				c.leaderHeartbeats.Store(true)
+				continue
 			}
 			select {
 			case msgC <- msg:
@@ -222,7 +322,7 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 		select {
 		case msg = <-msgC:
 		case err := <-recvErrC:
-			return fromRev, err
+			return fromRev, silenced(err)
 		}
 
 		// Drain any additional messages already buffered so we can process
@@ -281,9 +381,10 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 			if batch[len(batch)-1].Sequence()+1 > fromRev {
 				fromRev = batch[len(batch)-1].Sequence() + 1
 			}
-			if err := stream.SendAck(batch[len(batch)-1].Sequence()); err != nil {
-				return fromRev, err
+			if err := sendAck(batch[len(batch)-1].Sequence()); err != nil {
+				return fromRev, silenced(err)
 			}
+			ackedSeq.Store(batch[len(batch)-1].Sequence())
 			if err := applyFn(batch); err != nil {
 				return fromRev, err
 			}
