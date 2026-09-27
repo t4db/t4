@@ -40,7 +40,7 @@ func freePort(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().String()
 }
 
