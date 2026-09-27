@@ -189,7 +189,7 @@ func openElectionTestNode(t *testing.T, store object.Store, nodeID, dataDir stri
 		PeerBufferSize:      1000,
 		CheckpointInterval:  300 * time.Millisecond,
 		SegmentMaxAge:       200 * time.Millisecond,
-		LeaderWatchInterval: 200 * time.Millisecond,
+		LeaderWatchInterval: 2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("open %s: %v", nodeID, err)

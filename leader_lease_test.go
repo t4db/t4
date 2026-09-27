@@ -234,7 +234,7 @@ func TestNoTakeoverFromLiveLeader(t *testing.T) {
 			NodeID:              fmt.Sprintf("node-%d", i),
 			PeerListenAddr:      addr,
 			AdvertisePeerAddr:   addr,
-			LeaderWatchInterval: 10 * time.Second, // as in the Jepsen tests
+			LeaderWatchInterval: 10 * time.Second,
 		})
 		if err != nil {
 			t.Fatal(err)

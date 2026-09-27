@@ -27,8 +27,8 @@ import (
 //
 //   - Slow mode: every follower of this term is connected, exchanges
 //     heartbeats and was heard within slowHeardWindow, and none left within
-//     knownFollowerWindow. The lock is renewed every slowRenewInterval and
-//     stays valid for slowTTL. Followers only heartbeat while they hear the
+//     knownFollowerWindow. The lock is renewed every Config.LeaderWatchInterval
+//     and stays valid for slowTTLFactor times that. Followers only heartbeat while they hear the
 //     leader, so none of them is about to take over.
 //   - Fast mode otherwise: renewed every fastRenewInterval, valid for fastTTL.
 //
@@ -42,8 +42,12 @@ const (
 	fastRenewInterval = peer.FollowerRetryInterval // 2 s
 	fastTTL           = election.FastTTL           // 6 s
 
-	slowRenewInterval = 20 * time.Second
-	slowTTL           = 60 * time.Second
+	// slowTTLFactor is how many slow renewal intervals a lock written in
+	// slow mode stays valid: it tolerates missed renewals.
+	slowTTLFactor = 3
+
+	// minLeaderWatchInterval is the shortest slow renewal interval allowed.
+	minLeaderWatchInterval = fastRenewInterval
 
 	// slowHeardWindow is how recently the leader must have heard every
 	// follower to stay in slow mode.
@@ -98,6 +102,11 @@ func (n *Node) extendLease(start time.Time, slow bool) {
 	}
 }
 
+// slowTTL is how long a lock written in slow mode stays valid.
+func (n *Node) slowTTL() time.Duration {
+	return slowTTLFactor * n.cfg.LeaderWatchInterval
+}
+
 // slowSafe reports whether every follower that could take over is hearing
 // this leader (see peer.Server.SlowSafe).
 func (n *Node) slowSafe(now time.Time) bool {
@@ -114,7 +123,7 @@ func (n *Node) leaseDeadline(now time.Time) time.Time {
 	}
 	ttl := fastTTL
 	if g.slow && n.slowSafe(now) {
-		ttl = slowTTL
+		ttl = n.slowTTL()
 	}
 	return g.start.Add(ttl - leaseSafetyMargin)
 }

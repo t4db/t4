@@ -297,6 +297,9 @@ func applyObjectStoreEncryption(cfg *Config) error {
 // Open creates and starts a Node.
 func Open(cfg Config) (*Node, error) {
 	cfg.setDefaults()
+	if cfg.LeaderWatchInterval < minLeaderWatchInterval {
+		return nil, fmt.Errorf("t4: LeaderWatchInterval %v is below the minimum of %v", cfg.LeaderWatchInterval, minLeaderWatchInterval)
+	}
 
 	log := cfg.Logger
 	cp := checkpoint.New(log)

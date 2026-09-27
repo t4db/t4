@@ -126,7 +126,7 @@ func newFailoverCluster(t *testing.T, size int) *failoverCluster {
 			PeerBufferSize:      1000,
 			CheckpointInterval:  300 * time.Millisecond,
 			SegmentMaxAge:       200 * time.Millisecond,
-			LeaderWatchInterval: 1 * time.Second,
+			LeaderWatchInterval: 2 * time.Second,
 		})
 		if err != nil {
 			t.Fatalf("open node-%d: %v", i, err)

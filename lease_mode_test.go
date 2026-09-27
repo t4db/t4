@@ -80,7 +80,7 @@ func settleCluster(t *testing.T, nodes []*Node) *Node {
 }
 
 // TestSlowRenewalWhileFollowersHeard: while the leader hears every follower
-// it renews the lock every slowRenewInterval, not every 2 s.
+// it renews the lock every LeaderWatchInterval (20 s), not every 2 s.
 func TestSlowRenewalWhileFollowersHeard(t *testing.T) {
 	nodes, _, store := openCountedCluster(t)
 	leader := settleCluster(t, nodes)
@@ -172,14 +172,14 @@ func TestMayTakeOver(t *testing.T) {
 		want      bool
 	}{
 		{"released", &election.LockRecord{Term: 3}, 0, time.Time{}, true},
-		{"unknown, slow lock still valid", record(3, 30*time.Second, slowTTL), 0, time.Time{}, false},
-		{"unknown, slow lock expired", record(3, 61*time.Second, slowTTL), 0, time.Time{}, true},
+		{"unknown, slow lock still valid", record(3, 30*time.Second, 60*time.Second), 0, time.Time{}, false},
+		{"unknown, slow lock expired", record(3, 61*time.Second, 60*time.Second), 0, time.Time{}, true},
 		{"unknown, fast lock renewed 5 s ago", record(3, 5*time.Second, fastTTL), 0, time.Time{}, false},
-		{"known, heard just now", record(3, 30*time.Second, slowTTL), 3, ago(time.Second), false},
-		{"known, silent for 8 s, lock renewed 30 s ago", record(3, 30*time.Second, slowTTL), 3, ago(8 * time.Second), true},
+		{"known, heard just now", record(3, 30*time.Second, 60*time.Second), 3, ago(time.Second), false},
+		{"known, silent for 8 s, lock renewed 30 s ago", record(3, 30*time.Second, 60*time.Second), 3, ago(8 * time.Second), true},
 		{"known, silent for 8 s, lock renewed 1 s ago", record(3, time.Second, fastTTL), 3, ago(8 * time.Second), false},
-		{"heard an older term: unknown", record(4, 30*time.Second, slowTTL), 3, ago(8 * time.Second), false},
-		{"heard too long ago: unknown", record(3, 30*time.Second, slowTTL), 3, ago(followerKnownWindow + time.Second), false},
+		{"heard an older term: unknown", record(4, 30*time.Second, 60*time.Second), 3, ago(8 * time.Second), false},
+		{"heard too long ago: unknown", record(3, 30*time.Second, 60*time.Second), 3, ago(followerKnownWindow + time.Second), false},
 		{"record of an earlier release, fresh", &election.LockRecord{Term: 3, LastSeenNano: ago(time.Second).UnixNano()}, 0, time.Time{}, false},
 		{"record of an earlier release, stale", &election.LockRecord{Term: 3, LastSeenNano: ago(7 * time.Second).UnixNano()}, 0, time.Time{}, true},
 	}
@@ -261,7 +261,7 @@ func TestTakeOverChecksTheRecordItReplaces(t *testing.T) {
 }
 
 // TestLeaseHeldWithoutWrites: a leader's first renewal grants a fast lease.
-// Once in slow mode it renews only every slowRenewInterval, so it must first
+// Once in slow mode it renews only every LeaderWatchInterval, so it must first
 // obtain a slow lease, or its lease ends long before the next renewal. No
 // writes here: the first write moves the election fence, and that lock write
 // would mask the gap.
@@ -280,5 +280,20 @@ func TestLeaseHeldWithoutWrites(t *testing.T) {
 	defer cancel()
 	if _, err := leader.LinearizableGet(ctx, "/k"); err != nil {
 		t.Fatalf("leader without writes lost its lease in slow mode: %v", err)
+	}
+}
+
+// TestLeaderWatchIntervalMinimum: the slow renewal interval may not be set
+// below the fast one.
+func TestLeaderWatchIntervalMinimum(t *testing.T) {
+	addr := freeAddrLocal(t)
+	_, err := Open(Config{
+		DataDir:             t.TempDir(),
+		ObjectStore:         object.NewMem(),
+		PeerListenAddr:      addr,
+		LeaderWatchInterval: time.Second,
+	})
+	if err == nil {
+		t.Fatal("Open accepted a LeaderWatchInterval below the minimum")
 	}
 }

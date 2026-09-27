@@ -163,7 +163,7 @@ func (n *Node) recoverLocalWALBeforeLeadership(walDir string) error {
 // It renews the lock (see lease.go): it reads the lock, then rewrites it with
 // the time the renewal started, how long it stays valid and the election
 // fence, conditioned on the ETag it read, so a TakeOver in between is
-// detected and the node steps down. It renews every slowRenewInterval while
+// detected and the node steps down. It renews every LeaderWatchInterval while
 // every follower is demonstrably hearing it, every fastRenewInterval
 // otherwise, at once when it leaves slow mode, and whenever the commit loop
 // needs the fence moved.
@@ -174,10 +174,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 	}
 	check := time.NewTicker(leaderCheckInterval)
 	defer check.Stop()
-	slowInterval := slowRenewInterval
-	if w := n.cfg.LeaderWatchInterval; w > 0 && w < slowInterval {
-		slowInterval = w
-	}
+	slowInterval := n.cfg.LeaderWatchInterval
 
 	// stepDown fences writes while cancelling the node's background work,
 	// then stops the peer server so followers lose their streams and find
@@ -228,7 +225,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		}
 		ttl := fastTTL
 		if slow {
-			ttl = slowTTL
+			ttl = n.slowTTL()
 		}
 		tCtx, tCancel := context.WithTimeout(ctx, 5*time.Second)
 		err = lock.Renew(tCtx, term, n.cfg.AdvertisePeerAddr, etag, rev, start, ttl)
