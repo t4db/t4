@@ -180,6 +180,13 @@ func TestDeposedLeaderStopsServing(t *testing.T) {
 	if _, err := leader.Txn(wctx, failing); !errors.Is(err, ErrNoLeader) {
 		t.Fatalf("deposed leader answered a failing Txn with %v, want ErrNoLeader", err)
 	}
+	// The meta keyspace has its own write and read paths.
+	if err := leader.MetaPut(wctx, "/meta-k", []byte("x")); !errors.Is(err, ErrNoLeader) {
+		t.Fatalf("deposed leader answered MetaPut with %v, want ErrNoLeader", err)
+	}
+	if _, _, err := leader.LinearizableMetaGet(wctx, "/meta-k"); !errors.Is(err, ErrNoLeader) {
+		t.Fatalf("deposed leader answered LinearizableMetaGet with %v, want ErrNoLeader", err)
+	}
 }
 
 // TestLeaderWithoutObjectStoreKeepsServing: a leader that loses object

@@ -147,6 +147,9 @@ func (n *Node) writeMeta(ctx context.Context, op wal.Op, key string, value []byt
 	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
+	if err := n.checkLease(); err != nil {
+		return err
+	}
 	start := time.Now()
 	n.mu.Lock()
 	if n.closed.Load() {

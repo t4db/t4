@@ -390,6 +390,11 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
 
 	case peer.ForwardGetSequence:
+		// The ReadIndex of a follower's meta read: like ForwardGetRevision
+		// it needs the lease.
+		if err := n.checkLease(); err != nil {
+			return nil, err
+		}
 		// Every acknowledged write has been applied before its caller is
 		// released, so the applied sequence covers all of them. Meta writes
 		// have no optimistic pending state, unlike ForwardGetRevision.
