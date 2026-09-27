@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,14 +35,37 @@ import (
 	"github.com/t4db/t4/etcd/auth"
 )
 
+var (
+	portMu   sync.Mutex
+	usedPort = map[int]bool{}
+)
+
+// freePort returns a 127.0.0.1 address with a free port below the kernels'
+// ephemeral ranges, never the same one twice: a port-0 bind elsewhere cannot
+// take it before the caller binds it. It mirrors t4's internal
+// testutil.FreeAddr, which this module cannot import.
 func freePort(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	portMu.Lock()
+	defer portMu.Unlock()
+	for range 1000 {
+		port := 20000 + rand.Intn(12000)
+		if usedPort[port] {
+			continue
+		}
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		addr := l.Addr().String()
+		if err := l.Close(); err != nil {
+			continue
+		}
+		usedPort[port] = true
+		return addr
 	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().String()
+	t.Fatal("no free port found")
+	return ""
 }
 
 func startEtcd(t *testing.T) string {

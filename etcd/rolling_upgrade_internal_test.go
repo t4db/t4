@@ -14,17 +14,13 @@ import (
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/etcd/auth"
 	"github.com/t4db/t4/internal/testhook"
+	"github.com/t4db/t4/internal/testutil"
 	"github.com/t4db/t4/pkg/object"
 )
 
 func freeAddr(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().String()
+	return testutil.FreeAddr(t)
 }
 
 // TestFollowerCompatibleWithV1Leader covers a rolling upgrade of a database
