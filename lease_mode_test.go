@@ -259,3 +259,26 @@ func TestTakeOverChecksTheRecordItReplaces(t *testing.T) {
 		t.Fatal("leader lost the lock")
 	}
 }
+
+// TestLeaseHeldWithoutWrites: a leader's first renewal grants a fast lease.
+// Once in slow mode it renews only every slowRenewInterval, so it must first
+// obtain a slow lease, or its lease ends long before the next renewal. No
+// writes here: the first write moves the election fence, and that lock write
+// would mask the gap.
+func TestLeaseHeldWithoutWrites(t *testing.T) {
+	nodes, _, _ := openCountedCluster(t)
+	leader := waitForLeaderNodeLocal(t, nodes, 10*time.Second)
+	deadline := time.Now().Add(10 * time.Second)
+	for leader.peerSrv.ConnectedFollowers() != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("followers did not connect")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(fastTTL + 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := leader.LinearizableGet(ctx, "/k"); err != nil {
+		t.Fatalf("leader without writes lost its lease in slow mode: %v", err)
+	}
+}

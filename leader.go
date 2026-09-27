@@ -279,6 +279,11 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 			// hear this leader: the lease now runs from that renewal
 			// for fastTTL only and may have ended. Renew at once.
 			reason = "fast mode"
+		case g != nil && !g.slow && slow:
+			// Entering slow mode, the next renewal is slowInterval
+			// away, but the lease from the last (fast) renewal ends
+			// fastTTL after it. Renew now to obtain a slow lease.
+			reason = "slow mode"
 		case n.fencePending():
 			reason = "fence"
 		default:
