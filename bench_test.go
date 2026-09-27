@@ -3,7 +3,6 @@ package t4_test
 import (
 	"context"
 	"fmt"
-	"net"
 	"runtime"
 	"sort"
 	"sync"
@@ -13,6 +12,8 @@ import (
 
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/pkg/object"
+
+	"github.com/t4db/t4/internal/testutil"
 )
 
 func openBenchNode(b *testing.B) *t4.Node {
@@ -331,13 +332,7 @@ func BenchmarkWatch(b *testing.B) {
 // freeBenchAddr allocates a free TCP port for benchmark use.
 func freeBenchAddr(b *testing.B) string {
 	b.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		b.Fatalf("freeBenchAddr: %v", err)
-	}
-	addr := lis.Addr().String()
-	lis.Close()
-	return addr
+	return testutil.FreeAddr(b)
 }
 
 // BenchmarkGetSerializable is the baseline: single-node local read, no sync RPC.
