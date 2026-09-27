@@ -20,57 +20,87 @@ import (
 // as long as the clocks of any two nodes differ by less than
 // leaseSafetyMargin.
 //
-// Renewing the lock every couple of seconds would make every lock write a
-// liveness proof, at the cost of a GET and a PUT every 2 s. Instead the
-// leader renews slowly while it can show that every follower that could take
-// over is hearing it, and fast otherwise:
+// To keep object-storage traffic low the leader renews slowly while it can
+// show that every follower that could take over is hearing it, and fast
+// otherwise:
 //
 //   - Slow mode: every follower of this term is connected, exchanges
-//     heartbeats and was heard within slowHeardWindow, and none left within
+//     heartbeats and was heard within silenceTimeout, and none left within
 //     knownFollowerWindow. The lock is renewed every Config.LeaderWatchInterval
-//     and stays valid for slowTTLFactor times that. Followers only heartbeat while they hear the
-//     leader, so none of them is about to take over.
+//     and stays valid for slowTTLFactor times that. Followers only heartbeat
+//     while they hear the leader, so none of them is about to take over.
 //   - Fast mode otherwise: renewed every fastRenewInterval, valid for fastTTL.
 //
 // A node that is not a known follower (see mayTakeOver) takes over only once
 // the lock's ValidUntil has passed. A known follower that lost the leader may
 // take over after knownTakeoverDelay once the lock has not been renewed for
 // fastTTL: by then the leader has noticed the silence and left slow mode.
-const (
-	leaseSafetyMargin = peer.FollowerRetryInterval // 2 s
+//
+// The timing has three inputs; everything else that matters for safety is
+// derived from them below, and TestLeaseTimingInvariants checks the
+// inequalities the safety argument needs.
 
-	fastRenewInterval = peer.FollowerRetryInterval // 2 s
-	fastTTL           = election.FastTTL           // 6 s
+// Inputs.
+const (
+	// heartbeatInterval is how often leader and followers exchange
+	// heartbeats on the WAL stream.
+	heartbeatInterval = peer.HeartbeatInterval // 500 ms
+
+	// leaseSafetyMargin is the largest clock offset between two nodes the
+	// lease tolerates.
+	leaseSafetyMargin = 2 * time.Second
+
+	// fastTTL is how long a lock written in fast mode stays valid. It is
+	// fixed by compatibility: nodes of earlier releases back off for this
+	// long after LastSeenNano.
+	fastTTL = election.FastTTL // 6 s
+
+	// The third input is Config.LeaderWatchInterval, the slow renewal
+	// interval.
+)
+
+// Derived.
+const (
+	// silenceTimeout is how long either side of a WAL stream goes without
+	// hearing the other before it drops the stream. The leader also stays in
+	// slow mode only while it heard every follower within this long.
+	silenceTimeout = peer.HeartbeatTimeout // 4 heartbeats = 2 s
+
+	// fastRenewInterval leaves room for two missed renewals within fastTTL.
+	fastRenewInterval = fastTTL / 3 // 2 s
 
 	// slowTTLFactor is how many slow renewal intervals a lock written in
-	// slow mode stays valid: it tolerates missed renewals.
+	// slow mode stays valid, again tolerating two missed renewals.
 	slowTTLFactor = 3
 
 	// minLeaderWatchInterval is the shortest slow renewal interval allowed.
 	minLeaderWatchInterval = fastRenewInterval
 
-	// slowHeardWindow is how recently the leader must have heard every
-	// follower to stay in slow mode.
-	slowHeardWindow = peer.HeartbeatTimeout
+	// knownTakeoverDelay is how long a known follower waits after it last
+	// heard the leader before it may take over. It must cover the time a
+	// live leader needs to leave slow mode: the follower keeps heartbeating
+	// until silenceTimeout after it last heard the leader, the leader leaves
+	// slow mode once it has not heard the follower for silenceTimeout, their
+	// clocks may differ by leaseSafetyMargin, plus two heartbeats of slack
+	// for send cadence and delivery.
+	knownTakeoverDelay = 2*silenceTimeout + leaseSafetyMargin + 2*heartbeatInterval // 7 s
 
 	// knownFollowerWindow is how long after a follower's stream ends the
-	// leader stays in fast mode for it.
-	knownFollowerWindow = 5 * time.Minute
-
-	// knownTakeoverDelay is how long a known follower waits after it last
-	// heard the leader before it may take over. It must exceed the time the
-	// leader needs to leave slow mode: the follower stops heartbeating at
-	// most HeartbeatTimeout after it last heard the leader, the leader
-	// notices within slowHeardWindow plus a check interval, and clocks may
-	// differ by leaseSafetyMargin.
-	knownTakeoverDelay = 7 * time.Second
+	// leader stays in fast mode for it. It is a protocol constant, not
+	// derived from Config, because leader and followers must agree on it.
+	// Afterwards the follower counts as unknown and goes by ValidUntil.
+	knownFollowerWindow = 60 * time.Second
 
 	// followerKnownWindow is how long after it last heard the leader a
-	// follower counts itself as known to it: the leader's
-	// knownFollowerWindow, less the slack between the follower's last
-	// heartbeat and the leader dropping its stream.
-	followerKnownWindow = knownFollowerWindow - 10*time.Second
+	// follower counts itself as known to it. The leader drops a follower's
+	// stream at most silenceTimeout plus a heartbeat after the follower last
+	// heard it, and clocks may differ by leaseSafetyMargin, so this ends
+	// before the leader's knownFollowerWindow does.
+	followerKnownWindow = knownFollowerWindow - silenceTimeout - heartbeatInterval - leaseSafetyMargin // 55.5 s
+)
 
+// Tuning. These trade latency and availability and play no part in safety.
+const (
 	// fenceAckWait is how long a write waits for every connected follower
 	// to acknowledge it before the leader moves the election fence instead.
 	fenceAckWait = time.Second
@@ -111,7 +141,7 @@ func (n *Node) slowTTL() time.Duration {
 // this leader (see peer.Server.SlowSafe).
 func (n *Node) slowSafe(now time.Time) bool {
 	srv := n.leasePeers.Load()
-	return srv == nil || srv.SlowSafe(now, slowHeardWindow, knownFollowerWindow)
+	return srv == nil || srv.SlowSafe(now, silenceTimeout, knownFollowerWindow)
 }
 
 // leaseDeadline returns when this leader's lease ends, or the zero time if it

@@ -119,7 +119,7 @@ t4 run \
 - The leader renews the lock by reading it **with its ETag** and — if still the owner — rewriting it with
   `If-Match: <etag>`. If the renewal is rejected (`ErrPreconditionFailed`), a new leader has taken over: the old leader
   steps down immediately. While it hears every follower it renews every 20 s (valid 60 s); as soon as a follower goes
-  silent or leaves, every 2 s (valid 6 s), until 5 minutes after the follower is back or gone.
+  silent or leaves, every 2 s (valid 6 s), until 60 s after the follower is back or gone.
 - The leader holds a **lease**: it acknowledges writes and serves linearizable reads only while its lease holds (see
   [Consistency](consistency.md#split-brain-prevention)). A leader cut off from S3 and from its followers therefore
   stops serving before any follower may take over; one cut off from S3 only keeps serving, for up to about a minute,

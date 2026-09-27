@@ -125,7 +125,7 @@ t4 run \
 - The leader renews the lock by reading it **with its ETag** and — if still the owner — rewriting it with
   `If-Match: <etag>`. If the renewal is rejected (`ErrPreconditionFailed`), a new leader has taken over: the old leader
   steps down immediately. While it hears every follower it renews every 20 s (valid 60 s); as soon as a follower goes
-  silent or leaves, every 2 s (valid 6 s), until 5 minutes after the follower is back or gone.
+  silent or leaves, every 2 s (valid 6 s), until 60 s after the follower is back or gone.
 - The leader holds a **lease**: it acknowledges writes and serves linearizable reads only while its lease holds (see
   [Consistency](consistency#split-brain-prevention)). A leader cut off from S3 and from its followers therefore
   stops serving before any follower may take over; one cut off from S3 only keeps serving, for up to about a minute,
@@ -162,7 +162,7 @@ In a healthy cluster, ordinary writes do not wait for S3. The steady-state S3 co
 | Checkpoints | 2,880 checkpoint cycles; each writes several small objects plus any new SST files for changed data |
 
 In cluster mode the leader renews its lock every 20 seconds while it hears every follower, one GET plus one
-conditional PUT per renewal. While a follower is silent, and for 5 minutes after, it renews every 2 seconds, so that
+conditional PUT per renewal. While a follower is silent, and for 60 seconds after, it renews every 2 seconds, so that
 the follower finds it alive (see [Consistency](consistency#split-brain-prevention)). A follower that leaves or falls
 behind costs one extra lock write to move the election fence. Single-node mode does not renew a lock.
 

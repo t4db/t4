@@ -158,20 +158,20 @@ Heartbeats are negotiated when the stream opens, so nodes with and without heart
 
 **TakeOver (follower promoting itself):**
 1. Follower detects a dead leader when the WAL gRPC stream fails, or goes silent, `FollowerMaxRetries` consecutive times.
-2. Before attempting takeover, the follower checks the current lock. A follower that heard the leader's heartbeats (its term) within the last 5 minutes may promote once it has not heard it for 7 s and the lock has not been renewed for 6 s. Any other node waits until the lock's validity (`ValidUntilNano`) has passed. Otherwise the leader may still be serving and the follower backs off. The check is repeated in `TakeOver` on the record the conditional write replaces.
+2. Before attempting takeover, the follower checks the current lock. A follower that heard the leader's heartbeats (its term) within the last minute may promote once it has not heard it for 7 s and the lock has not been renewed for 6 s. Any other node waits until the lock's validity (`ValidUntilNano`) has passed. Otherwise the leader may still be serving and the follower backs off. The check is repeated in `TakeOver` on the record the conditional write replaces.
 3. If the lock has already advanced to a term higher than the follower's `floorTerm` (another candidate already won), the follower backs off and follows the new winner.
 4. Otherwise: read the lock ETag, then `PUT` with `If-Match: <etag>`. Only the candidate that read the same ETag wins; all others get a precondition failure and re-read to find the new leader.
 
 **Lease and stepdown:**
 - The leader renews the lock by reading it **with its ETag** and — if still the owner — rewriting it with `If-Match: <etag>`: the time the renewal started (`RenewedNano`), until when it is valid (`ValidUntilNano`) and its committed revision. If a follower won a TakeOver in between, the conditional PUT fails with `ErrPreconditionFailed` and the leader steps down immediately. `LastSeenNano` is kept at `ValidUntilNano` − 6 s, so nodes of earlier releases back off exactly as long.
-- **Slow mode:** while every follower of this term is connected, exchanges heartbeats and was heard within 2 s, and none left in the last 5 minutes (without a GoodBye), the leader renews every 20 s and the lock stays valid for 60 s. Followers heartbeat only while they hear the leader, so none of them is about to take over.
+- **Slow mode:** while every follower of this term is connected, exchanges heartbeats and was heard within 2 s, and none left in the last 60 s (without a GoodBye), the leader renews every 20 s and the lock stays valid for 60 s. Followers heartbeat only while they hear the leader, so none of them is about to take over.
 - **Fast mode** otherwise: the leader renews at once, then every 2 s, valid for 6 s. A follower that lost the leader waits 7 s, longer than the leader needs to notice the silence, and then finds the lock renewed within the last 2 s.
 - The leader's **lease** ends 2 s (the clock-skew margin) before the validity of its last renewal, and, when not in slow mode, 4 s after that renewal started. It acknowledges writes and serves linearizable reads (its own, and the ReadIndex it answers for followers) only while the lease holds; otherwise it returns a "no leader" error.
 - **Election fence:** before acknowledging a write, the leader makes sure that every node that may lack it is blocked by the committed revision recorded in the lock: connected followers that have not acknowledged it, followers that left, and nodes it never heard from. It waits up to 1 s for every connected follower, then moves the fence with a lock write. A follower that makes no ACK progress for 5 s is dropped.
 - The slow renewal interval is `LeaderWatchInterval` (`--leader-watch-interval-sec`, default 20 s); a lock written in slow mode stays valid for three intervals. A longer interval saves S3 requests, but a node that never heard the leader then waits longer before taking over, and a leader cut off from S3 keeps serving its followers for as long.
 
 **S3 request budget:**
-Each renewal costs 1 GET + 1 conditional PUT. A healthy cluster renews every 20 s (≈ 4,300 of each per day). On top of that come one lock write per term start and per follower that leaves or falls behind, and 2 s renewals while a follower is silent and for 5 minutes after. Election writes otherwise happen only at startup and on takeover.
+Each renewal costs 1 GET + 1 conditional PUT. A healthy cluster renews every 20 s (≈ 4,300 of each per day). On top of that come one lock write per term start and per follower that leaves or falls behind, and 2 s renewals while a follower is silent and for 60 s after. Election writes otherwise happen only at startup and on takeover.
 
 ### CAP properties
 

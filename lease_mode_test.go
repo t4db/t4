@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/t4db/t4/internal/election"
+	"github.com/t4db/t4/internal/peer"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -295,5 +296,33 @@ func TestLeaderWatchIntervalMinimum(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Open accepted a LeaderWatchInterval below the minimum")
+	}
+}
+
+// TestLeaseTimingInvariants checks the inequalities the lease's safety
+// argument relies on (see lease.go), for any allowed LeaderWatchInterval.
+func TestLeaseTimingInvariants(t *testing.T) {
+	check := func(ok bool, what string) {
+		t.Helper()
+		if !ok {
+			t.Error(what)
+		}
+	}
+	check(election.FastTTL == peer.LeaderLivenessTTL,
+		"fastTTL must equal the liveness TTL earlier releases use")
+	check(silenceTimeout >= 2*heartbeatInterval,
+		"a single lost heartbeat must not drop a stream")
+	check(fastRenewInterval < fastTTL-leaseSafetyMargin,
+		"a fast lease must outlast the fast renewal interval")
+	check(knownTakeoverDelay > 2*silenceTimeout+leaseSafetyMargin,
+		"a known follower must wait longer than a live leader needs to leave slow mode")
+	check(followerKnownWindow+silenceTimeout+heartbeatInterval+leaseSafetyMargin <= knownFollowerWindow,
+		"a follower must stop counting itself as known before the leader forgets it")
+	check(knownTakeoverDelay < followerKnownWindow,
+		"a known follower must be able to take over while it is still known")
+	for _, interval := range []time.Duration{minLeaderWatchInterval, 20 * time.Second, 5 * time.Minute, time.Hour} {
+		n := &Node{cfg: Config{LeaderWatchInterval: interval}}
+		check(interval < n.slowTTL()-leaseSafetyMargin,
+			fmt.Sprintf("a slow lease must outlast the slow renewal interval (%v)", interval))
 	}
 }
