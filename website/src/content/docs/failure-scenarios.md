@@ -210,6 +210,7 @@ T4_CHAOS_ROUNDS=100 go test -run TestChaos -timeout 600s
 | Event | Typical time |
 |---|---|
 | Graceful leader shutdown (broadcast) | ~12 ms |
+| Graceful leader shutdown, follower missed the broadcast | next takeover attempt (the released lock carries no liveness to wait out) |
 | Crash failover (default settings) | ~6 s (2 × `FollowerRetryInterval` after `FollowerMaxRetries`) |
 | Follower reconnect after network heal | < 1 s |
 

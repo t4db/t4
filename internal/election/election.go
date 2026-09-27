@@ -35,7 +35,7 @@ type LockRecord struct {
 	NodeID       string `json:"node_id"`
 	Term         uint64 `json:"term"`
 	LeaderAddr   string `json:"leader_addr"`    // follower peer-stream address
-	LastSeenNano int64  `json:"last_seen_nano"` // Unix ns; set by leader on liveness touch
+	LastSeenNano int64  `json:"last_seen_nano"` // Unix ns; set by leader on liveness touch, 0 once released on graceful shutdown
 	CommittedRev int64  `json:"committed_rev"`  // leader's highest committed revision; used as election fence
 }
 
@@ -136,6 +136,44 @@ func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64, committedRev int6
 	}
 
 	return l.writeAtomic(ctx, newTerm, committedRev, cur)
+}
+
+// ErrNotOwner is returned by Relinquish when the lock no longer belongs to
+// the caller at the given term.
+var ErrNotOwner = errors.New("election: lock held by another leader")
+
+// Relinquish marks the lock as released by a leader that has stopped serving:
+// LastSeenNano is cleared, so no candidate waits out the liveness TTL, while
+// CommittedRev keeps fencing out candidates that are behind. It writes only if
+// the caller still owns the lock at term, conditionally on the ETag it read,
+// and otherwise returns ErrNotOwner without touching a newer leader's lock.
+func (l *Lock) Relinquish(ctx context.Context, term uint64, committedRev int64) error {
+	cur, err := l.readWithETag(ctx)
+	if err != nil {
+		return err
+	}
+	if cur.rec == nil || cur.rec.NodeID != l.nodeID || cur.rec.Term != term {
+		return ErrNotOwner
+	}
+	rec := *cur.rec
+	rec.LastSeenNano = 0
+	if committedRev > rec.CommittedRev {
+		rec.CommittedRev = committedRev
+	}
+	if l.conditional == nil || cur.etag == "" {
+		return l.write(ctx, &rec)
+	}
+	b, err := json.Marshal(&rec)
+	if err != nil {
+		return err
+	}
+	if err := l.conditional.PutIfMatch(ctx, LockKey, bytes.NewReader(b), cur.etag); err != nil {
+		if errors.Is(err, object.ErrPreconditionFailed) {
+			return ErrNotOwner
+		}
+		return fmt.Errorf("election: relinquish lock: %w", err)
+	}
+	return nil
 }
 
 // Release deletes the lock. Safe to call if the lock is not held.

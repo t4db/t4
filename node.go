@@ -795,16 +795,22 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 		n.log.Errorf("t4: graceful shutdown: wal close: %v", werr)
 	}
 
-	// 3. Touch the election lock with our true CurrentRevision so that
-	//    election.TakeOver fences any candidate whose local revision is
-	//    behind us. Without this the lock's CommittedRev reflects only
-	//    the last renewal, which can lag the actual durable rev by up
-	//    to one renewal interval.
+	// 3. Release the election lock, recording our true CurrentRevision so
+	//    that election.TakeOver fences any candidate whose local revision
+	//    is behind us. Without this the lock's CommittedRev reflects only
+	//    the last renewal, which can lag the actual durable rev by up to
+	//    one renewal interval. Releasing clears LastSeenNano, so a follower
+	//    that misses the shutdown broadcast below does not wait out the
+	//    liveness TTL. If another node has already taken the lock, it is
+	//    left alone.
 	if n.cfg.ObjectStore != nil {
 		tCtx, tCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
-		if terr := lock.Touch(tCtx, n.term, n.cfg.AdvertisePeerAddr, n.db.Load().CurrentRevision()); terr != nil {
-			n.log.Warnf("t4: graceful shutdown: lock touch: %v", terr)
+		switch rerr := lock.Relinquish(tCtx, n.term, n.db.Load().CurrentRevision()); {
+		case errors.Is(rerr, election.ErrNotOwner):
+			n.log.Infof("t4: graceful shutdown: lock already held by a newer leader — leaving it")
+		case rerr != nil:
+			n.log.Warnf("t4: graceful shutdown: release lock: %v", rerr)
 		}
 		tCancel()
 	}
