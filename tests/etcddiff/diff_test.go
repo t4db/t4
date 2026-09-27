@@ -439,17 +439,45 @@ func seed(t *testing.T) int64 {
 	return time.Now().UnixNano()
 }
 
-func collect(ctx context.Context, cli *clientv3.Client) <-chan []*clientv3.Event {
+// collect watches the whole keyspace from revision 1 and returns all events
+// once ctx ends. first is closed when the first event arrives.
+func collect(ctx context.Context, cli *clientv3.Client) (events <-chan []*clientv3.Event, first <-chan struct{}) {
 	out := make(chan []*clientv3.Event, 1)
+	firstC := make(chan struct{})
 	wch := cli.Watch(ctx, "", clientv3.WithPrefix(), clientv3.WithPrevKV(), clientv3.WithRev(1))
 	go func() {
 		var events []*clientv3.Event
 		for resp := range wch {
+			if len(events) == 0 && len(resp.Events) > 0 {
+				close(firstC)
+			}
 			events = append(events, resp.Events...)
 		}
 		out <- events
 	}()
-	return out
+	return out, firstC
+}
+
+// startHistoryWatches starts a history watch on each side and waits until
+// both have delivered an event. etcd catches up a watch that starts in the
+// past in the background (every 100 ms) and cancels it as compacted if a
+// compaction overtakes it first, which t4, delivering at once, never does:
+// both are valid, but only an up-to-date watch makes the histories
+// comparable.
+func (p *pair) startHistoryWatches(ctx context.Context) (etcd, t4 <-chan []*clientv3.Event) {
+	p.t.Helper()
+	etcd, eFirst := collect(ctx, p.etcd)
+	t4, tFirst := collect(ctx, p.t4)
+	p.desc = "history watches ready"
+	p.put("/etcddiff/watch-ready", "1")
+	for _, first := range []<-chan struct{}{eFirst, tFirst} {
+		select {
+		case <-first:
+		case <-time.After(10 * time.Second):
+			p.t.Fatal("history watch delivered nothing")
+		}
+	}
+	return etcd, t4
 }
 
 func eventString(e *clientv3.Event) string {
@@ -469,7 +497,7 @@ func TestDifferential(t *testing.T) {
 	p.state()
 
 	watchCtx, stopWatch := context.WithCancel(ctx)
-	eWatch, tWatch := collect(watchCtx, p.etcd), collect(watchCtx, p.t4)
+	eWatch, tWatch := p.startHistoryWatches(watchCtx)
 
 	const steps = 400
 	for p.step = 1; p.step <= steps; p.step++ {
@@ -520,7 +548,7 @@ func TestLeaseExpiry(t *testing.T) {
 	p.put("/leased/b", "2", clientv3.WithLease(withKeys))
 
 	watchCtx, stopWatch := context.WithCancel(ctx)
-	eWatch, tWatch := collect(watchCtx, p.etcd), collect(watchCtx, p.t4)
+	eWatch, tWatch := p.startHistoryWatches(watchCtx)
 
 	// Wait until both have expired the leases and deleted the keys.
 	deadline := time.Now().Add(20 * time.Second)
