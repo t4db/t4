@@ -74,15 +74,23 @@ func (e *Entry) ConsumesRevision() bool {
 // Meta ops, standalone or inside a transaction, require format 3 so that
 // binaries predating them refuse the segment instead of misapplying it.
 func RequiredFormat(e *Entry) int {
-	switch e.Op {
-	case OpMetaPut, OpMetaDelete:
+	if e.HasMetaOps() {
 		return formatMeta
-	case OpTxn:
-		if s, err := scanTxnOps(e.Value); err == nil && s.meta > 0 {
-			return formatMeta
-		}
 	}
 	return formatBase
+}
+
+// HasMetaOps reports whether e writes the meta keyspace: it is a meta op, or a
+// transaction with at least one meta sub-operation. It does not allocate.
+func (e *Entry) HasMetaOps() bool {
+	switch e.Op {
+	case OpMetaPut, OpMetaDelete:
+		return true
+	case OpTxn:
+		s, err := scanTxnOps(e.Value)
+		return err == nil && s.meta > 0
+	}
+	return false
 }
 
 // ValidateEntry checks that e and, for OpTxn, every sub-operation carry op
