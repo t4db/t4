@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -72,6 +73,35 @@ func TestTracingWritePathSpans(t *testing.T) {
 	}
 	if !walAppend.StartTime().After(put.StartTime()) {
 		t.Error("t4.wal.append should start after its parent")
+	}
+}
+
+// TestTracingOffWithoutProvider checks that a nil Config.TracerProvider turns
+// tracing off, matching the etcd gRPC layer and the peer client: an embedding
+// application's global provider must not be picked up implicitly, and writes
+// and reads must not pay for span machinery nobody asked for.
+func TestTracingOffWithoutProvider(t *testing.T) {
+	tp, rec := recordingProvider(t)
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	n, err := Open(Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() {
+		_ = n.Close()
+	}()
+
+	if _, err := n.Put(context.Background(), "/registry/pods/default/nginx", []byte("v"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := n.LinearizableGet(context.Background(), "/registry/pods/default/nginx"); err != nil {
+		t.Fatalf("LinearizableGet: %v", err)
+	}
+	if names := spanNames(rec); len(names) != 0 {
+		t.Fatalf("nil TracerProvider recorded spans via the global provider: %v", names)
 	}
 }
 
