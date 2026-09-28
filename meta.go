@@ -58,8 +58,7 @@ func (n *Node) MetaEnabled() (bool, error) {
 	if n.closed.Load() {
 		return false, ErrClosed
 	}
-	_, ok, err := n.db.Load().MetaGet(metaFormatKey)
-	return ok, err
+	return n.db.Load().MetaHas(metaFormatKey)
 }
 
 // initMetaAtGenesis enables the meta keyspace in a database that has no WAL
@@ -86,7 +85,7 @@ func (n *Node) initMetaAtGenesis(ctx context.Context) (err error) {
 		// A write forwarded by a follower got in first: the database keeps
 		// the legacy format, which followers on earlier releases can read.
 		if n.peerSrv != nil {
-			if _, metaOn, err := n.db.Load().MetaGet(metaFormatKey); err == nil && !metaOn {
+			if metaOn, err := n.db.Load().MetaHas(metaFormatKey); err == nil && !metaOn {
 				n.peerSrv.SetMinFollowerWALFormat(0)
 			}
 		}
@@ -195,13 +194,16 @@ func (n *Node) metaExistsLocked(key string) (bool, error) {
 	if p, ok := n.pendingMeta[key]; ok {
 		return !p.deleted, nil
 	}
-	_, ok, err := n.db.Load().MetaGet(key)
-	return ok, err
+	return n.db.Load().MetaHas(key)
 }
 
 // trackPendingMetaLocked records e's meta ops in pendingMeta under a fresh
 // token and returns it, or 0 when e has no meta ops. Must be called under n.mu.
 func (n *Node) trackPendingMetaLocked(e *wal.Entry) (uint64, error) {
+	// Most transactions hold only data ops; don't decode them to find out.
+	if !e.HasMetaOps() {
+		return 0, nil
+	}
 	var ops []wal.TxnSubOp
 	switch {
 	case e.Op.IsMeta():
