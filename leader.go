@@ -89,7 +89,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// A database with the meta keyspace, or one Open is about to create with
 	// it (see initMetaAtGenesis), has WAL entries that followers below format
 	// 3 would misapply: refuse them before serving.
-	if _, metaOn, err := n.db.Load().MetaGet(metaFormatKey); err != nil {
+	if metaOn, err := n.db.Load().MetaHas(metaFormatKey); err != nil {
 		_ = w2.Close()
 		return fmt.Errorf("t4: read meta format: %w", err)
 	} else if metaOn || (opening && n.db.Load().LastSequence() == 0 && !testhook.LegacyNewDatabases.Load()) {

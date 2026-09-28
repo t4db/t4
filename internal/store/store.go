@@ -833,6 +833,22 @@ func (s *Store) MetaGet(key string) (value []byte, ok bool, err error) {
 	return value, true, nil
 }
 
+// MetaHas reports whether key exists in the meta keyspace, without copying
+// its value.
+func (s *Store) MetaHas(key string) (bool, error) {
+	_, closer, err := s.db.Get(metaKVKey(key))
+	if err == pebble.ErrNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: get meta key %q: %w", key, err)
+	}
+	if err := closer.Close(); err != nil {
+		return false, fmt.Errorf("store: get meta key %q: %w", key, err)
+	}
+	return true, nil
+}
+
 // MetaList returns all meta keyspace entries whose key starts with prefix,
 // sorted by key.
 func (s *Store) MetaList(prefix string) ([]MetaKV, error) {
