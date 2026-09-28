@@ -11,6 +11,7 @@ package etcd
 import (
 	"context"
 	"math"
+	"runtime"
 	"sync"
 	"time"
 
@@ -112,6 +113,7 @@ type serverConfig struct {
 	maxConcurrentStreams uint32
 	maxRecvMsgSize       int
 	maxSendMsgSize       int
+	streamWorkers        int
 }
 
 // WithKeepalive sets the keepalive enforcement policy and server ping params.
@@ -135,6 +137,33 @@ func WithGRPCLimits(maxConcurrentStreams uint32, maxRecvMsgSize, maxSendMsgSize 
 			c.maxSendMsgSize = maxSendMsgSize
 		}
 	}
+}
+
+// WithStreamWorkers sets how many long-lived goroutines serve incoming RPCs.
+// n > 0 sets the pool size, n < 0 disables the pool so every RPC gets a fresh
+// goroutine (gRPC's default), and 0 keeps the default of
+// DefaultStreamWorkers().
+func WithStreamWorkers(n int) Option {
+	return func(c *serverConfig) {
+		if n != 0 {
+			c.streamWorkers = n
+		}
+	}
+}
+
+// DefaultStreamWorkers returns the default RPC worker pool size.
+//
+// Without a pool gRPC starts a goroutine per RPC, and a read's path through
+// Pebble runs deep enough that each one grows its stack several times on the
+// way down. Copying those stacks measured as most of a Range handler's CPU. A
+// worker grows its stack once and keeps it.
+//
+// A worker serving a streaming RPC (Watch, LeaseKeepAlive) is held for the
+// stream's lifetime, and when every worker is busy gRPC falls back to a new
+// goroutine per RPC. The pool is sized well above GOMAXPROCS so a few held
+// streams leave room for unary calls.
+func DefaultStreamWorkers() int {
+	return max(16, 4*runtime.GOMAXPROCS(0))
 }
 
 // NewServerOptions returns the gRPC server options needed to host the
@@ -167,6 +196,7 @@ func NewServerOptions(authStore *auth.Store, tokens *auth.TokenStore, opts ...Op
 		maxConcurrentStreams: defaultMaxConcurrentStreams,
 		maxRecvMsgSize:       defaultMaxRequestBytes + grpcOverheadBytes,
 		maxSendMsgSize:       maxSendBytes,
+		streamWorkers:        DefaultStreamWorkers(),
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -183,6 +213,9 @@ func NewServerOptions(authStore *auth.Store, tokens *auth.TokenStore, opts ...Op
 		grpc.MaxConcurrentStreams(cfg.maxConcurrentStreams),
 		grpc.MaxRecvMsgSize(cfg.maxRecvMsgSize),
 		grpc.MaxSendMsgSize(cfg.maxSendMsgSize),
+	}
+	if cfg.streamWorkers > 0 {
+		out = append(out, grpc.NumStreamWorkers(uint32(cfg.streamWorkers)))
 	}
 	if authStore != nil {
 		unary, stream := auth.Interceptors(authStore, tokens)
