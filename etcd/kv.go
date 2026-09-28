@@ -51,7 +51,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			return &etcdserverpb.RangeResponse{Header: header()}, nil
 		}
 		if r.CountOnly {
-			exists, err := s.rangeExists(ctx, linearizable, key, t4.WithRevision(readRev))
+			exists, err := s.rangeExists(ctx, linearizable, key, readAt(readRev)...)
 			if err != nil {
 				return nil, kvError(err)
 			}
@@ -61,7 +61,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			}
 			return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
 		}
-		kv, err := s.rangeGet(ctx, linearizable, key, t4.WithRevision(readRev))
+		kv, err := s.rangeGet(ctx, linearizable, key, readAt(readRev)...)
 		if err != nil {
 			return nil, kvError(err)
 		}
@@ -121,7 +121,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		}, nil
 	}
 
-	all, err := s.rangeList(ctx, linearizable, "", t4.WithRevision(readRev))
+	all, err := s.rangeList(ctx, linearizable, "", readAt(readRev)...)
 	if err != nil {
 		return nil, kvError(err)
 	}
@@ -601,6 +601,16 @@ func (s *Server) Compact(ctx context.Context, r *etcdserverpb.CompactionRequest)
 
 // rangeGet / rangeExists / rangeList / rangeCount dispatch to the linearizable
 // or local variant of each read, removing the repeated if/else fork from Range.
+// readAt returns the options for a read at internal revision rev: none for
+// HEAD (rev 0), so the common current read doesn't allocate an option and
+// can take the node's no-options path.
+func readAt(rev int64) []t4.ReadOption {
+	if rev == 0 {
+		return nil
+	}
+	return []t4.ReadOption{t4.WithRevision(rev)}
+}
+
 func (s *Server) rangeGet(ctx context.Context, lin bool, key string, opts ...t4.ReadOption) (*t4.KeyValue, error) {
 	if lin {
 		return s.node.LinearizableGet(ctx, key, opts...)
