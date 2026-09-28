@@ -1,7 +1,6 @@
 package wal
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -49,6 +48,24 @@ type SegmentWriter struct {
 	size       int64
 	entryCount int
 	sealed     bool // true once Seal() has been called successfully
+	// buf is scratch space for encoding frames, reused across appends.
+	buf []byte
+}
+
+// maxRetainedFrameBuf caps the scratch buffer a SegmentWriter keeps between
+// appends, so one large value doesn't pin its size for the segment's life.
+const maxRetainedFrameBuf = 1 << 20
+
+// encode returns e's framed record in sw's scratch buffer. The result is only
+// valid until the next call.
+func (sw *SegmentWriter) encode(e *Entry) []byte {
+	b := appendFrame(sw.buf[:0], e)
+	if cap(b) <= maxRetainedFrameBuf {
+		sw.buf = b
+	} else {
+		sw.buf = nil
+	}
+	return b
 }
 
 // OpenSegmentWriter creates (or truncates) a new segment file and writes the header.
@@ -83,11 +100,7 @@ func (sw *SegmentWriter) writeHeader() error {
 
 // Append writes e to the segment and fsyncs.
 func (sw *SegmentWriter) Append(e *Entry) error {
-	var buf bytes.Buffer
-	if err := AppendEntry(&buf, e); err != nil {
-		return err
-	}
-	b := buf.Bytes()
+	b := sw.encode(e)
 	if _, err := sw.f.Write(b); err != nil {
 		return fmt.Errorf("wal: write entry rev=%d: %w", e.Revision, err)
 	}
@@ -102,11 +115,7 @@ func (sw *SegmentWriter) Append(e *Entry) error {
 // AppendNoSync writes e to the segment without fsyncing.
 // The caller must call Sync after writing all entries to ensure durability.
 func (sw *SegmentWriter) AppendNoSync(e *Entry) error {
-	var buf bytes.Buffer
-	if err := AppendEntry(&buf, e); err != nil {
-		return err
-	}
-	b := buf.Bytes()
+	b := sw.encode(e)
 	if _, err := sw.f.Write(b); err != nil {
 		return fmt.Errorf("wal: write entry rev=%d: %w", e.Revision, err)
 	}

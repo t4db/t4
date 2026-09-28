@@ -22,6 +22,11 @@ services:
       - --data-dir=/data
       - --metrics-addr=0.0.0.0:9090
       - --log-level=warn
+    # GOMAXPROCS matches the CPU limit on both systems. Go 1.25+ derives it
+    # from the cgroup limit, older Go (etcd's release builds) from the host's
+    # CPU count, so leaving it unset runs them with different schedulers.
+    environment:
+      GOMAXPROCS: "2"
     ports:
       - "3379:2379"
     deploy:
@@ -50,6 +55,8 @@ services:
       - --listen-peer-urls=http://0.0.0.0:2380
       - --initial-advertise-peer-urls=http://etcd:2380
       - --initial-cluster=etcd0=http://etcd:2380
+    environment:
+      GOMAXPROCS: "2"
     ports:
       - "2379:2379"
     volumes:

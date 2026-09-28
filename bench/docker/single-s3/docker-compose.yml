@@ -56,7 +56,11 @@ services:
       - --s3-endpoint=http://s3:9000
       - --wal-sync-upload=true
       - --log-level=warn
+    # GOMAXPROCS matches the CPU limit on both systems. Go 1.25+ derives it
+    # from the cgroup limit, older Go (etcd's release builds) from the host's
+    # CPU count, so leaving it unset runs them with different schedulers.
     environment:
+      GOMAXPROCS: "2"
       T4_S3_ACCESS_KEY_ID: bench
       T4_S3_SECRET_ACCESS_KEY: bench123
       T4_S3_REGION: us-east-1
@@ -88,6 +92,8 @@ services:
       - --listen-peer-urls=http://0.0.0.0:2380
       - --initial-advertise-peer-urls=http://etcd:2380
       - --initial-cluster=etcd0=http://etcd:2380
+    environment:
+      GOMAXPROCS: "2"
     ports:
       - "2379:2379"
     deploy:

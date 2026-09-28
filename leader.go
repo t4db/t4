@@ -425,9 +425,17 @@ func (n *Node) commitLoop(ctx context.Context) {
 		}
 	}()
 
+	// Per-batch scratch, reused across iterations. Nothing downstream keeps
+	// these slices past the batch; see the clear at the bottom of the loop.
+	var (
+		batch     []*writeReq
+		entries   []*wal.Entry
+		dbEntries []wal.Entry
+	)
+
 	for {
 		// Block until at least one request arrives.
-		var batch []*writeReq
+		batch = batch[:0]
 		select {
 		case req := <-n.writeC:
 			batch = append(batch, req)
@@ -450,12 +458,13 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// writes that happened to be drained into the same group-commit batch.
 		batchCtx, batchCancel := context.WithCancel(ctx)
 		var abandoned atomic.Int32
+		batchLen := int32(len(batch)) // batch is reused; don't read it from these goroutines
 		for _, req := range batch {
 			r := req
 			go func() {
 				select {
 				case <-r.ctx.Done():
-					if abandoned.Add(1) == int32(len(batch)) {
+					if abandoned.Add(1) == batchLen {
 						batchCancel()
 					}
 				case <-batchCtx.Done():
@@ -468,10 +477,10 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// followers until WAL append succeeds. A canceled batch can therefore
 		// reuse the same IDs without leaving a hole or stale staged entries.
 		baseSeq := n.db.Load().LastSequence()
-		entries := make([]*wal.Entry, len(batch))
+		entries = entries[:0]
 		for i, req := range batch {
 			req.entry.ID = baseSeq + int64(i) + 1
-			entries[i] = &req.entry
+			entries = append(entries, &req.entry)
 		}
 
 		// Decide this batch's durability before appending it. A quorum ACK is
@@ -532,9 +541,9 @@ func (n *Node) commitLoop(ctx context.Context) {
 
 		// Apply all entries to Pebble as one batch (in order).
 		if err == nil {
-			dbEntries := make([]wal.Entry, len(batch))
-			for i, req := range batch {
-				dbEntries[i] = req.entry
+			dbEntries = dbEntries[:0]
+			for _, req := range batch {
+				dbEntries = append(dbEntries, req.entry)
 			}
 			err = n.db.Load().Apply(dbEntries)
 			if err == nil {
@@ -568,6 +577,11 @@ func (n *Node) commitLoop(ctx context.Context) {
 			req.batchSize = len(batch)
 			req.done <- ackErr
 		}
+		// Drop references so reused scratch doesn't keep finished requests
+		// and their values alive until the next batch overwrites them.
+		clear(batch)
+		clear(entries)
+		clear(dbEntries)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				// Callers abandoned the batch; this is not a permanent fault.
