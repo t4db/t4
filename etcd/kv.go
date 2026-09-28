@@ -2,8 +2,10 @@ package etcd
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"sort"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -38,6 +40,10 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	// A read is linearizable when the client requests it AND the server is not
 	// configured to force serializable reads.
 	linearizable := !r.Serializable && s.node.ReadConsistency() != t4.ReadConsistencySerializable
+
+	if needsFullRead(r) && !r.CountOnly {
+		return s.fullRange(ctx, r)
+	}
 
 	// Single-key lookup.
 	if rangeEnd == "" {
@@ -538,8 +544,9 @@ func (s *Server) txnRange(ctx context.Context, r *etcdserverpb.RangeRequest, sna
 	}
 
 	// Merge the snapshot with the touched keys' committed state, then apply
-	// Limit, CountOnly and KeysOnly to the merged result.
-	snap.Limit, snap.CountOnly, snap.KeysOnly = 0, false, false
+	// the sort, filters, Limit, CountOnly and KeysOnly to the merged result.
+	clearFullReadOptions(snap)
+	snap.CountOnly = false
 	resp, err := s.Range(ctx, snap)
 	if err != nil {
 		return nil, err
@@ -562,12 +569,14 @@ func (s *Server) txnRange(ctx context.Context, r *etcdserverpb.RangeRequest, sna
 		kvs = append(kvs, cur.Kvs...)
 	}
 	sort.Slice(kvs, func(i, j int) bool { return bytes.Compare(kvs[i].Key, kvs[j].Key) < 0 })
+	sortKVs(kvs, r)
 
 	resp.Count = int64(len(kvs))
 	if r.CountOnly {
 		resp.Kvs = nil
 		return resp, nil
 	}
+	kvs = filterKVs(kvs, r)
 	if r.Limit > 0 && int64(len(kvs)) > r.Limit {
 		kvs, resp.More = kvs[:r.Limit], true
 	}
@@ -639,6 +648,100 @@ func kvToProtoForRange(kv *t4.KeyValue, r *etcdserverpb.RangeRequest) *mvccpb.Ke
 		applyKeysOnly(pb, r)
 	}
 	return pb
+}
+
+// rangeSortOrder returns the order r's results must be re-sorted in, or NONE
+// when the key-ascending order they are read in already is the answer. As in
+// etcd, a target other than KEY with no order sorts ascending.
+func rangeSortOrder(r *etcdserverpb.RangeRequest) etcdserverpb.RangeRequest_SortOrder {
+	switch {
+	case r.SortTarget != etcdserverpb.RangeRequest_KEY && r.SortOrder == etcdserverpb.RangeRequest_NONE:
+		return etcdserverpb.RangeRequest_ASCEND
+	case r.SortTarget == etcdserverpb.RangeRequest_KEY && r.SortOrder == etcdserverpb.RangeRequest_ASCEND:
+		return etcdserverpb.RangeRequest_NONE
+	}
+	return r.SortOrder
+}
+
+// needsFullRead reports whether r must read its whole range before Limit
+// applies: its results are re-sorted, or filtered by revision.
+func needsFullRead(r *etcdserverpb.RangeRequest) bool {
+	return rangeSortOrder(r) != etcdserverpb.RangeRequest_NONE ||
+		r.MinModRevision != 0 || r.MaxModRevision != 0 ||
+		r.MinCreateRevision != 0 || r.MaxCreateRevision != 0
+}
+
+// clearFullReadOptions strips the options fullRange applies itself from r,
+// leaving a plain key-ascending read of the whole range.
+func clearFullReadOptions(r *etcdserverpb.RangeRequest) {
+	r.Limit, r.KeysOnly = 0, false
+	r.SortOrder, r.SortTarget = etcdserverpb.RangeRequest_NONE, etcdserverpb.RangeRequest_KEY
+	r.MinModRevision, r.MaxModRevision = 0, 0
+	r.MinCreateRevision, r.MaxCreateRevision = 0, 0
+}
+
+// fullRange serves a range that must be read whole. Like etcd, it filters
+// the range by revision, sorts it, and applies Limit afterwards, so a
+// descending read with a limit returns the last keys. Count is taken before
+// the filters, as etcd does, so it stays the number of keys in the range.
+func (s *Server) fullRange(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
+	all := proto.Clone(r).(*etcdserverpb.RangeRequest)
+	clearFullReadOptions(all)
+	resp, err := s.Range(ctx, all)
+	if err != nil {
+		return nil, err
+	}
+	resp.Kvs = filterKVs(resp.Kvs, r)
+	sortKVs(resp.Kvs, r)
+	if r.Limit > 0 && int64(len(resp.Kvs)) > r.Limit {
+		resp.Kvs, resp.More = resp.Kvs[:r.Limit], true
+	}
+	if r.KeysOnly {
+		for _, kv := range resp.Kvs {
+			applyKeysOnly(kv, r)
+		}
+	}
+	return resp, nil
+}
+
+// filterKVs drops the kvs outside r's mod and create revision bounds; a zero
+// bound is unset.
+func filterKVs(kvs []*mvccpb.KeyValue, r *etcdserverpb.RangeRequest) []*mvccpb.KeyValue {
+	return slices.DeleteFunc(kvs, func(kv *mvccpb.KeyValue) bool {
+		return (r.MinModRevision != 0 && kv.ModRevision < r.MinModRevision) ||
+			(r.MaxModRevision != 0 && kv.ModRevision > r.MaxModRevision) ||
+			(r.MinCreateRevision != 0 && kv.CreateRevision < r.MinCreateRevision) ||
+			(r.MaxCreateRevision != 0 && kv.CreateRevision > r.MaxCreateRevision)
+	})
+}
+
+// sortKVs re-sorts key-ascending kvs as r asks. The sort is stable, so ties
+// stay in key order; etcd leaves their order unspecified.
+func sortKVs(kvs []*mvccpb.KeyValue, r *etcdserverpb.RangeRequest) {
+	order := rangeSortOrder(r)
+	if order == etcdserverpb.RangeRequest_NONE {
+		return
+	}
+	var compare func(a, b *mvccpb.KeyValue) int
+	switch r.SortTarget {
+	case etcdserverpb.RangeRequest_KEY:
+		compare = func(a, b *mvccpb.KeyValue) int { return bytes.Compare(a.Key, b.Key) }
+	case etcdserverpb.RangeRequest_VERSION:
+		compare = func(a, b *mvccpb.KeyValue) int { return cmp.Compare(a.Version, b.Version) }
+	case etcdserverpb.RangeRequest_CREATE:
+		compare = func(a, b *mvccpb.KeyValue) int { return cmp.Compare(a.CreateRevision, b.CreateRevision) }
+	case etcdserverpb.RangeRequest_MOD:
+		compare = func(a, b *mvccpb.KeyValue) int { return cmp.Compare(a.ModRevision, b.ModRevision) }
+	case etcdserverpb.RangeRequest_VALUE:
+		compare = func(a, b *mvccpb.KeyValue) int { return bytes.Compare(a.Value, b.Value) }
+	default:
+		return
+	}
+	if order == etcdserverpb.RangeRequest_DESCEND {
+		asc := compare
+		compare = func(a, b *mvccpb.KeyValue) int { return asc(b, a) }
+	}
+	slices.SortStableFunc(kvs, compare)
 }
 
 func applyKeysOnly(pb *mvccpb.KeyValue, r *etcdserverpb.RangeRequest) {

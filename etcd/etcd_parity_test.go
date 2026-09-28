@@ -358,3 +358,137 @@ func TestTxnRangeSeesPrecedingOpsOnly(t *testing.T) {
 		t.Errorf("op 8 (count only): count=%d kvs=%d, want count=2 and no kvs", r.Count, len(r.Kvs))
 	}
 }
+
+// TestRangeSort: etcd sorts a range by the requested target and order, and
+// applies Limit after sorting — a descending read with a limit returns the
+// last keys. A target other than KEY with no order sorts ascending.
+func TestRangeSort(t *testing.T) {
+	_, cli := newWatchNode(t)
+	ctx := parityCtx(t)
+
+	// Writes in this order give: key a<b<c, value c<a<b,
+	// mod revision b<c<a, version b(1)<c(2)<a(3), create revision a<b<c.
+	for _, kv := range [][2]string{
+		{"/s/a", "x"}, {"/s/b", "z"}, {"/s/c", "a"}, {"/s/c", "a"}, {"/s/a", "x"}, {"/s/a", "m"},
+	} {
+		if _, err := cli.Put(ctx, kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	keys := func(resp *clientv3.GetResponse) string {
+		var out []string
+		for _, kv := range resp.Kvs {
+			out = append(out, string(kv.Key[len("/s/"):]))
+		}
+		return fmt.Sprint(out)
+	}
+	for _, tc := range []struct {
+		name  string
+		opts  []clientv3.OpOption
+		want  string
+		count int64
+		more  bool
+	}{
+		{"key desc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend)}, "[c b a]", 3, false},
+		{"key desc limit", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend), clientv3.WithLimit(2)}, "[c b]", 3, true},
+		{"value asc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByValue, clientv3.SortAscend)}, "[c a b]", 3, false},
+		{"value desc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByValue, clientv3.SortDescend)}, "[b a c]", 3, false},
+		{"mod asc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByModRevision, clientv3.SortAscend)}, "[b c a]", 3, false},
+		{"mod desc limit", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByModRevision, clientv3.SortDescend), clientv3.WithLimit(1)}, "[a]", 3, true},
+		{"version none", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByVersion, clientv3.SortNone)}, "[b c a]", 3, false},
+		{"create desc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByCreateRevision, clientv3.SortDescend)}, "[c b a]", 3, false},
+		{"keys only value desc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByValue, clientv3.SortDescend), clientv3.WithKeysOnly()}, "[b a c]", 3, false},
+	} {
+		resp, err := cli.Get(ctx, "/s/", append([]clientv3.OpOption{clientv3.WithPrefix()}, tc.opts...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := keys(resp); got != tc.want || resp.Count != tc.count || resp.More != tc.more {
+			t.Errorf("%s: got %s count=%d more=%v, want %s count=%d more=%v",
+				tc.name, got, resp.Count, resp.More, tc.want, tc.count, tc.more)
+		}
+	}
+
+	// A transaction's Range sorts too, including when it has to merge the
+	// branch's own earlier writes into its snapshot.
+	txn, err := cli.Txn(ctx).Then(
+		clientv3.OpPut("/s/d", "0"),
+		clientv3.OpGet("/s/", clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend), clientv3.WithLimit(2)),
+	).Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := txn.Responses[1].GetResponseRange()
+	if got := keys((*clientv3.GetResponse)(r)); got != "[d c]" || r.Count != 4 || !r.More {
+		t.Errorf("txn key desc limit: got %s count=%d more=%v, want [d c] count=4 more=true", got, r.Count, r.More)
+	}
+}
+
+// TestRangeRevisionFilters: etcd drops keys outside the requested mod and
+// create revision bounds before sorting and applying Limit. Count is taken
+// before the filters, so it stays the number of keys in the range.
+func TestRangeRevisionFilters(t *testing.T) {
+	_, cli := newWatchNode(t)
+	ctx := parityCtx(t)
+
+	rev := map[string]int64{}
+	for _, k := range []string{"a", "b", "c", "d", "b"} {
+		resp, err := cli.Put(ctx, "/f/"+k, "v")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rev[k] = resp.Header.Revision
+	}
+	// create: a<b<c<d; mod: a<c<d<b.
+	keys := func(kvs []*mvccpb.KeyValue) string {
+		var out []string
+		for _, kv := range kvs {
+			out = append(out, string(kv.Key[len("/f/"):]))
+		}
+		return fmt.Sprint(out)
+	}
+	for _, tc := range []struct {
+		name string
+		opts []clientv3.OpOption
+		want string
+		more bool
+	}{
+		{"min mod", []clientv3.OpOption{clientv3.WithMinModRev(rev["c"])}, "[b c d]", false},
+		{"max mod", []clientv3.OpOption{clientv3.WithMaxModRev(rev["c"])}, "[a c]", false},
+		{"min create", []clientv3.OpOption{clientv3.WithMinCreateRev(rev["c"])}, "[c d]", false},
+		{"max create", []clientv3.OpOption{clientv3.WithMaxCreateRev(rev["a"] + 1)}, "[a b]", false},
+		{"min mod limit", []clientv3.OpOption{clientv3.WithMinModRev(rev["c"]), clientv3.WithLimit(2)}, "[b c]", true},
+		{"min mod limit fits", []clientv3.OpOption{clientv3.WithMinModRev(rev["d"]), clientv3.WithLimit(2)}, "[b d]", false},
+		{"max create sorted desc", []clientv3.OpOption{clientv3.WithMaxCreateRev(rev["c"]),
+			clientv3.WithSort(clientv3.SortByModRevision, clientv3.SortDescend)}, "[b c a]", false},
+	} {
+		resp, err := cli.Get(ctx, "/f/", append([]clientv3.OpOption{clientv3.WithPrefix()}, tc.opts...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := keys(resp.Kvs); got != tc.want || resp.Count != 4 || resp.More != tc.more {
+			t.Errorf("%s: got %s count=%d more=%v, want %s count=4 more=%v",
+				tc.name, got, resp.Count, resp.More, tc.want, tc.more)
+		}
+	}
+
+	// A single-key Get is filtered the same way.
+	if resp, err := cli.Get(ctx, "/f/a", clientv3.WithMinModRev(rev["c"])); err != nil {
+		t.Fatal(err)
+	} else if len(resp.Kvs) != 0 || resp.Count != 1 {
+		t.Errorf("single key min mod: got %s count=%d, want [] count=1", keys(resp.Kvs), resp.Count)
+	}
+
+	// A transaction's Range filters its merged result too.
+	txn, err := cli.Txn(ctx).Then(
+		clientv3.OpPut("/f/e", "v"),
+		clientv3.OpGet("/f/", clientv3.WithPrefix(), clientv3.WithMinCreateRev(rev["d"])),
+	).Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := txn.Responses[1].GetResponseRange(); keys(r.Kvs) != "[d e]" || r.Count != 5 {
+		t.Errorf("txn min create: got %s count=%d, want [d e] count=5", keys(r.Kvs), r.Count)
+	}
+}
