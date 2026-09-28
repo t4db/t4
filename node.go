@@ -1226,6 +1226,10 @@ func WithPrevKV() WatchOption {
 // no event for this prefix. Without it a watcher cannot distinguish "nothing
 // has happened under my prefix" from "I have fallen behind", because both look
 // like silence.
+//
+// Every run of events is followed by a progress event, so a consumer that needs
+// whole revisions can treat the newest revision as complete once a progress
+// event at or above it arrives.
 func WithProgressNotify() WatchOption {
 	return func(o *watchOpts) { o.progress = true }
 }

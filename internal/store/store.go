@@ -1095,7 +1095,9 @@ type WatchOptions struct {
 // is emitted in-band, so it can never overtake an undelivered event: on receipt,
 // every matching event at or below its Revision has already been read from this
 // channel. That is what lets a consumer answer "I am synced through R" for a
-// prefix that has seen no writes at all.
+// prefix that has seen no writes at all. Every run of events is followed by a
+// marker, so a consumer that needs whole revisions can hold back the newest
+// one until a marker (or a later revision's event) shows it is complete.
 //
 // The channel buffer is intentionally small. Backpressure should flow back to
 // scanLog quickly so a slow consumer doesn't accumulate large amounts of
@@ -1245,6 +1247,10 @@ func (s *Store) watchLoop(
 
 		gap, ok := s.scanWatchRange(prefix, boundary+1, handoff, withPrevKV)
 		if !ok || !s.sendWatchEvents(ctx, ch, replay) || !s.sendWatchEvents(ctx, ch, gap) {
+			return
+		}
+		// Seal the replay the same way the dispatcher seals a live batch.
+		if sub.progress && !s.sendWatchEvents(ctx, ch, []Event{progressEvent(handoff)}) {
 			return
 		}
 	}
@@ -1413,15 +1419,11 @@ func (s *Store) dispatchWatchEvents(events []Event, toRev int64, standalone bool
 	matched := 0
 	for i, sn := range snaps {
 		var batch []Event
-		var batchRev int64
 		for j := range events {
 			ev := events[j]
 			if ev.KV.Revision < sn.nextRev ||
 				(sn.prefix != "" && !strings.HasPrefix(ev.KV.Key, sn.prefix)) {
 				continue
-			}
-			if ev.KV.Revision > batchRev {
-				batchRev = ev.KV.Revision
 			}
 			if sn.withPrevKV && ev.KV.PrevRevision > 0 {
 				pk := prevKey{key: ev.KV.Key, rev: ev.KV.PrevRevision}
@@ -1435,12 +1437,12 @@ func (s *Store) dispatchWatchEvents(events []Event, toRev int64, standalone bool
 			batch = append(batch, ev)
 		}
 		matched += len(batch)
-		// A watch that received events carries its marker in the same batch —
-		// the slice is already allocated — but only when the batch does not
-		// already reach toRev. A watch that matched the newest revision learns
-		// its position from the event itself, which is the common case on a
-		// busy prefix and the one worth keeping free of extra traffic.
-		if sn.progress && len(batch) > 0 && batchRev < toRev {
+		// A watch that received events carries its marker in the same batch,
+		// even when its last event is already at toRev. The marker is what
+		// tells the consumer that revision is complete: the channel carries
+		// one event at a time, so without it a consumer that finds the channel
+		// empty cannot tell a finished revision from one still being sent.
+		if sn.progress && len(batch) > 0 {
 			batch = append(batch, progressEvent(toRev))
 		}
 		batches[i] = batch

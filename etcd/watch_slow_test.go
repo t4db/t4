@@ -38,9 +38,11 @@ func TestDrainWatchSlowWatcherCancellation(t *testing.T) {
 		close(done)
 	}()
 
-	// One event is enough to make drainWatch attempt a flush; the unbuffered
-	// sendCh has no consumer yet, so the flush will block.
+	// One event, sealed by the progress marker the store sends after every
+	// run of events, is enough to make drainWatch attempt a flush; the
+	// unbuffered sendCh has no consumer yet, so the flush will block.
 	events <- t4.Event{Type: t4.EventPut, KV: &t4.KeyValue{Key: "/slow/k", Value: []byte("v"), Revision: 1}}
+	events <- t4.Event{Type: t4.EventProgress, Revision: 1}
 
 	// Sleep past WatchSendTimeout so the slow-watcher branch fires before
 	// the test reads sendCh. With a 200 ms timeout, 350 ms is comfortably
@@ -109,6 +111,7 @@ func TestDrainWatchTimeoutDisabled(t *testing.T) {
 	}()
 
 	events <- t4.Event{Type: t4.EventPut, KV: &t4.KeyValue{Key: "/k", Value: []byte("v"), Revision: 1}}
+	events <- t4.Event{Type: t4.EventProgress, Revision: 1}
 
 	// drainWatch must stay blocked on the unbuffered sendCh — no cancellation.
 	select {
