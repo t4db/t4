@@ -1,14 +1,17 @@
 package etcd
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"sort"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/t4db/t4"
 )
@@ -319,12 +322,11 @@ func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserv
 		return nil, err
 	}
 
-	// Execute any Range ops in the selected branch (non-atomic read after write).
 	selectedBranch := r.Failure
 	if txnResp.Succeeded {
 		selectedBranch = r.Success
 	}
-	responses, err := s.buildTxnResponses(ctx, selectedBranch, txnResp.DeletedKeys, txnResp.Revision)
+	responses, err := s.buildTxnResponses(ctx, selectedBranch, txnResp)
 	if err != nil {
 		return nil, err
 	}
@@ -448,18 +450,34 @@ func convertWriteOps(ops []*etcdserverpb.RequestOp) ([]t4.TxnOp, error) {
 // commitRev pins the inner Put / DeleteRange response headers to the actual
 // txn commit revision so callers (kube-apiserver) compute the new resource
 // version from a value that matches the key's mod_revision.
-func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.RequestOp, deletedKeys map[string]struct{}, commitRev int64) ([]*etcdserverpb.ResponseOp, error) {
+func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.RequestOp, txnResp t4.TxnResponse) ([]*etcdserverpb.ResponseOp, error) {
+	commitRev, deletedKeys := txnResp.Revision, txnResp.DeletedKeys
+	// Like etcd, the ops run in order against one snapshot: the state the
+	// conditions were evaluated on. A txn that wrote committed at commitRev,
+	// directly on top of that state, so the snapshot is commitRev-1 plus the
+	// writes of the ops executed so far; a txn that wrote nothing reports
+	// the snapshot's revision itself.
+	snapRev := commitRev
+	if len(deletedKeys) > 0 || branchHasPut(ops) {
+		snapRev = commitRev - 1
+	}
+	// written collects the keys written by the ops before the current one.
+	// A branch writes each key at most once (t4 rejects duplicates), so a
+	// written key's state as of the current op is its state at commitRev.
+	var written []string
 	responses := make([]*etcdserverpb.ResponseOp, 0, len(ops))
 	hdr := s.headerAt(commitRev)
 	for _, op := range ops {
 		switch v := op.GetRequest().(type) {
 		case *etcdserverpb.RequestOp_RequestPut:
+			written = append(written, string(v.RequestPut.Key))
 			responses = append(responses, &etcdserverpb.ResponseOp{
 				Response: &etcdserverpb.ResponseOp_ResponsePut{
 					ResponsePut: &etcdserverpb.PutResponse{Header: hdr},
 				},
 			})
 		case *etcdserverpb.RequestOp_RequestDeleteRange:
+			written = append(written, string(v.RequestDeleteRange.Key))
 			var deleted int64
 			if _, ok := deletedKeys[string(v.RequestDeleteRange.Key)]; ok {
 				deleted = 1
@@ -470,7 +488,7 @@ func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.Requ
 				},
 			})
 		case *etcdserverpb.RequestOp_RequestRange:
-			resp, err := s.Range(ctx, v.RequestRange)
+			resp, err := s.txnRange(ctx, v.RequestRange, snapRev, commitRev, written)
 			if err != nil {
 				return nil, err
 			}
@@ -482,6 +500,84 @@ func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.Requ
 		}
 	}
 	return responses, nil
+}
+
+func branchHasPut(ops []*etcdserverpb.RequestOp) bool {
+	for _, op := range ops {
+		if op.GetRequestPut() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// txnRange serves a Range op inside a transaction: at snapRev, except that
+// the keys in written (those the preceding ops wrote) are read at commitRev.
+// A Range that names its own revision is served as asked.
+func (s *Server) txnRange(ctx context.Context, r *etcdserverpb.RangeRequest, snapRev, commitRev int64, written []string) (*etcdserverpb.RangeResponse, error) {
+	if r.Revision > 0 {
+		return s.Range(ctx, r)
+	}
+	// The txn may have been forwarded to the leader and committed there;
+	// this node's reads must include commitRev before they can serve it.
+	if err := s.node.WaitForRevision(ctx, commitRev); err != nil {
+		return nil, kvError(err)
+	}
+	key, rangeEnd := string(r.Key), string(r.RangeEnd)
+	var touched []string
+	for _, k := range written {
+		if k == key || (rangeEnd != "" && matchRange(&t4.KeyValue{Key: k}, key, rangeEnd)) {
+			touched = append(touched, k)
+		}
+	}
+
+	snap := proto.Clone(r).(*etcdserverpb.RangeRequest)
+	snap.Revision = toEtcdRevision(snapRev)
+	if len(touched) == 0 {
+		return s.Range(ctx, snap)
+	}
+
+	// Merge the snapshot with the touched keys' committed state, then apply
+	// Limit, CountOnly and KeysOnly to the merged result.
+	snap.Limit, snap.CountOnly, snap.KeysOnly = 0, false, false
+	resp, err := s.Range(ctx, snap)
+	if err != nil {
+		return nil, err
+	}
+	isTouched := make(map[string]bool, len(touched))
+	for _, k := range touched {
+		isTouched[k] = true
+	}
+	kvs := resp.Kvs[:0]
+	for _, kv := range resp.Kvs {
+		if !isTouched[string(kv.Key)] {
+			kvs = append(kvs, kv)
+		}
+	}
+	for _, k := range touched {
+		cur, err := s.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte(k), Revision: toEtcdRevision(commitRev), Serializable: r.Serializable})
+		if err != nil {
+			return nil, err
+		}
+		kvs = append(kvs, cur.Kvs...)
+	}
+	sort.Slice(kvs, func(i, j int) bool { return bytes.Compare(kvs[i].Key, kvs[j].Key) < 0 })
+
+	resp.Count = int64(len(kvs))
+	if r.CountOnly {
+		resp.Kvs = nil
+		return resp, nil
+	}
+	if r.Limit > 0 && int64(len(kvs)) > r.Limit {
+		kvs, resp.More = kvs[:r.Limit], true
+	}
+	if r.KeysOnly {
+		for _, kv := range kvs {
+			applyKeysOnly(kv, r)
+		}
+	}
+	resp.Kvs = kvs
+	return resp, nil
 }
 
 // Compact implements KVServer.Compact.
@@ -540,14 +636,18 @@ func kvError(err error) error {
 func kvToProtoForRange(kv *t4.KeyValue, r *etcdserverpb.RangeRequest) *mvccpb.KeyValue {
 	pb := kvToProto(kv)
 	if r.KeysOnly {
-		pb.Value = nil
-		// etcd serves keys-only reads from its in-memory index, which has no
-		// lease, unless the results must be sorted by value.
-		if r.SortTarget != etcdserverpb.RangeRequest_VALUE {
-			pb.Lease = 0
-		}
+		applyKeysOnly(pb, r)
 	}
 	return pb
+}
+
+func applyKeysOnly(pb *mvccpb.KeyValue, r *etcdserverpb.RangeRequest) {
+	pb.Value = nil
+	// etcd serves keys-only reads from its in-memory index, which has no
+	// lease, unless the results must be sorted by value.
+	if r.SortTarget != etcdserverpb.RangeRequest_VALUE {
+		pb.Lease = 0
+	}
 }
 
 // rangeScan maps an etcd [key, rangeEnd) range onto a t4 prefix scan seeked

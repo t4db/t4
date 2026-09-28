@@ -302,3 +302,59 @@ func TestWatchDeliversRevisionInOneResponse(t *testing.T) {
 		}
 	}
 }
+
+// TestTxnRangeSeesPrecedingOpsOnly: etcd executes a transaction's ops in
+// order against one snapshot, so a Range sees the writes of the ops before it
+// and none of the ops after it — nor any write committed by another client
+// after the transaction.
+func TestTxnRangeSeesPrecedingOpsOnly(t *testing.T) {
+	_, cli := newWatchNode(t)
+	ctx := parityCtx(t)
+
+	for _, k := range []string{"/tx/a", "/tx/c"} {
+		if _, err := cli.Put(ctx, k, "before"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	resp, err := cli.Txn(ctx).Then(
+		clientv3.OpGet("/tx/a"),
+		clientv3.OpGet("/tx/", clientv3.WithPrefix()),
+		clientv3.OpPut("/tx/a", "after"),
+		clientv3.OpPut("/tx/b", "after"),
+		clientv3.OpDelete("/tx/c"),
+		clientv3.OpGet("/tx/a"),
+		clientv3.OpGet("/tx/", clientv3.WithPrefix()),
+		clientv3.OpGet("/tx/", clientv3.WithPrefix(), clientv3.WithLimit(1)),
+		clientv3.OpGet("/tx/", clientv3.WithPrefix(), clientv3.WithCountOnly()),
+	).Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev := resp.Header.Revision
+
+	kvs := func(i int) string {
+		var out []string
+		for _, kv := range resp.Responses[i].GetResponseRange().Kvs {
+			out = append(out, fmt.Sprintf("%s=%s@%d", kv.Key, kv.Value, kv.ModRevision))
+		}
+		return fmt.Sprint(out)
+	}
+	for i, want := range map[int]string{
+		0: "[/tx/a=before@2]",
+		1: "[/tx/a=before@2 /tx/c=before@3]",
+		5: fmt.Sprintf("[/tx/a=after@%d]", rev),
+		6: fmt.Sprintf("[/tx/a=after@%d /tx/b=after@%d]", rev, rev),
+		7: fmt.Sprintf("[/tx/a=after@%d]", rev),
+	} {
+		if got := kvs(i); got != want {
+			t.Errorf("op %d: got %s, want %s", i, got, want)
+		}
+	}
+	if r := resp.Responses[7].GetResponseRange(); r.Count != 2 || !r.More {
+		t.Errorf("op 7 (limit 1): count=%d more=%v, want count=2 more=true", r.Count, r.More)
+	}
+	if r := resp.Responses[8].GetResponseRange(); r.Count != 2 || len(r.Kvs) != 0 {
+		t.Errorf("op 8 (count only): count=%d kvs=%d, want count=2 and no kvs", r.Count, len(r.Kvs))
+	}
+}

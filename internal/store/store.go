@@ -738,6 +738,12 @@ func (s *Store) GetAt(key string, revision int64) (*KeyValue, error) {
 	if revision == 0 {
 		return s.Get(key)
 	}
+	if s.nearHead(targetRev) {
+		kv, err := s.getAtFromHead(key, targetRev)
+		if !errors.Is(err, errUndoChain) {
+			return kv, err
+		}
+	}
 	return s.getAtRevision(key, targetRev)
 }
 
@@ -777,7 +783,12 @@ func (s *Store) resolveReadRevision(revision int64) (int64, error) {
 }
 
 func (s *Store) getIdxRev(key string) (int64, error) {
-	v, closer, err := s.db.Get(idxKey(key))
+	return idxRevFrom(s.db, key)
+}
+
+// idxRevFrom returns key's current revision in r, or 0 if it is not live.
+func idxRevFrom(r pebble.Reader, key string) (int64, error) {
+	v, closer, err := r.Get(idxKey(key))
 	if err == pebble.ErrNotFound {
 		return 0, nil
 	}
@@ -803,8 +814,12 @@ func recordToKV(key string, rev int64, r *record) *KeyValue {
 }
 
 func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
+	return logEntryFrom(s.db, key, rev)
+}
+
+func logEntryFrom(db pebble.Reader, key string, rev int64) (*KeyValue, error) {
 	// Fast path: non-txn entries are stored at logKey(rev).
-	v, closer, err := s.db.Get(logKey(rev))
+	v, closer, err := db.Get(logKey(rev))
 	if err == nil {
 		defer closer.Close()
 		r, err := unmarshalRecord(v)
@@ -821,7 +836,7 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 	// Scan all sub-keys at this revision and find the one matching key.
 	lower := logKeyWithSub(rev, 0)
 	upper := logKey(rev + 1)
-	iter, iterErr := s.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, iterErr := db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if iterErr != nil {
 		return nil, fmt.Errorf("store: get log txn scan rev=%d: %w", rev, iterErr)
 	}
@@ -836,6 +851,157 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 		}
 	}
 	return nil, fmt.Errorf("store: get log rev=%d key=%q: not found in txn sub-ops", rev, key)
+}
+
+// Reads at a past revision R have two strategies. Replaying the log up to R
+// costs O(retained history before R); starting from HEAD and undoing the
+// changes made after R costs O(revisions after R). Reads at a recent
+// revision — a transaction's snapshot, apiserver's paginated LIST pages —
+// are served from HEAD. The replay stays as the fallback for revisions deep
+// in history and for any log whose undo chain does not check out.
+
+// errUndoChain reports that a record's PrevRevision did not lead back to the
+// state at the target revision, so the caller must replay the log instead.
+var errUndoChain = errors.New("store: undo chain inconsistent")
+
+// nearHead reports whether rev is closer to HEAD than to the compaction
+// watermark, i.e. whether undoing from HEAD scans fewer revisions than
+// replaying up to rev.
+func (s *Store) nearHead(rev int64) bool {
+	return atomic.LoadInt64(&s.currentRev)-rev <= rev-atomic.LoadInt64(&s.compactRev)
+}
+
+// undoAfter returns, for every key matching prefix, fromKey and match that
+// changed after rev in snap, its state at rev (nil when it was absent).
+//
+// The first change to a key after rev records in PrevRevision the revision
+// of the key's live version at rev, or 0 when the key did not exist then.
+// Compaction keeps that version: it only drops a key's records older than
+// its newest one at or before the compaction revision, and rev is at or
+// above it.
+func undoAfter(snap pebble.Reader, prefix, fromKey string, rev int64, match func(string) bool) (map[string]*KeyValue, error) {
+	iter, err := snap.NewIter(&pebble.IterOptions{LowerBound: logKey(rev + 1), UpperBound: logUpper})
+	if err != nil {
+		return nil, fmt.Errorf("store: undo scan iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	undo := make(map[string]*KeyValue)
+	for iter.First(); iter.Valid(); iter.Next() {
+		r, err := unmarshalRecord(iter.Value())
+		if err != nil {
+			return nil, err
+		}
+		if _, seen := undo[r.key]; seen || !strings.HasPrefix(r.key, prefix) ||
+			r.key < fromKey || (match != nil && !match(r.key)) {
+			continue
+		}
+		if r.prevRevision == 0 {
+			if !r.create {
+				return nil, errUndoChain
+			}
+			undo[r.key] = nil
+			continue
+		}
+		if r.prevRevision > rev {
+			return nil, errUndoChain
+		}
+		prev, err := logEntryFrom(snap, r.key, r.prevRevision)
+		if err != nil || prev == nil {
+			return nil, errUndoChain
+		}
+		undo[r.key] = prev
+	}
+	return undo, iter.Error()
+}
+
+func (s *Store) getAtFromHead(key string, rev int64) (*KeyValue, error) {
+	snap := s.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	cur, err := idxRevFrom(snap, key)
+	if err != nil {
+		return nil, err
+	}
+	if cur != 0 && cur <= rev {
+		// Unchanged since rev.
+		return logEntryFrom(snap, key, cur)
+	}
+	undo, err := undoAfter(snap, key, "", rev, func(k string) bool { return k == key })
+	if err != nil {
+		return nil, err
+	}
+	if kv, changed := undo[key]; changed {
+		return kv, nil
+	}
+	if cur != 0 {
+		// Live at a revision after rev, yet no change after rev.
+		return nil, errUndoChain
+	}
+	return nil, nil
+}
+
+func (s *Store) listAtFromHead(prefix string, opts ReadOptions, rev int64) ([]*KeyValue, error) {
+	snap := s.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	undo, err := undoAfter(snap, prefix, opts.FromKey, rev, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Dropping the changed keys removes at most len(undo) entries from the
+	// head of the listing, so that many extra suffice to fill the limit.
+	limit := opts.Limit
+	if limit > 0 {
+		limit += int64(len(undo))
+	}
+	head, err := listCurrentFrom(snap, prefix, opts.FromKey, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := head[:0]
+	for _, kv := range head {
+		if _, changed := undo[kv.Key]; !changed {
+			out = append(out, kv)
+		}
+	}
+	for _, kv := range undo {
+		if kv != nil {
+			out = append(out, kv)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	if opts.Limit > 0 && int64(len(out)) > opts.Limit {
+		out = out[:opts.Limit]
+	}
+	return out, nil
+}
+
+func (s *Store) countAtFromHead(prefix, fromKey string, rev int64) (int64, error) {
+	snap := s.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	undo, err := undoAfter(snap, prefix, fromKey, rev, nil)
+	if err != nil {
+		return 0, err
+	}
+	n, err := countCurrentFrom(snap, prefix, fromKey)
+	if err != nil {
+		return 0, err
+	}
+	for key, kv := range undo {
+		cur, err := idxRevFrom(snap, key)
+		if err != nil {
+			return 0, err
+		}
+		if cur != 0 {
+			n--
+		}
+		if kv != nil {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *Store) getAtRevision(key string, targetRev int64) (*KeyValue, error) {
@@ -886,7 +1052,19 @@ func (s *Store) ListRange(prefix string, opts ReadOptions) ([]*KeyValue, error) 
 	if opts.Revision == 0 {
 		return s.listCurrent(prefix, opts.FromKey, opts.Limit)
 	}
+	if s.nearHead(targetRev) {
+		kvs, err := s.listAtFromHead(prefix, opts, targetRev)
+		if !errors.Is(err, errUndoChain) {
+			return kvs, err
+		}
+	}
+	return s.listAtByReplay(prefix, opts, targetRev)
+}
 
+// listAtByReplay rebuilds the state at targetRev by replaying the log from
+// the start. Its cost grows with the retained history rather than with the
+// distance from HEAD, which is what listAtFromHead avoids.
+func (s *Store) listAtByReplay(prefix string, opts ReadOptions, targetRev int64) ([]*KeyValue, error) {
 	events, _, err := s.scanLog(prefix, 1, targetRev, false)
 	if err != nil {
 		return nil, err
@@ -933,9 +1111,13 @@ func idxBounds(prefix, fromKey string) (lower, upper []byte) {
 }
 
 func (s *Store) listCurrent(prefix, fromKey string, limit int64) ([]*KeyValue, error) {
+	return listCurrentFrom(s.db, prefix, fromKey, limit)
+}
+
+func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64) ([]*KeyValue, error) {
 	lower, upper := idxBounds(prefix, fromKey)
 
-	iter, err := s.db.NewIter(&pebble.IterOptions{
+	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
 	})
@@ -951,7 +1133,7 @@ func (s *Store) listCurrent(prefix, fromKey string, limit int64) ([]*KeyValue, e
 		}
 		k := string(iter.Key()[1:]) // strip 'i' prefix
 		rev := decodeRev(iter.Value())
-		kv, err := s.getLogEntry(k, rev)
+		kv, err := logEntryFrom(db, k, rev)
 		if err != nil {
 			return nil, err
 		}
@@ -970,6 +1152,16 @@ func (s *Store) CountRange(prefix string, opts ReadOptions) (int64, error) {
 	if opts.Revision == 0 {
 		return s.countCurrent(prefix, opts.FromKey)
 	}
+	targetRev, err := s.resolveReadRevision(opts.Revision)
+	if err != nil {
+		return 0, err
+	}
+	if s.nearHead(targetRev) {
+		n, err := s.countAtFromHead(prefix, opts.FromKey, targetRev)
+		if !errors.Is(err, errUndoChain) {
+			return n, err
+		}
+	}
 	kvs, err := s.ListRange(prefix, ReadOptions{Revision: opts.Revision, FromKey: opts.FromKey})
 	if err != nil {
 		return 0, err
@@ -980,8 +1172,12 @@ func (s *Store) CountRange(prefix string, opts ReadOptions) (int64, error) {
 // countCurrent counts live keys with prefix at HEAD whose key is
 // lexicographically >= fromKey when fromKey is set.
 func (s *Store) countCurrent(prefix, fromKey string) (int64, error) {
+	return countCurrentFrom(s.db, prefix, fromKey)
+}
+
+func countCurrentFrom(db pebble.Reader, prefix, fromKey string) (int64, error) {
 	lower, upper := idxBounds(prefix, fromKey)
-	iter, err := s.db.NewIter(&pebble.IterOptions{
+	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
 	})
