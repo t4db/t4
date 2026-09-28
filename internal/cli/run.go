@@ -75,6 +75,7 @@ func runCmd() *cobra.Command {
 		branchCheckpoint string
 		// gRPC keepalive (etcd-compatible defaults)
 		grpcKeepaliveMinTime             time.Duration
+		grpcStreamWorkers                int
 		grpcKeepaliveTime                time.Duration
 		grpcKeepaliveTimeout             time.Duration
 		grpcKeepalivePermitWithoutStream bool
@@ -275,6 +276,7 @@ func runCmd() *cobra.Command {
 					Time:                grpcKeepaliveTime,
 					Timeout:             grpcKeepaliveTimeout,
 				}),
+				t4etcd.WithStreamWorkers(grpcStreamWorkers),
 			)...)
 			grpcOpts = append(grpcOpts, t4etcd.TracingOptions(tp)...)
 
@@ -354,6 +356,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&grpcKeepaliveTime, "grpc-keepalive-interval", defaultsKA.Time, "server keepalive ping interval; how often the server pings idle connections (env: T4_GRPC_KEEPALIVE_INTERVAL)")
 	cmd.Flags().DurationVar(&grpcKeepaliveTimeout, "grpc-keepalive-timeout", defaultsKA.Timeout, "server keepalive ping ack timeout before declaring the connection dead (env: T4_GRPC_KEEPALIVE_TIMEOUT)")
 	cmd.Flags().BoolVar(&grpcKeepalivePermitWithoutStream, "grpc-keepalive-permit-without-stream", defaultsKA.PermitWithoutStream, "accept client pings even when no streams are open; required for etcd v3 client compatibility (env: T4_GRPC_KEEPALIVE_PERMIT_WITHOUT_STREAM)")
+	cmd.Flags().IntVar(&grpcStreamWorkers, "grpc-stream-workers", 0, "goroutines kept to serve RPCs; 0 picks max(16, 4*GOMAXPROCS), negative starts a goroutine per RPC (env: T4_GRPC_STREAM_WORKERS)")
 	prependPreRunE(cmd, func(cmd *cobra.Command, _ []string) error {
 		return applyEnvVars(cmd, map[string]string{
 			"data-dir":                             "T4_DATA_DIR",
@@ -392,6 +395,7 @@ func runCmd() *cobra.Command {
 			"grpc-keepalive-interval":              "T4_GRPC_KEEPALIVE_INTERVAL",
 			"grpc-keepalive-timeout":               "T4_GRPC_KEEPALIVE_TIMEOUT",
 			"grpc-keepalive-permit-without-stream": "T4_GRPC_KEEPALIVE_PERMIT_WITHOUT_STREAM",
+			"grpc-stream-workers":                  "T4_GRPC_STREAM_WORKERS",
 		})
 	})
 
