@@ -2,8 +2,10 @@ package etcd
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"sort"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -65,6 +67,10 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			resp.Count = 1
 		}
 		return resp, nil
+	}
+
+	if rangeSortOrder(r) != etcdserverpb.RangeRequest_NONE && !r.CountOnly {
+		return s.sortedRange(ctx, r)
 	}
 
 	// Range / prefix scan. When the range is prefix-shaped it is served by an
@@ -538,8 +544,9 @@ func (s *Server) txnRange(ctx context.Context, r *etcdserverpb.RangeRequest, sna
 	}
 
 	// Merge the snapshot with the touched keys' committed state, then apply
-	// Limit, CountOnly and KeysOnly to the merged result.
+	// the sort, Limit, CountOnly and KeysOnly to the merged result.
 	snap.Limit, snap.CountOnly, snap.KeysOnly = 0, false, false
+	snap.SortOrder, snap.SortTarget = etcdserverpb.RangeRequest_NONE, etcdserverpb.RangeRequest_KEY
 	resp, err := s.Range(ctx, snap)
 	if err != nil {
 		return nil, err
@@ -562,6 +569,7 @@ func (s *Server) txnRange(ctx context.Context, r *etcdserverpb.RangeRequest, sna
 		kvs = append(kvs, cur.Kvs...)
 	}
 	sort.Slice(kvs, func(i, j int) bool { return bytes.Compare(kvs[i].Key, kvs[j].Key) < 0 })
+	sortKVs(kvs, r)
 
 	resp.Count = int64(len(kvs))
 	if r.CountOnly {
@@ -639,6 +647,71 @@ func kvToProtoForRange(kv *t4.KeyValue, r *etcdserverpb.RangeRequest) *mvccpb.Ke
 		applyKeysOnly(pb, r)
 	}
 	return pb
+}
+
+// rangeSortOrder returns the order r's results must be re-sorted in, or NONE
+// when the key-ascending order they are read in already is the answer. As in
+// etcd, a target other than KEY with no order sorts ascending.
+func rangeSortOrder(r *etcdserverpb.RangeRequest) etcdserverpb.RangeRequest_SortOrder {
+	switch {
+	case r.SortTarget != etcdserverpb.RangeRequest_KEY && r.SortOrder == etcdserverpb.RangeRequest_NONE:
+		return etcdserverpb.RangeRequest_ASCEND
+	case r.SortTarget == etcdserverpb.RangeRequest_KEY && r.SortOrder == etcdserverpb.RangeRequest_ASCEND:
+		return etcdserverpb.RangeRequest_NONE
+	}
+	return r.SortOrder
+}
+
+// sortedRange serves a range whose results must be re-sorted. Like etcd, it
+// reads the whole range, sorts it, and applies Limit afterwards, so a
+// descending read with a limit returns the last keys.
+func (s *Server) sortedRange(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
+	all := proto.Clone(r).(*etcdserverpb.RangeRequest)
+	all.Limit, all.KeysOnly = 0, false
+	all.SortOrder, all.SortTarget = etcdserverpb.RangeRequest_NONE, etcdserverpb.RangeRequest_KEY
+	resp, err := s.Range(ctx, all)
+	if err != nil {
+		return nil, err
+	}
+	sortKVs(resp.Kvs, r)
+	if r.Limit > 0 && int64(len(resp.Kvs)) > r.Limit {
+		resp.Kvs, resp.More = resp.Kvs[:r.Limit], true
+	}
+	if r.KeysOnly {
+		for _, kv := range resp.Kvs {
+			applyKeysOnly(kv, r)
+		}
+	}
+	return resp, nil
+}
+
+// sortKVs re-sorts key-ascending kvs as r asks. The sort is stable, so ties
+// stay in key order; etcd leaves their order unspecified.
+func sortKVs(kvs []*mvccpb.KeyValue, r *etcdserverpb.RangeRequest) {
+	order := rangeSortOrder(r)
+	if order == etcdserverpb.RangeRequest_NONE {
+		return
+	}
+	var compare func(a, b *mvccpb.KeyValue) int
+	switch r.SortTarget {
+	case etcdserverpb.RangeRequest_KEY:
+		compare = func(a, b *mvccpb.KeyValue) int { return bytes.Compare(a.Key, b.Key) }
+	case etcdserverpb.RangeRequest_VERSION:
+		compare = func(a, b *mvccpb.KeyValue) int { return cmp.Compare(a.Version, b.Version) }
+	case etcdserverpb.RangeRequest_CREATE:
+		compare = func(a, b *mvccpb.KeyValue) int { return cmp.Compare(a.CreateRevision, b.CreateRevision) }
+	case etcdserverpb.RangeRequest_MOD:
+		compare = func(a, b *mvccpb.KeyValue) int { return cmp.Compare(a.ModRevision, b.ModRevision) }
+	case etcdserverpb.RangeRequest_VALUE:
+		compare = func(a, b *mvccpb.KeyValue) int { return bytes.Compare(a.Value, b.Value) }
+	default:
+		return
+	}
+	if order == etcdserverpb.RangeRequest_DESCEND {
+		asc := compare
+		compare = func(a, b *mvccpb.KeyValue) int { return asc(b, a) }
+	}
+	slices.SortStableFunc(kvs, compare)
 }
 
 func applyKeysOnly(pb *mvccpb.KeyValue, r *etcdserverpb.RangeRequest) {

@@ -358,3 +358,69 @@ func TestTxnRangeSeesPrecedingOpsOnly(t *testing.T) {
 		t.Errorf("op 8 (count only): count=%d kvs=%d, want count=2 and no kvs", r.Count, len(r.Kvs))
 	}
 }
+
+// TestRangeSort: etcd sorts a range by the requested target and order, and
+// applies Limit after sorting — a descending read with a limit returns the
+// last keys. A target other than KEY with no order sorts ascending.
+func TestRangeSort(t *testing.T) {
+	_, cli := newWatchNode(t)
+	ctx := parityCtx(t)
+
+	// Writes in this order give: key a<b<c, value c<a<b,
+	// mod revision b<c<a, version b(1)<c(2)<a(3), create revision a<b<c.
+	for _, kv := range [][2]string{
+		{"/s/a", "x"}, {"/s/b", "z"}, {"/s/c", "a"}, {"/s/c", "a"}, {"/s/a", "x"}, {"/s/a", "m"},
+	} {
+		if _, err := cli.Put(ctx, kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	keys := func(resp *clientv3.GetResponse) string {
+		var out []string
+		for _, kv := range resp.Kvs {
+			out = append(out, string(kv.Key[len("/s/"):]))
+		}
+		return fmt.Sprint(out)
+	}
+	for _, tc := range []struct {
+		name  string
+		opts  []clientv3.OpOption
+		want  string
+		count int64
+		more  bool
+	}{
+		{"key desc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend)}, "[c b a]", 3, false},
+		{"key desc limit", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend), clientv3.WithLimit(2)}, "[c b]", 3, true},
+		{"value asc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByValue, clientv3.SortAscend)}, "[c a b]", 3, false},
+		{"value desc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByValue, clientv3.SortDescend)}, "[b a c]", 3, false},
+		{"mod asc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByModRevision, clientv3.SortAscend)}, "[b c a]", 3, false},
+		{"mod desc limit", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByModRevision, clientv3.SortDescend), clientv3.WithLimit(1)}, "[a]", 3, true},
+		{"version none", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByVersion, clientv3.SortNone)}, "[b c a]", 3, false},
+		{"create desc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByCreateRevision, clientv3.SortDescend)}, "[c b a]", 3, false},
+		{"keys only value desc", []clientv3.OpOption{clientv3.WithSort(clientv3.SortByValue, clientv3.SortDescend), clientv3.WithKeysOnly()}, "[b a c]", 3, false},
+	} {
+		resp, err := cli.Get(ctx, "/s/", append([]clientv3.OpOption{clientv3.WithPrefix()}, tc.opts...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := keys(resp); got != tc.want || resp.Count != tc.count || resp.More != tc.more {
+			t.Errorf("%s: got %s count=%d more=%v, want %s count=%d more=%v",
+				tc.name, got, resp.Count, resp.More, tc.want, tc.count, tc.more)
+		}
+	}
+
+	// A transaction's Range sorts too, including when it has to merge the
+	// branch's own earlier writes into its snapshot.
+	txn, err := cli.Txn(ctx).Then(
+		clientv3.OpPut("/s/d", "0"),
+		clientv3.OpGet("/s/", clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend), clientv3.WithLimit(2)),
+	).Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := txn.Responses[1].GetResponseRange()
+	if got := keys((*clientv3.GetResponse)(r)); got != "[d c]" || r.Count != 4 || !r.More {
+		t.Errorf("txn key desc limit: got %s count=%d more=%v, want [d c] count=4 more=true", got, r.Count, r.More)
+	}
+}
