@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
@@ -241,6 +240,7 @@ type Node struct {
 	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
 	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample
 	tracer                 trace.Tracer
+	tracing                bool // Config.TracerProvider was set
 
 	// bgCtx is cancelled by cancelBg — either on Close() or when a lock renewal
 	// detects that this node has been superseded as leader. When cancelled with
@@ -688,6 +688,7 @@ func Open(cfg Config) (*Node, error) {
 	// A nil provider means tracing is off, as for the etcd gRPC layer and the
 	// peer client; the global provider is not picked up implicitly.
 	tp := cfg.TracerProvider
+	n.tracing = tp != nil
 	if tp == nil {
 		tp = noop.NewTracerProvider()
 	}
@@ -1050,8 +1051,7 @@ func WithLimit(n int64) ReadOption {
 // LinearizableGet returns the value for key with linearizability guaranteed.
 // On a follower it syncs to the leader's revision before serving locally.
 func (n *Node) LinearizableGet(ctx context.Context, key string, opts ...ReadOption) (*KeyValue, error) {
-	ctx, span := n.tracer.Start(ctx, "t4.get",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	ctx, span := n.startSpan(ctx, "t4.get", key)
 	defer span.End()
 	if err := n.syncWithLeader(ctx); err != nil {
 		span.RecordError(err)
@@ -1062,8 +1062,7 @@ func (n *Node) LinearizableGet(ctx context.Context, key string, opts ...ReadOpti
 
 // LinearizableExists reports whether key exists with linearizability guaranteed.
 func (n *Node) LinearizableExists(ctx context.Context, key string, opts ...ReadOption) (bool, error) {
-	ctx, span := n.tracer.Start(ctx, "t4.exists",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	ctx, span := n.startSpan(ctx, "t4.exists", key)
 	defer span.End()
 	if err := n.syncWithLeader(ctx); err != nil {
 		span.RecordError(err)
@@ -1075,8 +1074,7 @@ func (n *Node) LinearizableExists(ctx context.Context, key string, opts ...ReadO
 // LinearizableList returns keys with the given prefix with linearizability
 // guaranteed. Use WithFromKey / WithLimit / WithRevision to refine.
 func (n *Node) LinearizableList(ctx context.Context, prefix string, opts ...ReadOption) ([]*KeyValue, error) {
-	ctx, span := n.tracer.Start(ctx, "t4.list",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(prefix))))
+	ctx, span := n.startSpan(ctx, "t4.list", prefix)
 	defer span.End()
 	if err := n.syncWithLeader(ctx); err != nil {
 		span.RecordError(err)
@@ -1088,8 +1086,7 @@ func (n *Node) LinearizableList(ctx context.Context, prefix string, opts ...Read
 // LinearizableCount returns the count of keys with the given prefix with
 // linearizability guaranteed. Use WithFromKey / WithRevision to refine.
 func (n *Node) LinearizableCount(ctx context.Context, prefix string, opts ...ReadOption) (int64, error) {
-	ctx, span := n.tracer.Start(ctx, "t4.count",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(prefix))))
+	ctx, span := n.startSpan(ctx, "t4.count", prefix)
 	defer span.End()
 	if err := n.syncWithLeader(ctx); err != nil {
 		span.RecordError(err)
