@@ -813,20 +813,42 @@ func recordToKV(key string, rev int64, r *record) *KeyValue {
 	}
 }
 
+// viewToKV builds a KeyValue from a record decoded in place, copying its
+// value out of the source buffer.
+func viewToKV(key string, rev int64, r *recordView) *KeyValue {
+	return &KeyValue{
+		Key:            key,
+		Value:          cloneValue(r.value),
+		Revision:       rev,
+		CreateRevision: r.createRevision,
+		PrevRevision:   r.prevRevision,
+		Version:        logVersion(r.version, r.delete),
+		Lease:          r.lease,
+	}
+}
+
 func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 	return logEntryFrom(s.db, key, rev)
 }
 
 func logEntryFrom(db pebble.Reader, key string, rev int64) (*KeyValue, error) {
+	return logEntryAt(db, make([]byte, 9), key, rev)
+}
+
+// logEntryAt is logEntryFrom with a caller-supplied 9-byte scratch buffer for
+// the log key, so scans can look up many entries without allocating a key
+// for each.
+func logEntryAt(db pebble.Reader, lk []byte, key string, rev int64) (*KeyValue, error) {
 	// Fast path: non-txn entries are stored at logKey(rev).
-	v, closer, err := db.Get(logKey(rev))
+	putLogKey(lk, rev)
+	v, closer, err := db.Get(lk)
 	if err == nil {
 		defer closer.Close()
-		r, err := unmarshalRecord(v)
+		r, err := decodeRecord(v)
 		if err != nil {
 			return nil, err
 		}
-		return recordToKV(key, rev, r), nil
+		return viewToKV(key, rev, &r), nil
 	}
 	if err != pebble.ErrNotFound {
 		return nil, fmt.Errorf("store: get log rev=%d: %w", rev, err)
@@ -842,12 +864,12 @@ func logEntryFrom(db pebble.Reader, key string, rev int64) (*KeyValue, error) {
 	}
 	defer func() { _ = iter.Close() }()
 	for iter.First(); iter.Valid(); iter.Next() {
-		r, rerr := unmarshalRecord(iter.Value())
+		r, rerr := decodeRecord(iter.Value())
 		if rerr != nil {
 			continue
 		}
-		if r.key == key {
-			return recordToKV(key, rev, r), nil
+		if string(r.key) == key {
+			return viewToKV(key, rev, &r), nil
 		}
 	}
 	return nil, fmt.Errorf("store: get log rev=%d key=%q: not found in txn sub-ops", rev, key)
@@ -887,30 +909,36 @@ func undoAfter(snap pebble.Reader, prefix, fromKey string, rev int64, match func
 	defer func() { _ = iter.Close() }()
 
 	undo := make(map[string]*KeyValue)
+	lk := make([]byte, 9)
 	for iter.First(); iter.Valid(); iter.Next() {
-		r, err := unmarshalRecord(iter.Value())
+		r, err := decodeRecord(iter.Value())
 		if err != nil {
 			return nil, err
 		}
-		if _, seen := undo[r.key]; seen || !strings.HasPrefix(r.key, prefix) ||
-			r.key < fromKey || (match != nil && !match(r.key)) {
+		// Filter on the aliased key bytes; the comparisons don't allocate.
+		if _, seen := undo[string(r.key)]; seen || len(r.key) < len(prefix) ||
+			string(r.key[:len(prefix)]) != prefix || string(r.key) < fromKey {
+			continue
+		}
+		key := string(r.key)
+		if match != nil && !match(key) {
 			continue
 		}
 		if r.prevRevision == 0 {
 			if !r.create {
 				return nil, errUndoChain
 			}
-			undo[r.key] = nil
+			undo[key] = nil
 			continue
 		}
 		if r.prevRevision > rev {
 			return nil, errUndoChain
 		}
-		prev, err := logEntryFrom(snap, r.key, r.prevRevision)
+		prev, err := logEntryAt(snap, lk, key, r.prevRevision)
 		if err != nil || prev == nil {
 			return nil, errUndoChain
 		}
-		undo[r.key] = prev
+		undo[key] = prev
 	}
 	return undo, iter.Error()
 }
@@ -1016,17 +1044,17 @@ func (s *Store) getAtRevision(key string, targetRev int64) (*KeyValue, error) {
 
 	for iter.Last(); iter.Valid(); iter.Prev() {
 		rev := decodeLogKey(iter.Key())
-		r, err := unmarshalRecord(iter.Value())
+		r, err := decodeRecord(iter.Value())
 		if err != nil {
 			return nil, err
 		}
-		if r.key != key {
+		if string(r.key) != key {
 			continue
 		}
 		if r.delete {
 			return nil, nil
 		}
-		return recordToKV(r.key, rev, r), nil
+		return viewToKV(key, rev, &r), nil
 	}
 	return nil, iter.Error()
 }
@@ -1127,13 +1155,14 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64) ([]*
 	defer func() { _ = iter.Close() }()
 
 	var out []*KeyValue
+	lk := make([]byte, 9)
 	for iter.First(); iter.Valid(); iter.Next() {
 		if limit > 0 && int64(len(out)) >= limit {
 			break
 		}
 		k := string(iter.Key()[1:]) // strip 'i' prefix
 		rev := decodeRev(iter.Value())
-		kv, err := logEntryFrom(db, k, rev)
+		kv, err := logEntryAt(db, lk, k, rev)
 		if err != nil {
 			return nil, err
 		}
@@ -1753,10 +1782,16 @@ func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV bool) ([
 }
 
 func recordVersion(r *record) int64 {
-	if r.version > 0 {
-		return r.version
+	return logVersion(r.version, r.delete)
+}
+
+// logVersion is a record's key version. Records written before versions were
+// stored carry 0: 1 for a live key, 0 for a deletion.
+func logVersion(version int64, deleted bool) int64 {
+	if version > 0 {
+		return version
 	}
-	if r.delete {
+	if deleted {
 		return 0
 	}
 	return 1

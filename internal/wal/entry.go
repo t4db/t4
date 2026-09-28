@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"slices"
 )
 
 // Op identifies the type of a WAL entry.
@@ -174,13 +175,18 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 // AppendEntry encodes e as a framed record and writes it to w.
 func AppendEntry(w io.Writer, e *Entry) error {
-	payload := marshalEntry(e)
-	frame := make([]byte, 8+len(payload))
-	binary.BigEndian.PutUint32(frame[0:4], uint32(len(payload)))
-	binary.BigEndian.PutUint32(frame[4:8], crc32.Checksum(payload, crcTable))
-	copy(frame[8:], payload)
-	_, err := w.Write(frame)
+	_, err := w.Write(appendFrame(nil, e))
 	return err
+}
+
+// appendFrame appends e's framed record (length, CRC, payload) to dst.
+func appendFrame(dst []byte, e *Entry) []byte {
+	start := len(dst)
+	dst = appendEntryPayload(append(dst, 0, 0, 0, 0, 0, 0, 0, 0), e)
+	payload := dst[start+8:]
+	binary.BigEndian.PutUint32(dst[start:start+4], uint32(len(payload)))
+	binary.BigEndian.PutUint32(dst[start+4:start+8], crc32.Checksum(payload, crcTable))
+	return dst
 }
 
 // ReadEntry reads and decodes the next framed record from r.
@@ -218,8 +224,12 @@ func ReadEntryVersion(r io.Reader, version int) (*Entry, error) {
 	return unmarshalEntryVersion(payload, version)
 }
 
-func marshalEntry(e *Entry) []byte {
-	buf := make([]byte, entryFixedSizeV3+len(e.Key)+len(e.Value))
+// appendEntryPayload appends e's unframed encoding to dst.
+func appendEntryPayload(dst []byte, e *Entry) []byte {
+	n := len(dst)
+	size := entryFixedSizeV3 + len(e.Key) + len(e.Value)
+	dst = slices.Grow(dst, size)[:n+size]
+	buf := dst[n:]
 	buf[0] = byte(e.Op)
 	binary.BigEndian.PutUint64(buf[1:9], uint64(e.Revision))
 	binary.BigEndian.PutUint64(buf[9:17], e.Term)
@@ -232,7 +242,7 @@ func marshalEntry(e *Entry) []byte {
 	binary.BigEndian.PutUint32(buf[61:65], uint32(len(e.Value)))
 	copy(buf[65:], e.Key)
 	copy(buf[65+len(e.Key):], e.Value)
-	return buf
+	return dst
 }
 
 func unmarshalEntry(b []byte) (*Entry, error) {

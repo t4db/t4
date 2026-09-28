@@ -1016,6 +1016,11 @@ func (o readOpts) storeOptions() istore.ReadOptions {
 }
 
 func applyReadOpts(opts []ReadOption) readOpts {
+	// Passing &o to an option func moves o to the heap; skip that for the
+	// common no-options read.
+	if len(opts) == 0 {
+		return readOpts{}
+	}
 	var o readOpts
 	for _, fn := range opts {
 		fn(&o)

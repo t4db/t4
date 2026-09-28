@@ -64,9 +64,14 @@ type record struct {
 // logKey encodes a revision as a pebble log key.
 func logKey(rev int64) []byte {
 	k := make([]byte, 9)
+	putLogKey(k, rev)
+	return k
+}
+
+// putLogKey encodes rev as a log key into the 9-byte k.
+func putLogKey(k []byte, rev int64) {
 	k[0] = prefixLog
 	binary.BigEndian.PutUint64(k[1:], uint64(rev))
-	return k
 }
 
 // logKeyWithSub encodes a revision + sub-index as a pebble log key.
@@ -163,11 +168,25 @@ func marshalRecord(r *record) []byte {
 	return buf
 }
 
-func unmarshalRecord(b []byte) (*record, error) {
+// recordView is a log record decoded in place: key and value alias the
+// source buffer and are only valid while it is. Scans that inspect and
+// discard most records use it to avoid copying each one.
+type recordView struct {
+	key            []byte
+	value          []byte
+	createRevision int64
+	prevRevision   int64
+	version        int64
+	lease          int64
+	create         bool
+	delete         bool
+}
+
+func decodeRecord(b []byte) (recordView, error) {
+	var r recordView
 	if len(b) < entryHeaderSizeV1 {
-		return nil, fmt.Errorf("store: record too short (%d bytes)", len(b))
+		return r, fmt.Errorf("store: record too short (%d bytes)", len(b))
 	}
-	r := &record{}
 	flags := b[0]
 	r.create = flags&flagCreate != 0
 	r.delete = flags&flagDelete != 0
@@ -185,15 +204,39 @@ func unmarshalRecord(b []byte) (*record, error) {
 	}
 	klen := int(binary.BigEndian.Uint32(b[headerSize-4 : headerSize]))
 	if len(b) < headerSize+klen {
-		return nil, fmt.Errorf("store: record key truncated")
+		return r, fmt.Errorf("store: record key truncated")
 	}
-	r.key = string(b[headerSize : headerSize+klen])
-	raw := b[headerSize+klen:]
-	if len(raw) > 0 {
-		r.value = make([]byte, len(raw))
-		copy(r.value, raw)
-	}
+	r.key = b[headerSize : headerSize+klen]
+	r.value = b[headerSize+klen:]
 	return r, nil
+}
+
+func unmarshalRecord(b []byte) (*record, error) {
+	v, err := decodeRecord(b)
+	if err != nil {
+		return nil, err
+	}
+	return &record{
+		key:            string(v.key),
+		value:          cloneValue(v.value),
+		createRevision: v.createRevision,
+		prevRevision:   v.prevRevision,
+		version:        v.version,
+		lease:          v.lease,
+		create:         v.create,
+		delete:         v.delete,
+	}, nil
+}
+
+// cloneValue copies a value out of a pebble-owned buffer. Empty values stay
+// nil.
+func cloneValue(raw []byte) []byte {
+	if len(raw) == 0 {
+		return nil
+	}
+	v := make([]byte, len(raw))
+	copy(v, raw)
+	return v
 }
 
 func versionRecordHeaderLooksValid(version, createRev, prevRev int64, deleted bool) bool {
