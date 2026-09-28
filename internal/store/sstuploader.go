@@ -38,50 +38,23 @@ type SSTUploader struct {
 	local     map[string]string // filename → "sst/{hash16}/{name}" in this store
 	inherited map[string]string // filename → s3 key in ancestor store
 
-	// pending counts queued and in-flight uploads; Wait blocks until it is
-	// zero. Not a sync.WaitGroup: Pebble reports new tables from its own
-	// goroutines at any time, including while a checkpoint is in Wait, and a
-	// WaitGroup forbids an Add from zero concurrent with Wait.
-	pendingMu   sync.Mutex
-	pending     int
-	pendingZero *sync.Cond
-	uploadC     chan string // local file paths queued for upload
-
-	// stopMu protects stopped. EventListener acquires a read-lock to gate
-	// the pending increment; Start sets stopped under the write-lock before draining
-	// the channel. This closes the race where Start exits while EventListener
-	// is mid-enqueue.
-	stopMu  sync.RWMutex
-	stopped bool
+	uploadC chan string        // local file paths queued for upload
+	waitC   chan chan struct{} // Wait requests to Start's loop
+	exited  chan struct{}      // closed once Start's loop has finished
 }
 
 // NewSSTUploader creates an uploader that will upload SSTs to store.
 // pebbleDir is the local Pebble data directory (used for reconciliation).
 func NewSSTUploader(store object.Store, pebbleDir string) *SSTUploader {
-	u := &SSTUploader{
+	return &SSTUploader{
 		store:     store,
 		pebbleDir: pebbleDir,
 		local:     make(map[string]string),
 		inherited: make(map[string]string),
 		uploadC:   make(chan string, 512),
+		waitC:     make(chan chan struct{}),
+		exited:    make(chan struct{}),
 	}
-	u.pendingZero = sync.NewCond(&u.pendingMu)
-	return u
-}
-
-func (u *SSTUploader) addPending() {
-	u.pendingMu.Lock()
-	u.pending++
-	u.pendingMu.Unlock()
-}
-
-func (u *SSTUploader) donePending() {
-	u.pendingMu.Lock()
-	u.pending--
-	if u.pending == 0 {
-		u.pendingZero.Broadcast()
-	}
-	u.pendingMu.Unlock()
 }
 
 // EventListener returns a pebble.EventListener that queues new SST files for
@@ -94,35 +67,22 @@ func (u *SSTUploader) EventListener() pebble.EventListener {
 	queueTable := func(fileNum fmt.Stringer) {
 		path := filepath.Join(u.pebbleDir, fileNum.String()+".sst")
 
-		// Hold stopMu read-lock while incrementing pending and sending to
-		// the channel. Start() acquires the write-lock before draining,
-		// so we can never have a pending increment that nobody decrements.
-		// The send must be inside the lock too: sent after it, a path can
-		// land in the channel once Start has drained it and exited.
-		u.stopMu.RLock()
-		if u.stopped {
-			u.stopMu.RUnlock()
-			// Uploader is shutting down; WriteWithRegistry's inline fallback
+		select {
+		case <-u.exited:
+			// Uploader has shut down; WriteWithRegistry's inline fallback
 			// will handle any SSTs that end up in the checkpoint.
 			return
-		}
-		u.addPending()
-		var queued bool
-		select {
-		case u.uploadC <- path:
-			// Start goroutine will decrement pending after upload.
-			queued = true
 		default:
 		}
-		u.stopMu.RUnlock()
-
-		if !queued {
+		select {
+		case u.uploadC <- path:
+		default:
 			// Channel full: upload synchronously so we never drop a file.
-			// Outside the lock, so a slow upload never delays Start's exit.
+			// Wait does not cover it, which is safe: checkpoint writing
+			// uploads any SST missing from the registry itself.
 			if err := u.uploadOne(context.Background(), path); err != nil {
 				logrus.Warnf("sstuploader: sync upload %q: %v", path, err)
 			}
-			u.donePending()
 		}
 	}
 	return pebble.EventListener{
@@ -200,51 +160,65 @@ func (u *SSTUploader) Reconcile(ctx context.Context) error {
 
 // Start launches the background upload goroutine. Call once; runs until ctx
 // is cancelled.
+//
+// The loop is the only goroutine that touches its WaitGroup, both to Add an
+// upload and to Wait for them, which is what a WaitGroup requires: an Add
+// from zero must not run concurrently with Wait. Pebble reports new tables
+// from its own goroutines at any time, so they only queue paths.
 func (u *SSTUploader) Start(ctx context.Context) {
 	go func() {
+		var uploads sync.WaitGroup
+		upload := func(ctx context.Context, path string) {
+			uploads.Add(1)
+			go func() {
+				defer uploads.Done()
+				if err := u.uploadOne(ctx, path); err != nil {
+					logrus.Warnf("sstuploader: upload %q: %v", path, err)
+				}
+			}()
+		}
+		drain := func(ctx context.Context) {
+			for {
+				select {
+				case path := <-u.uploadC:
+					upload(ctx, path)
+				default:
+					return
+				}
+			}
+		}
 		for {
 			select {
 			case path := <-u.uploadC:
-				go func(p string) {
-					defer u.donePending()
-					if err := u.uploadOne(ctx, p); err != nil {
-						logrus.Warnf("sstuploader: upload %q: %v", p, err)
-					}
-				}(path)
+				upload(ctx, path)
+			case done := <-u.waitC:
+				drain(ctx)
+				uploads.Wait()
+				close(done)
 			case <-ctx.Done():
-				// Signal EventListener to stop incrementing pending BEFORE we
-				// drain the channel. The write-lock ensures no EventListener
-				// call is mid-way through the pending increment when we start draining.
-				u.stopMu.Lock()
-				u.stopped = true
-				u.stopMu.Unlock()
-
-				// Drain remaining items (added before we set stopped).
-				for {
-					select {
-					case path := <-u.uploadC:
-						go func(p string) {
-							defer u.donePending()
-							u.uploadOne(context.Background(), p) //nolint:errcheck
-						}(path)
-					default:
-						return
-					}
-				}
+				// Upload what is still queued before exiting, so a Wait during
+				// shutdown still covers it. A path queued after this is left to
+				// checkpoint writing, which uploads any SST it finds missing.
+				drain(context.Background())
+				uploads.Wait()
+				close(u.exited)
+				return
 			}
 		}
 	}()
 }
 
-// Wait blocks until all in-flight and queued uploads complete. Safe to call
-// even after Start's context is cancelled — the start goroutine drains the
-// channel on exit so the count always reaches zero.
+// Wait blocks until every upload queued so far is complete. Called before
+// Start, it waits for Start's loop, which then uploads what was queued
+// meanwhile; after Start's context is cancelled, it waits for the loop to
+// finish its final uploads.
 func (u *SSTUploader) Wait() {
-	u.pendingMu.Lock()
-	for u.pending > 0 {
-		u.pendingZero.Wait()
+	done := make(chan struct{})
+	select {
+	case u.waitC <- done:
+		<-done
+	case <-u.exited:
 	}
-	u.pendingMu.Unlock()
 }
 
 // Registry returns a snapshot of filename → s3Key for all SSTs uploaded to

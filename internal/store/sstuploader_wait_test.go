@@ -2,11 +2,15 @@ package store
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/pebble"
+
+	"github.com/t4db/t4/pkg/object"
 )
 
 // TestSSTUploaderWaitDuringQueue: Pebble reports new tables from its own
@@ -69,5 +73,41 @@ func TestSSTUploaderWaitAfterStopDuringQueue(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("iteration %d: Wait never returned: a queued upload was stranded at shutdown", i)
 		}
+	}
+}
+
+// TestSSTUploaderWaitBeforeStart: the startup checkpoint flushes Pebble and
+// calls Wait before the node starts the uploader. Wait must cover the SST
+// that flush queued, not return because no upload is running yet.
+func TestSSTUploaderWaitBeforeStart(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "000007.sst"), []byte("table"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	u := NewSSTUploader(object.NewMem(), dir)
+	listener := u.EventListener()
+	listener.FlushEnd(pebble.FlushInfo{Output: []pebble.TableInfo{{FileNum: pebble.FileNum(7)}}})
+
+	waited := make(chan struct{})
+	go func() {
+		u.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("Wait returned before the uploader started")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	u.Start(ctx)
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait never returned after Start")
+	}
+	if _, ok := u.Registry()["000007.sst"]; !ok {
+		t.Fatalf("Wait returned before the queued SST was uploaded: registry %v", u.Registry())
 	}
 }
