@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -25,17 +26,48 @@ func TestSSTUploaderWaitDuringQueue(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < 2000; i++ {
+			for i := 0; i < 20000; i++ {
 				listener.FlushEnd(pebble.FlushInfo{Output: []pebble.TableInfo{{FileNum: pebble.FileNum(g*10000 + i)}}})
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			for i := 0; i < 2000; i++ {
+			for i := 0; i < 20000; i++ {
 				u.Wait()
 			}
 		}()
 	}
 	wg.Wait()
 	u.Wait()
+}
+
+// TestSSTUploaderWaitAfterStopDuringQueue: a table queued while the uploader
+// is stopping must not be stranded in the channel after Start's drain has
+// run, or its upload is never counted done and Wait blocks forever.
+func TestSSTUploaderWaitAfterStopDuringQueue(t *testing.T) {
+	for i := 0; i < 20000; i++ {
+		u := NewSSTUploader(nil, t.TempDir())
+		ctx, cancel := context.WithCancel(context.Background())
+		u.Start(ctx)
+		listener := u.EventListener()
+
+		queued := make(chan struct{})
+		go func() {
+			listener.FlushEnd(pebble.FlushInfo{Output: []pebble.TableInfo{{FileNum: pebble.FileNum(i)}}})
+			close(queued)
+		}()
+		cancel()
+		<-queued
+
+		waited := make(chan struct{})
+		go func() {
+			u.Wait()
+			close(waited)
+		}()
+		select {
+		case <-waited:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d: Wait never returned: a queued upload was stranded at shutdown", i)
+		}
+	}
 }

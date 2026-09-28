@@ -97,6 +97,8 @@ func (u *SSTUploader) EventListener() pebble.EventListener {
 		// Hold stopMu read-lock while incrementing pending and sending to
 		// the channel. Start() acquires the write-lock before draining,
 		// so we can never have a pending increment that nobody decrements.
+		// The send must be inside the lock too: sent after it, a path can
+		// land in the channel once Start has drained it and exited.
 		u.stopMu.RLock()
 		if u.stopped {
 			u.stopMu.RUnlock()
@@ -105,13 +107,18 @@ func (u *SSTUploader) EventListener() pebble.EventListener {
 			return
 		}
 		u.addPending()
-		u.stopMu.RUnlock()
-
+		var queued bool
 		select {
 		case u.uploadC <- path:
 			// Start goroutine will decrement pending after upload.
+			queued = true
 		default:
+		}
+		u.stopMu.RUnlock()
+
+		if !queued {
 			// Channel full: upload synchronously so we never drop a file.
+			// Outside the lock, so a slow upload never delays Start's exit.
 			if err := u.uploadOne(context.Background(), path); err != nil {
 				logrus.Warnf("sstuploader: sync upload %q: %v", path, err)
 			}
