@@ -18,7 +18,11 @@
 #   docker build -f bench/Dockerfile.t4 -t t4-bench .
 #   docker build -f bench/Dockerfile        -t t4bench  .
 
+# GOMAXPROCS matches the 1-CPU limit on both systems. Go 1.25+ derives it from
+# the cgroup limit, older Go (etcd's release builds) from the host's CPU count,
+# so leaving it unset runs them with different schedulers.
 x-t4-env: &t4-env
+  GOMAXPROCS: "1"
   T4_S3_ACCESS_KEY_ID: bench
   T4_S3_SECRET_ACCESS_KEY: bench123
   T4_S3_REGION: us-east-1
@@ -47,6 +51,7 @@ x-etcd-base: &etcd-base
 
 # Shared etcd cluster environment (node-specific vars added per service).
 x-etcd-cluster-env: &etcd-cluster-env
+  GOMAXPROCS: "1"
   ETCD_DATA_DIR: /etcd-data
   ETCD_INITIAL_CLUSTER_TOKEN: bench-etcd
   ETCD_INITIAL_CLUSTER_STATE: new
