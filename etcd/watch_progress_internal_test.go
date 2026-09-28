@@ -67,6 +67,7 @@ func TestDrainWatchProgressPinsToDeliveredRevision(t *testing.T) {
 	// Deliver one event; progress must now advance to exactly that revision
 	// and no further.
 	events <- t4.Event{Type: t4.EventPut, KV: &t4.KeyValue{Key: "/w/k", Value: []byte("v"), Revision: 3}}
+	events <- t4.Event{Type: t4.EventProgress, Revision: 3}
 	if ev := recvOne(t, sendCh); len(ev.Events) != 1 {
 		t.Fatalf("expected the event frame, got %d events", len(ev.Events))
 	}
@@ -121,6 +122,79 @@ func TestSubscribeWatchSeedsStartRevision(t *testing.T) {
 	}
 	if live.startRev != node.CurrentRevision() {
 		t.Errorf("live watch startRev = %d, want %d", live.startRev, node.CurrentRevision())
+	}
+}
+
+// TestDrainWatchHoldsIncompleteRevision: the events channel carries one
+// event at a time, so the newest revision may still be arriving when the
+// channel runs dry. drainWatch must hold it until a later revision or a
+// progress marker seals it, and must drop rather than send it if the channel
+// closes first — a client resumes from the last event it received, so a
+// partial revision would lose the rest of it.
+func TestDrainWatchHoldsIncompleteRevision(t *testing.T) {
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("t4.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = node.Close() })
+	srv := New(node, nil, nil)
+
+	events := make(chan t4.Event)
+	sendCh := make(chan []*etcdserverpb.WatchResponse, 4)
+	wctx, wcancel := context.WithCancel(context.Background())
+	defer wcancel()
+	done := make(chan struct{})
+	go func() {
+		srv.drainWatch(wctx, 1, testSubscription(wcancel, events), sendCh)
+		close(done)
+	}()
+
+	put := func(key string, rev int64) {
+		events <- t4.Event{Type: t4.EventPut, KV: &t4.KeyValue{Key: key, Value: []byte("v"), Revision: rev}}
+	}
+	quiet := func() {
+		t.Helper()
+		select {
+		case run := <-sendCh:
+			t.Fatalf("sent %d frame(s) for an incomplete revision: %+v", len(run), run[0])
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// Revision 5 arrives in two parts; nothing may be sent in between.
+	put("/a", 5)
+	quiet()
+	put("/b", 5)
+	quiet()
+
+	// An event of revision 6 seals 5, which ships whole; 6 is held back.
+	put("/c", 6)
+	resp := recvOne(t, sendCh)
+	if len(resp.Events) != 2 || resp.Header.Revision != toEtcdRevision(5) {
+		t.Fatalf("got %d events at header revision %d, want revision 5's 2 events at %d",
+			len(resp.Events), resp.Header.Revision, toEtcdRevision(5))
+	}
+	quiet()
+
+	// A progress marker seals 6.
+	events <- t4.Event{Type: t4.EventProgress, Revision: 6}
+	if resp := recvOne(t, sendCh); len(resp.Events) != 1 || resp.Header.Revision != toEtcdRevision(6) {
+		t.Fatalf("got %d events at header revision %d, want revision 6's event at %d",
+			len(resp.Events), resp.Header.Revision, toEtcdRevision(6))
+	}
+
+	// Revision 7 is still open when the channel closes: dropped, not sent.
+	put("/d", 7)
+	close(events)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drainWatch did not exit after events channel closed")
+	}
+	select {
+	case run := <-sendCh:
+		t.Fatalf("sent an incomplete revision on close: %+v", run[0])
+	default:
 	}
 }
 

@@ -247,3 +247,58 @@ func TestAuthResponsesCarryHeader(t *testing.T) {
 		}
 	}
 }
+
+// TestWatchDeliversRevisionInOneResponse: etcd delivers every event of a
+// revision in one WatchResponse. Splitting a revision across responses is
+// unsafe beyond appearance: clientv3 resumes a broken stream from the last
+// received event's ModRevision+1, so a stream that drops between two parts
+// of a revision silently loses the rest of it.
+func TestWatchDeliversRevisionInOneResponse(t *testing.T) {
+	_, cli := newWatchNode(t)
+	ctx := parityCtx(t)
+
+	const n = 130
+	bigTxn := func() int64 {
+		ops := make([]clientv3.Op, n)
+		for i := range ops {
+			ops[i] = clientv3.OpPut(fmt.Sprintf("/rev/%03d", i), "v")
+		}
+		resp, err := cli.Txn(ctx).Then(ops...).Commit()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Header.Revision
+	}
+
+	// A live watch sees the txn as it is dispatched; a replay watch reads it
+	// back from history.
+	live := cli.Watch(ctx, "/rev/", clientv3.WithPrefix())
+	if err := cli.RequestProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-live // wait until the watch is established before writing
+	rev := bigTxn()
+	replay := cli.Watch(ctx, "/rev/", clientv3.WithPrefix(), clientv3.WithRev(rev))
+
+	for name, wch := range map[string]clientv3.WatchChan{"live": live, "replay": replay} {
+		var sizes []int
+		for got := 0; got < n; {
+			select {
+			case resp := <-wch:
+				if err := resp.Err(); err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				if len(resp.Events) == 0 {
+					continue
+				}
+				sizes = append(sizes, len(resp.Events))
+				got += len(resp.Events)
+			case <-ctx.Done():
+				t.Fatalf("%s: timed out after responses of %v events", name, sizes)
+			}
+		}
+		if len(sizes) != 1 {
+			t.Errorf("%s: revision %d arrived in responses of %v events, want one of %d", name, rev, sizes, n)
+		}
+	}
+}

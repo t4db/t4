@@ -3,6 +3,7 @@ package etcd
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -367,6 +368,12 @@ func (s *Server) sendOrCancelSlow(wctx context.Context, sendCh chan<- []*etcdser
 // drainWatch reads events, coalesces them into a single WatchResponse per
 // burst, and forwards through sendCh until wctx is done or events closes.
 //
+// Like etcd, it never splits a revision across responses: a response carries
+// only revisions whose events have all been read, and watchMaxBatch is a soft
+// cap that yields to a large revision. clientv3 resumes a broken stream from
+// the last received event's ModRevision+1, so a stream that broke between two
+// parts of a revision would lose the rest of it.
+//
 // drainWatch calls sub.cancel on exit so the upstream Node.Watch goroutine
 // (sitting on a blocked channel send) is released along with this drain.
 //
@@ -384,59 +391,55 @@ func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubsc
 		progressC = t.C
 	}
 
-	batch := make([]*mvccpb.Event, 0, watchMaxBatch)
-	// batchMaxRev tracks the highest revision observed since the last flush.
-	// progressRev is the rev we have actually delivered to the watcher so far.
-	// WatchResponse Header.Revision must reflect events included in this frame,
-	// not the live node clock — apiserver uses the header rev to advance its
-	// watchCache, and if it leapfrogs past events that arrive in a later frame,
-	// those events are silently dropped from the cache. Seeded from the
-	// subscription's start point for the same reason: a replay watch has not
-	// yet delivered the history between its start revision and the live clock.
-	// syncedRev is the revision reported by the most recent progress marker:
-	// how far this watch is caught up including revisions that produced no
-	// event under its prefix. Without it an idle watch could never advance,
-	// because it would have no event to learn the revision from.
-	var batchMaxRev, syncedRev int64
-	progressRev := sub.startRev
-	// advance moves progressRev to the highest revision this watch can honestly
-	// claim delivered. Markers are applied here rather than on arrival because
-	// the batch may still hold events at or below the marker's revision.
-	advance := func() {
-		if batchMaxRev > progressRev {
-			progressRev = batchMaxRev
+	// pending holds matched events not yet sent, in revision order;
+	// pendingRevs holds their revisions.
+	var pending []*mvccpb.Event
+	var pendingRevs []int64
+	// sealedRev is the revision through which this watch has read every
+	// event off the channel. The channel carries one event at a time, so the
+	// newest revision may still be arriving; it is sealed by a progress marker
+	// (the store ends every run of events with one) or by an event of a later
+	// revision (the channel is in revision order). Every event at or below
+	// sealedRev is either sent or pending, so once flush empties that part of
+	// pending, sealedRev is also the revision this watch has delivered.
+	//
+	// WatchResponse Header.Revision must never claim more than that —
+	// apiserver uses the header rev to advance its watchCache, and if it
+	// leapfrogs past events that arrive in a later frame, those events are
+	// silently dropped from the cache. Seeded from the subscription's start
+	// point for the same reason: a replay watch has not yet delivered the
+	// history between its start revision and the live clock.
+	sealedRev := sub.startRev
+	seal := func(rev int64) {
+		if rev > sealedRev {
+			sealedRev = rev
 		}
-		if syncedRev > progressRev {
-			progressRev = syncedRev
-		}
-		batchMaxRev, syncedRev = 0, 0
 	}
+	sealedLen := func() int {
+		return sort.Search(len(pendingRevs), func(i int) bool { return pendingRevs[i] > sealedRev })
+	}
+	// flush sends the pending events of sealed revisions, leaving the newest
+	// revision behind if it may still be incomplete.
 	flush := func() bool {
-		if len(batch) == 0 {
-			advance()
+		n := sealedLen()
+		if n == 0 {
 			return true
 		}
-		toSend := batch
-		rev := batchMaxRev
-		batch = make([]*mvccpb.Event, 0, watchMaxBatch)
-		advance()
-		return s.sendEvents(wctx, sendCh, watchID, toSend, rev, fragment)
+		toSend := pending[:n:n]
+		pending, pendingRevs = pending[n:], pendingRevs[n:]
+		return s.sendEvents(wctx, sendCh, watchID, toSend, sealedRev, fragment)
 	}
 	appendEvent := func(e t4.Event) {
 		if e.Type == t4.EventProgress {
-			// Delivered in-band, so every matching event at or below this
-			// revision has already been read off the channel — but some may
-			// still be sitting in batch, so only record it here.
-			if e.Revision > syncedRev {
-				syncedRev = e.Revision
-			}
+			seal(e.Revision)
 			return
 		}
-		// Track every observed revision, even ones we filter out, so the
-		// header rev reflects how far this watch has actually scanned.
-		if e.KV != nil && e.KV.Revision > batchMaxRev {
-			batchMaxRev = e.KV.Revision
+		if e.KV == nil {
+			return
 		}
+		// Seal on every observed revision, even ones filtered out below, so
+		// the header rev reflects how far this watch has actually scanned.
+		seal(e.KV.Revision - 1)
 		if !match(e.KV.Key) {
 			return
 		}
@@ -444,23 +447,26 @@ func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubsc
 		if !ok {
 			return
 		}
-		batch = append(batch, eventToProto(ev))
+		pending = append(pending, eventToProto(ev))
+		pendingRevs = append(pendingRevs, e.KV.Revision)
 	}
-	// sendProgress flushes any pending batch, then reports the revision this
-	// watch has actually delivered. Claiming a higher rev — the live node
-	// clock, say — would let apiserver advance its watchCache past events
-	// still queued here and silently drop them.
+	// sendProgress flushes sealed events, then reports the revision this watch
+	// has actually delivered. Claiming a higher rev — the live node clock,
+	// say — would let apiserver advance its watchCache past events still
+	// queued here and silently drop them.
 	sendProgress := func() bool {
 		if !flush() {
 			return false
 		}
-		return s.sendOrCancelSlow(wctx, sendCh, []*etcdserverpb.WatchResponse{{Header: s.headerAt(progressRev), WatchId: watchID}}, watchID)
+		return s.sendOrCancelSlow(wctx, sendCh, []*etcdserverpb.WatchResponse{{Header: s.headerAt(sealedRev), WatchId: watchID}}, watchID)
 	}
 
 	for {
 		select {
 		case e, ok := <-events:
 			if !ok {
+				// Events of an unsealed revision are dropped rather than sent
+				// as part of a revision; the client resumes before them.
 				flush()
 				return
 			}
@@ -468,7 +474,7 @@ func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubsc
 			// Drain everything else already buffered so a burst from scanLog
 			// ships in one frame.
 		drain:
-			for len(batch) < watchMaxBatch {
+			for sealedLen() < watchMaxBatch {
 				select {
 				case e2, ok2 := <-events:
 					if !ok2 {
