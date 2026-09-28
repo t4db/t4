@@ -449,6 +449,20 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err er
 			DeletedKeys: deletedKeys,
 		}, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
+	for {
+		out, err = n.txnLocal(ctx, req)
+		if !errors.Is(err, errReevaluateTxn) {
+			return out, err
+		}
+	}
+}
+
+// errReevaluateTxn reports that a transaction's evaluation depended on a
+// write that failed to commit, so it must be evaluated again.
+var errReevaluateTxn = errors.New("t4: txn depended on a failed write")
+
+// txnLocal evaluates and commits req on this node, the leader.
+func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error) {
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
 	if err := n.checkLease(); err != nil {
@@ -463,7 +477,7 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err er
 		return TxnResponse{}, ErrClosed
 	}
 	prepareStart := time.Now()
-	e, succeeded, deletedKeys, stats, err := n.prepareTxn(req)
+	e, succeeded, deletedKeys, observedRev, stats, err := n.prepareTxn(req)
 	prepareDuration := time.Since(prepareStart)
 	kind := stats.kind()
 	compare := txnCompareLabel(succeeded)
@@ -478,10 +492,44 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err er
 		// Use the committed revision, not nextRev which may be ahead of what
 		// the commit loop has fsynced if concurrent writes are in flight.
 		curRev := n.db.Load().CurrentRevision()
+		if observedRev <= curRev {
+			n.mu.Unlock()
+			observeTxnPreparation(lockWait, prepareDuration, kind)
+			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
+			return TxnResponse{Succeeded: succeeded, Revision: curRev}, nil
+		}
+		// The result depends on a write still being committed, which may yet
+		// fail. No client has seen that write, so if the committed state alone
+		// also leads to a branch that writes nothing, the txn is ordered before
+		// it and answered now.
+		committedNoop, committedSucceeded, err := n.evalCommittedNoop(req, curRev)
+		if err != nil {
+			n.mu.Unlock()
+			observeTxnPreparation(lockWait, prepareDuration, kind)
+			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
+			return TxnResponse{}, err
+		}
+		if committedNoop {
+			n.mu.Unlock()
+			observeTxnPreparation(lockWait, prepareDuration, kind)
+			metrics.TxnRequestsTotal.WithLabelValues(kind, txnCompareLabel(committedSucceeded), "noop").Inc()
+			return TxnResponse{Succeeded: committedSucceeded, Revision: curRev}, nil
+		}
+		// Otherwise its write must follow the in-flight one: answer once that
+		// commits, at its revision, and evaluate again if it fails.
+		aborted := n.abortedBatches
 		n.mu.Unlock()
 		observeTxnPreparation(lockWait, prepareDuration, kind)
+		committed, err := n.awaitObservedWrites(ctx, observedRev, aborted)
+		if err != nil {
+			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
+			return TxnResponse{}, err
+		}
+		if !committed {
+			return TxnResponse{}, errReevaluateTxn
+		}
 		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
-		return TxnResponse{Succeeded: succeeded, Revision: curRev}, nil
+		return TxnResponse{Succeeded: succeeded, Revision: observedRev}, nil
 	}
 	wr := newWriteReq(ctx, e)
 	n.writeC <- wr
@@ -639,7 +687,18 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 // selected branch. Must be called under n.mu.
 //
 // Returns a zero-valued Entry (Op==0) when the branch has no write ops.
-func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{}, txnStats, error) {
+//
+// observedRev is the highest revision of an in-flight write the evaluation
+// read, or 0 if it read only committed state.
+func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{}, int64, txnStats, error) {
+	var observedRev int64
+	readKey := func(key string) (*istore.KeyValue, error) {
+		if p, ok := n.pending[key]; ok && p.rev > observedRev {
+			observedRev = p.rev
+		}
+		return n.readKey(key)
+	}
+
 	// Evaluate conditions.
 	succeeded := true
 	readCache := make(map[string]*istore.KeyValue, len(req.Conditions))
@@ -647,9 +706,9 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		existing, ok := readCache[cond.Key]
 		if !ok {
 			var err error
-			existing, err = n.readKey(cond.Key)
+			existing, err = readKey(cond.Key)
 			if err != nil {
-				return wal.Entry{}, false, nil, txnStats{}, err
+				return wal.Entry{}, false, nil, 0, txnStats{}, err
 			}
 			readCache[cond.Key] = existing
 		}
@@ -664,7 +723,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		ops = req.Failure
 	}
 	if len(ops) == 0 {
-		return wal.Entry{}, succeeded, nil, txnStats{}, nil
+		return wal.Entry{}, succeeded, nil, observedRev, txnStats{}, nil
 	}
 
 	// Pre-resolve all ops (read current state) before incrementing nextRev,
@@ -684,9 +743,9 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		existing, ok := readCache[op.Key]
 		if !ok {
 			var err error
-			existing, err = n.readKey(op.Key)
+			existing, err = readKey(op.Key)
 			if err != nil {
-				return wal.Entry{}, false, nil, txnStats{}, err
+				return wal.Entry{}, false, nil, 0, txnStats{}, err
 			}
 			readCache[op.Key] = existing
 		}
@@ -728,17 +787,17 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		}
 	}
 	if len(active) == 0 {
-		return wal.Entry{}, succeeded, nil, txnStats{}, nil
+		return wal.Entry{}, succeeded, nil, observedRev, txnStats{}, nil
 	}
 
 	if len(active) > 65535 {
-		return wal.Entry{}, false, nil, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
+		return wal.Entry{}, false, nil, 0, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
 	}
 
 	seen := make(map[string]struct{}, len(active))
 	for _, r := range active {
 		if _, dup := seen[r.key]; dup {
-			return wal.Entry{}, false, nil, txnStats{}, fmt.Errorf("txn: duplicate key %q in branch", r.key)
+			return wal.Entry{}, false, nil, 0, txnStats{}, fmt.Errorf("txn: duplicate key %q in branch", r.key)
 		}
 		seen[r.key] = struct{}{}
 	}
@@ -787,7 +846,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		Term:     n.term,
 		Op:       wal.OpTxn,
 		Value:    wal.EncodeTxnOps(subOps),
-	}, succeeded, deletedKeys, stats, nil
+	}, succeeded, deletedKeys, observedRev, stats, nil
 }
 
 func opLabel(op wal.Op) string {
@@ -889,12 +948,99 @@ func (n *Node) recordCommitSpans(ctx context.Context, req *writeReq) {
 	quorumSpan.End(trace.WithTimestamp(req.quorumEnd))
 }
 
+// evalCommittedNoop evaluates req against the committed state at rev,
+// ignoring in-flight writes, and reports whether the branch it selects writes
+// nothing. Must be called under n.mu with rev the committed revision: a key
+// with no pending entry has no write in flight or being applied, so its
+// current value is its value at rev. A key with one may be applied past rev
+// meanwhile; its current value still answers when it is at or below rev.
+func (n *Node) evalCommittedNoop(req TxnRequest, rev int64) (noop, succeeded bool, err error) {
+	db := n.db.Load()
+	read := func(key string) (*istore.KeyValue, error) {
+		kv, err := db.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		if _, inFlight := n.pending[key]; inFlight && (kv == nil || kv.Revision > rev) {
+			return db.GetAt(key, rev)
+		}
+		return kv, nil
+	}
+	succeeded = true
+	for _, cond := range req.Conditions {
+		kv, err := read(cond.Key)
+		if err != nil {
+			return false, false, err
+		}
+		if !txnCondMatches(cond, kv) {
+			succeeded = false
+			break
+		}
+	}
+	ops := req.Success
+	if !succeeded {
+		ops = req.Failure
+	}
+	for _, op := range ops {
+		if op.Type == TxnPut {
+			return false, succeeded, nil
+		}
+		kv, err := read(op.Key)
+		if err != nil {
+			return false, false, err
+		}
+		if kv != nil {
+			return false, succeeded, nil
+		}
+	}
+	return true, succeeded, nil
+}
+
+// awaitObservedWrites waits until the in-flight writes a transaction read
+// have an outcome. rev is the highest of their revisions, aborted the value of
+// n.abortedBatches when they were read. It reports whether they all committed:
+// revisions are committed in order, so once rev is applied with no batch
+// having failed since, every revision up to rev is.
+func (n *Node) awaitObservedWrites(ctx context.Context, rev int64, aborted uint64) (bool, error) {
+	for {
+		n.mu.Lock()
+		if n.abortedBatches != aborted {
+			n.mu.Unlock()
+			return false, nil
+		}
+		if n.db.Load().CurrentRevision() >= rev {
+			n.mu.Unlock()
+			return true, nil
+		}
+		if n.batchDone == nil {
+			n.batchDone = make(chan struct{})
+		}
+		done := n.batchDone
+		n.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-n.bgCtx.Done():
+			return false, ErrClosed
+		}
+	}
+}
+
 // clearPendingBatch removes optimistic pending entries for one commit-loop
 // batch. If a newer write has already reused the same key, the revision guard
-// preserves that newer pending entry.
-func (n *Node) clearPendingBatch(batch []*writeReq) {
+// preserves that newer pending entry. err is the batch's commit error; it
+// wakes the transactions waiting on the batch's outcome either way.
+func (n *Node) clearPendingBatch(batch []*writeReq, err error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if err != nil {
+		n.abortedBatches++
+	}
+	if n.batchDone != nil {
+		close(n.batchDone)
+		n.batchDone = nil
+	}
 	for _, req := range batch {
 		if req.entry.Op == wal.OpTxn {
 			// For txn entries the key field is empty; decode sub-ops to clear
