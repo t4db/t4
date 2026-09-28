@@ -38,15 +38,9 @@ type SSTUploader struct {
 	local     map[string]string // filename → "sst/{hash16}/{name}" in this store
 	inherited map[string]string // filename → s3 key in ancestor store
 
-	pending sync.WaitGroup
-	uploadC chan string // local file paths queued for upload
-
-	// stopMu protects stopped. EventListener acquires a read-lock to gate
-	// pending.Add; Start sets stopped under the write-lock before draining
-	// the channel. This closes the race where Start exits while EventListener
-	// is mid-enqueue.
-	stopMu  sync.RWMutex
-	stopped bool
+	uploadC chan string        // local file paths queued for upload
+	waitC   chan chan struct{} // Wait requests to Start's loop
+	exited  chan struct{}      // closed once Start's loop has finished
 }
 
 // NewSSTUploader creates an uploader that will upload SSTs to store.
@@ -58,6 +52,8 @@ func NewSSTUploader(store object.Store, pebbleDir string) *SSTUploader {
 		local:     make(map[string]string),
 		inherited: make(map[string]string),
 		uploadC:   make(chan string, 512),
+		waitC:     make(chan chan struct{}),
+		exited:    make(chan struct{}),
 	}
 }
 
@@ -71,28 +67,22 @@ func (u *SSTUploader) EventListener() pebble.EventListener {
 	queueTable := func(fileNum fmt.Stringer) {
 		path := filepath.Join(u.pebbleDir, fileNum.String()+".sst")
 
-		// Hold stopMu read-lock while incrementing pending and sending to
-		// the channel. Start() acquires the write-lock before draining,
-		// so we can never have a pending.Add that nobody will Done().
-		u.stopMu.RLock()
-		if u.stopped {
-			u.stopMu.RUnlock()
-			// Uploader is shutting down; WriteWithRegistry's inline fallback
+		select {
+		case <-u.exited:
+			// Uploader has shut down; WriteWithRegistry's inline fallback
 			// will handle any SSTs that end up in the checkpoint.
 			return
+		default:
 		}
-		u.pending.Add(1)
-		u.stopMu.RUnlock()
-
 		select {
 		case u.uploadC <- path:
-			// Start goroutine will call pending.Done() after upload.
 		default:
 			// Channel full: upload synchronously so we never drop a file.
+			// Wait does not cover it, which is safe: checkpoint writing
+			// uploads any SST missing from the registry itself.
 			if err := u.uploadOne(context.Background(), path); err != nil {
 				logrus.Warnf("sstuploader: sync upload %q: %v", path, err)
 			}
-			u.pending.Done()
 		}
 	}
 	return pebble.EventListener{
@@ -170,47 +160,65 @@ func (u *SSTUploader) Reconcile(ctx context.Context) error {
 
 // Start launches the background upload goroutine. Call once; runs until ctx
 // is cancelled.
+//
+// The loop is the only goroutine that touches its WaitGroup, both to Add an
+// upload and to Wait for them, which is what a WaitGroup requires: an Add
+// from zero must not run concurrently with Wait. Pebble reports new tables
+// from its own goroutines at any time, so they only queue paths.
 func (u *SSTUploader) Start(ctx context.Context) {
 	go func() {
+		var uploads sync.WaitGroup
+		upload := func(ctx context.Context, path string) {
+			uploads.Add(1)
+			go func() {
+				defer uploads.Done()
+				if err := u.uploadOne(ctx, path); err != nil {
+					logrus.Warnf("sstuploader: upload %q: %v", path, err)
+				}
+			}()
+		}
+		drain := func(ctx context.Context) {
+			for {
+				select {
+				case path := <-u.uploadC:
+					upload(ctx, path)
+				default:
+					return
+				}
+			}
+		}
 		for {
 			select {
 			case path := <-u.uploadC:
-				go func(p string) {
-					defer u.pending.Done()
-					if err := u.uploadOne(ctx, p); err != nil {
-						logrus.Warnf("sstuploader: upload %q: %v", p, err)
-					}
-				}(path)
+				upload(ctx, path)
+			case done := <-u.waitC:
+				drain(ctx)
+				uploads.Wait()
+				close(done)
 			case <-ctx.Done():
-				// Signal EventListener to stop incrementing pending BEFORE we
-				// drain the channel. The write-lock ensures no EventListener
-				// call is mid-way through pending.Add when we start draining.
-				u.stopMu.Lock()
-				u.stopped = true
-				u.stopMu.Unlock()
-
-				// Drain remaining items (added before we set stopped).
-				for {
-					select {
-					case path := <-u.uploadC:
-						go func(p string) {
-							defer u.pending.Done()
-							u.uploadOne(context.Background(), p) //nolint:errcheck
-						}(path)
-					default:
-						return
-					}
-				}
+				// Upload what is still queued before exiting, so a Wait during
+				// shutdown still covers it. A path queued after this is left to
+				// checkpoint writing, which uploads any SST it finds missing.
+				drain(context.Background())
+				uploads.Wait()
+				close(u.exited)
+				return
 			}
 		}
 	}()
 }
 
-// Wait blocks until all in-flight and queued uploads complete. Safe to call
-// even after Start's context is cancelled — the start goroutine drains the
-// channel on exit so pending.Wait() will always unblock.
+// Wait blocks until every upload queued so far is complete. Called before
+// Start, it waits for Start's loop, which then uploads what was queued
+// meanwhile; after Start's context is cancelled, it waits for the loop to
+// finish its final uploads.
 func (u *SSTUploader) Wait() {
-	u.pending.Wait()
+	done := make(chan struct{})
+	select {
+	case u.waitC <- done:
+		<-done
+	case <-u.exited:
+	}
 }
 
 // Registry returns a snapshot of filename → s3Key for all SSTs uploaded to
