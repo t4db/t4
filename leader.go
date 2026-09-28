@@ -547,7 +547,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 
 		// Clear optimistic state before waking callers so a failed batch cannot
 		// leak stale pending revisions into a racing follow-up write.
-		n.clearPendingBatch(batch)
+		n.clearPendingBatch(batch, err)
 
 		// A node that may lack this batch must be fenced out of elections
 		// before the batch is acknowledged. The batch is committed either

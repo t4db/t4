@@ -199,6 +199,14 @@ type Node struct {
 	// not yet applied to Pebble. Protected by mu.
 	pending map[string]pendingKV
 
+	// batchDone is closed and replaced each time the commit loop resolves a
+	// batch, after clearing its pending entries; abortedBatches counts the
+	// batches that failed after their revisions were assigned. Both guarded
+	// by mu. A transaction whose conditions read a pending entry waits on
+	// them for that write's outcome (see awaitObservedWrites).
+	batchDone      chan struct{}
+	abortedBatches uint64
+
 	// writeC is the channel to the commit loop (group-commit WAL + Pebble apply).
 	// Only used when the node is leader or single.
 	writeC chan *writeReq

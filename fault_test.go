@@ -285,7 +285,7 @@ func TestClearPendingBatchRemovesOnlyMatchingRevisions(t *testing.T) {
 		{entry: wal.Entry{Revision: 4}}, // compact/no-key path
 	}
 
-	n.clearPendingBatch(batch)
+	n.clearPendingBatch(batch, nil)
 
 	if _, ok := n.pending["/gone"]; ok {
 		t.Fatal("matching pending entry was not cleared")
