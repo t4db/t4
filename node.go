@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -685,9 +685,11 @@ func Open(cfg Config) (*Node, error) {
 	n.cp = cp
 	n.db.Store(db)
 	n.initRevisionSampler()
+	// A nil provider means tracing is off, as for the etcd gRPC layer and the
+	// peer client; the global provider is not picked up implicitly.
 	tp := cfg.TracerProvider
 	if tp == nil {
-		tp = otel.GetTracerProvider()
+		tp = noop.NewTracerProvider()
 	}
 	n.tracer = tp.Tracer("github.com/t4db/t4")
 	if cfg.CheckpointEntries > 0 {

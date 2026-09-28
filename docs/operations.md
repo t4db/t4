@@ -675,7 +675,7 @@ at 1%.
 ```go
 node, err := t4.Open(t4.Config{
     // ...
-    TracerProvider: tp, // nil uses otel.GetTracerProvider()
+    TracerProvider: tp, // nil turns tracing off
 })
 ```
 

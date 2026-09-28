@@ -282,9 +282,9 @@ type Config struct {
 
 	// TracerProvider supplies the OpenTelemetry tracer used to span the write
 	// path (forward, WAL append, quorum wait) and linearizable reads. When nil,
-	// otel.GetTracerProvider() is used, which is a no-op unless the embedding
-	// application has configured a global provider. Pass
-	// noop.NewTracerProvider() to opt out explicitly.
+	// tracing is off: no spans are created, and a global provider set with
+	// otel.SetTracerProvider is not picked up. To inherit the global provider,
+	// pass otel.GetTracerProvider() explicitly.
 	//
 	// Spans never carry key names — see keyScope in writes.go for what is
 	// recorded instead and why.
