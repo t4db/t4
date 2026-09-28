@@ -424,3 +424,71 @@ func TestRangeSort(t *testing.T) {
 		t.Errorf("txn key desc limit: got %s count=%d more=%v, want [d c] count=4 more=true", got, r.Count, r.More)
 	}
 }
+
+// TestRangeRevisionFilters: etcd drops keys outside the requested mod and
+// create revision bounds before sorting and applying Limit. Count is taken
+// before the filters, so it stays the number of keys in the range.
+func TestRangeRevisionFilters(t *testing.T) {
+	_, cli := newWatchNode(t)
+	ctx := parityCtx(t)
+
+	rev := map[string]int64{}
+	for _, k := range []string{"a", "b", "c", "d", "b"} {
+		resp, err := cli.Put(ctx, "/f/"+k, "v")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rev[k] = resp.Header.Revision
+	}
+	// create: a<b<c<d; mod: a<c<d<b.
+	keys := func(kvs []*mvccpb.KeyValue) string {
+		var out []string
+		for _, kv := range kvs {
+			out = append(out, string(kv.Key[len("/f/"):]))
+		}
+		return fmt.Sprint(out)
+	}
+	for _, tc := range []struct {
+		name string
+		opts []clientv3.OpOption
+		want string
+		more bool
+	}{
+		{"min mod", []clientv3.OpOption{clientv3.WithMinModRev(rev["c"])}, "[b c d]", false},
+		{"max mod", []clientv3.OpOption{clientv3.WithMaxModRev(rev["c"])}, "[a c]", false},
+		{"min create", []clientv3.OpOption{clientv3.WithMinCreateRev(rev["c"])}, "[c d]", false},
+		{"max create", []clientv3.OpOption{clientv3.WithMaxCreateRev(rev["a"] + 1)}, "[a b]", false},
+		{"min mod limit", []clientv3.OpOption{clientv3.WithMinModRev(rev["c"]), clientv3.WithLimit(2)}, "[b c]", true},
+		{"min mod limit fits", []clientv3.OpOption{clientv3.WithMinModRev(rev["d"]), clientv3.WithLimit(2)}, "[b d]", false},
+		{"max create sorted desc", []clientv3.OpOption{clientv3.WithMaxCreateRev(rev["c"]),
+			clientv3.WithSort(clientv3.SortByModRevision, clientv3.SortDescend)}, "[b c a]", false},
+	} {
+		resp, err := cli.Get(ctx, "/f/", append([]clientv3.OpOption{clientv3.WithPrefix()}, tc.opts...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := keys(resp.Kvs); got != tc.want || resp.Count != 4 || resp.More != tc.more {
+			t.Errorf("%s: got %s count=%d more=%v, want %s count=4 more=%v",
+				tc.name, got, resp.Count, resp.More, tc.want, tc.more)
+		}
+	}
+
+	// A single-key Get is filtered the same way.
+	if resp, err := cli.Get(ctx, "/f/a", clientv3.WithMinModRev(rev["c"])); err != nil {
+		t.Fatal(err)
+	} else if len(resp.Kvs) != 0 || resp.Count != 1 {
+		t.Errorf("single key min mod: got %s count=%d, want [] count=1", keys(resp.Kvs), resp.Count)
+	}
+
+	// A transaction's Range filters its merged result too.
+	txn, err := cli.Txn(ctx).Then(
+		clientv3.OpPut("/f/e", "v"),
+		clientv3.OpGet("/f/", clientv3.WithPrefix(), clientv3.WithMinCreateRev(rev["d"])),
+	).Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := txn.Responses[1].GetResponseRange(); keys(r.Kvs) != "[d e]" || r.Count != 5 {
+		t.Errorf("txn min create: got %s count=%d, want [d e] count=5", keys(r.Kvs), r.Count)
+	}
+}

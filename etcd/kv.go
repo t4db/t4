@@ -41,6 +41,10 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	// configured to force serializable reads.
 	linearizable := !r.Serializable && s.node.ReadConsistency() != t4.ReadConsistencySerializable
 
+	if needsFullRead(r) && !r.CountOnly {
+		return s.fullRange(ctx, r)
+	}
+
 	// Single-key lookup.
 	if rangeEnd == "" {
 		if isInternalKey(key) {
@@ -67,10 +71,6 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			resp.Count = 1
 		}
 		return resp, nil
-	}
-
-	if rangeSortOrder(r) != etcdserverpb.RangeRequest_NONE && !r.CountOnly {
-		return s.sortedRange(ctx, r)
 	}
 
 	// Range / prefix scan. When the range is prefix-shaped it is served by an
@@ -544,9 +544,9 @@ func (s *Server) txnRange(ctx context.Context, r *etcdserverpb.RangeRequest, sna
 	}
 
 	// Merge the snapshot with the touched keys' committed state, then apply
-	// the sort, Limit, CountOnly and KeysOnly to the merged result.
-	snap.Limit, snap.CountOnly, snap.KeysOnly = 0, false, false
-	snap.SortOrder, snap.SortTarget = etcdserverpb.RangeRequest_NONE, etcdserverpb.RangeRequest_KEY
+	// the sort, filters, Limit, CountOnly and KeysOnly to the merged result.
+	clearFullReadOptions(snap)
+	snap.CountOnly = false
 	resp, err := s.Range(ctx, snap)
 	if err != nil {
 		return nil, err
@@ -576,6 +576,7 @@ func (s *Server) txnRange(ctx context.Context, r *etcdserverpb.RangeRequest, sna
 		resp.Kvs = nil
 		return resp, nil
 	}
+	kvs = filterKVs(kvs, r)
 	if r.Limit > 0 && int64(len(kvs)) > r.Limit {
 		kvs, resp.More = kvs[:r.Limit], true
 	}
@@ -662,17 +663,35 @@ func rangeSortOrder(r *etcdserverpb.RangeRequest) etcdserverpb.RangeRequest_Sort
 	return r.SortOrder
 }
 
-// sortedRange serves a range whose results must be re-sorted. Like etcd, it
-// reads the whole range, sorts it, and applies Limit afterwards, so a
-// descending read with a limit returns the last keys.
-func (s *Server) sortedRange(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
+// needsFullRead reports whether r must read its whole range before Limit
+// applies: its results are re-sorted, or filtered by revision.
+func needsFullRead(r *etcdserverpb.RangeRequest) bool {
+	return rangeSortOrder(r) != etcdserverpb.RangeRequest_NONE ||
+		r.MinModRevision != 0 || r.MaxModRevision != 0 ||
+		r.MinCreateRevision != 0 || r.MaxCreateRevision != 0
+}
+
+// clearFullReadOptions strips the options fullRange applies itself from r,
+// leaving a plain key-ascending read of the whole range.
+func clearFullReadOptions(r *etcdserverpb.RangeRequest) {
+	r.Limit, r.KeysOnly = 0, false
+	r.SortOrder, r.SortTarget = etcdserverpb.RangeRequest_NONE, etcdserverpb.RangeRequest_KEY
+	r.MinModRevision, r.MaxModRevision = 0, 0
+	r.MinCreateRevision, r.MaxCreateRevision = 0, 0
+}
+
+// fullRange serves a range that must be read whole. Like etcd, it filters
+// the range by revision, sorts it, and applies Limit afterwards, so a
+// descending read with a limit returns the last keys. Count is taken before
+// the filters, as etcd does, so it stays the number of keys in the range.
+func (s *Server) fullRange(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
 	all := proto.Clone(r).(*etcdserverpb.RangeRequest)
-	all.Limit, all.KeysOnly = 0, false
-	all.SortOrder, all.SortTarget = etcdserverpb.RangeRequest_NONE, etcdserverpb.RangeRequest_KEY
+	clearFullReadOptions(all)
 	resp, err := s.Range(ctx, all)
 	if err != nil {
 		return nil, err
 	}
+	resp.Kvs = filterKVs(resp.Kvs, r)
 	sortKVs(resp.Kvs, r)
 	if r.Limit > 0 && int64(len(resp.Kvs)) > r.Limit {
 		resp.Kvs, resp.More = resp.Kvs[:r.Limit], true
@@ -683,6 +702,17 @@ func (s *Server) sortedRange(ctx context.Context, r *etcdserverpb.RangeRequest) 
 		}
 	}
 	return resp, nil
+}
+
+// filterKVs drops the kvs outside r's mod and create revision bounds; a zero
+// bound is unset.
+func filterKVs(kvs []*mvccpb.KeyValue, r *etcdserverpb.RangeRequest) []*mvccpb.KeyValue {
+	return slices.DeleteFunc(kvs, func(kv *mvccpb.KeyValue) bool {
+		return (r.MinModRevision != 0 && kv.ModRevision < r.MinModRevision) ||
+			(r.MaxModRevision != 0 && kv.ModRevision > r.MaxModRevision) ||
+			(r.MinCreateRevision != 0 && kv.CreateRevision < r.MinCreateRevision) ||
+			(r.MaxCreateRevision != 0 && kv.CreateRevision > r.MaxCreateRevision)
+	})
 }
 
 // sortKVs re-sorts key-ascending kvs as r asks. The sort is stable, so ties
