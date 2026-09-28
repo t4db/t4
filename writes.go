@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
@@ -46,6 +47,22 @@ func keyScope(key string) string {
 	return ""
 }
 
+// startSpan starts an entry-point span, tagged with key's scope when key is
+// set. With tracing off it returns ctx unchanged and a no-op span, skipping the
+// option, attribute and context a no-op tracer would still have built.
+func (n *Node) startSpan(ctx context.Context, name, key string) (context.Context, trace.Span) {
+	if !n.tracing {
+		return ctx, noopSpan
+	}
+	if key == "" {
+		return n.tracer.Start(ctx, name)
+	}
+	return n.tracer.Start(ctx, name,
+		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+}
+
+var noopSpan trace.Span = noop.Span{}
+
 // endSpan records err on span and ends it. Every traced entry point defers
 // this, so no return path — including ones added later — can leave a span
 // un-ended. An un-ended parent span is worse than a missing attribute: the
@@ -63,8 +80,7 @@ func endSpan(span trace.Span, err error) {
 
 // Put creates or updates key with value. Returns the new revision.
 func (n *Node) Put(ctx context.Context, key string, value []byte, lease int64) (rev int64, err error) {
-	ctx, span := n.tracer.Start(ctx, "t4.put",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	ctx, span := n.startSpan(ctx, "t4.put", key)
 	defer func() { endSpan(span, err) }()
 
 	if n.closed.Load() {
@@ -132,8 +148,7 @@ func (n *Node) preparePut(key string, value []byte, lease int64) (wal.Entry, err
 
 // Create creates key only if it does not already exist.
 func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64) (rev int64, err error) {
-	ctx, span := n.tracer.Start(ctx, "t4.create",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	ctx, span := n.startSpan(ctx, "t4.create", key)
 	defer func() { endSpan(span, err) }()
 
 	if n.loadRole() == roleFollower {
@@ -184,8 +199,7 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 
 // Update updates key only if its current revision matches (CAS).
 func (n *Node) Update(ctx context.Context, key string, value []byte, revision, lease int64) (rev int64, prevKV *KeyValue, ok bool, err error) {
-	ctx, span := n.tracer.Start(ctx, "t4.update",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	ctx, span := n.startSpan(ctx, "t4.update", key)
 	defer func() { endSpan(span, err) }()
 	if n.loadRole() == roleFollower {
 		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardUpdate, Key: key, Value: value, Revision: revision, Lease: lease})
@@ -244,8 +258,7 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 
 // Delete removes key unconditionally.
 func (n *Node) Delete(ctx context.Context, key string) (rev int64, err error) {
-	ctx, span := n.tracer.Start(ctx, "t4.delete",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	ctx, span := n.startSpan(ctx, "t4.delete", key)
 	defer func() { endSpan(span, err) }()
 
 	if n.loadRole() == roleFollower {
@@ -279,8 +292,7 @@ func (n *Node) Delete(ctx context.Context, key string) (rev int64, err error) {
 
 // DeleteIfRevision deletes key only if its current revision matches (CAS).
 func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64) (rev int64, prevKV *KeyValue, ok bool, err error) {
-	ctx, span := n.tracer.Start(ctx, "t4.delete_if_revision",
-		trace.WithAttributes(attribute.String("t4.key_scope", keyScope(key))))
+	ctx, span := n.startSpan(ctx, "t4.delete_if_revision", key)
 	defer func() { endSpan(span, err) }()
 
 	if n.loadRole() == roleFollower {
@@ -428,7 +440,7 @@ func txnCondMatches(cond TxnCondition, existing *istore.KeyValue) bool {
 // All write ops within the selected branch share a single revision and are
 // committed to the WAL in one entry, ensuring crash-safe atomicity.
 func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err error) {
-	ctx, span := n.tracer.Start(ctx, "t4.txn")
+	ctx, span := n.startSpan(ctx, "t4.txn", "")
 	defer func() { endSpan(span, err) }()
 
 	if n.closed.Load() {
