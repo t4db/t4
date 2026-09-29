@@ -164,7 +164,7 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 			rerr = newDB.SetLeaderKnownPosition(known)
 		}
 		if rerr != nil {
-			newDB.Close()
+			_ = newDB.Close()
 			n.readMu.Unlock()
 			n.fenceMu.Unlock()
 			return false, fmt.Errorf("keep leader-known position across restore: %w", rerr)

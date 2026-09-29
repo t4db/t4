@@ -695,8 +695,8 @@ func Open(cfg Config) (*Node, error) {
 	if cfg.NodeID != "" {
 		if err := db.SetNodeID(cfg.NodeID); err != nil {
 			bgCancel()
-			w.Close()
-			db.Close()
+			_ = w.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("t4: load leader-known position: %w", err)
 		}
 	}
