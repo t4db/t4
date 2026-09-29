@@ -315,7 +315,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&listenAddr, "listen", "0.0.0.0:3379", "gRPC listen address (kine/etcd protocol) (env: T4_LISTEN)")
 	cmd.Flags().Int64Var(&segmentMaxSizeMB, "segment-max-size-mb", 50, "WAL segment rotation size threshold in MiB (env: T4_SEGMENT_MAX_SIZE_MB)")
 	cmd.Flags().IntVar(&segmentMaxAgeSec, "segment-max-age-sec", 10, "WAL segment rotation age threshold in seconds (env: T4_SEGMENT_MAX_AGE_SEC)")
-	cmd.Flags().StringVar(&walSyncUpload, "wal-sync-upload", "", "upload WAL segments synchronously before ack (true/false; default true for safety, set false when local storage is durable) (env: T4_WAL_SYNC_UPLOAD)")
+	cmd.Flags().StringVar(&walSyncUpload, "wal-sync-upload", "", "single-node mode: upload WAL segments synchronously before ack (true/false; default true for safety, set false when local storage is durable); a cluster uploads synchronously exactly while no follower is connected (env: T4_WAL_SYNC_UPLOAD)")
 	cmd.Flags().IntVar(&checkpointIntervalMin, "checkpoint-interval-min", 15, "checkpoint interval in minutes (requires --s3-bucket) (env: T4_CHECKPOINT_INTERVAL_MIN)")
 	cmd.Flags().Int64Var(&checkpointEntries, "checkpoint-entries", 0, "triggers a checkpoint after this many WAL entries regardless of time. 0 means disabled (requires --s3-bucket) (env: T4_CHECKPOINT_ENTRIES)")
 	cmd.Flags().StringVar(&autoCompactMode, "auto-compact-mode", "", "automatic history compaction strategy: off, time, or revision. Empty infers from retention flags (env: T4_AUTO_COMPACT_MODE)")

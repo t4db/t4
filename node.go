@@ -236,6 +236,12 @@ type Node struct {
 	termStartSeq atomic.Int64
 	fence        fenceState
 	fenceReqC    chan struct{}
+	// objectStoreComplete is set by the commit loop while object storage
+	// holds every write this leader acknowledged; lockObjectStoreComplete is
+	// the value of the lock's ObjectStoreComplete as last written. A write is
+	// acknowledged only while they agree (docs/design/takeover-fence.md).
+	objectStoreComplete     atomic.Bool
+	lockObjectStoreComplete atomic.Bool
 
 	entriesSinceCheckpoint int64
 	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
@@ -686,6 +692,14 @@ func Open(cfg Config) (*Node, error) {
 	n.log = log
 	n.cp = cp
 	n.db.Store(db)
+	if cfg.NodeID != "" {
+		if err := db.SetNodeID(cfg.NodeID); err != nil {
+			bgCancel()
+			w.Close()
+			db.Close()
+			return nil, fmt.Errorf("t4: load leader-known position: %w", err)
+		}
+	}
 	n.initRevisionSampler()
 	// A nil provider means tracing is off, as for the etcd gRPC layer and the
 	// peer client; the global provider is not picked up implicitly.
@@ -771,7 +785,7 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 	defer cancel()
 
 	acquireStart := time.Now()
-	rec, won, err := lock.TryAcquire(ctx, n.term, n.db.Load().CurrentRevision())
+	rec, won, err := lock.TryAcquire(ctx, n.term, n.committedFence())
 	if err != nil {
 		return fmt.Errorf("t4: election: %w", err)
 	}
@@ -834,7 +848,7 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 	if n.cfg.ObjectStore != nil {
 		tCtx, tCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
-		switch rerr := lock.Relinquish(tCtx, n.term, n.db.Load().CurrentRevision()); {
+		switch rerr := lock.Relinquish(tCtx, n.term, n.committedFence()); {
 		case errors.Is(rerr, election.ErrNotOwner):
 			n.log.Infof("t4: graceful shutdown: lock already held by a newer leader — leaving it")
 		case rerr != nil:

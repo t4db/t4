@@ -203,10 +203,11 @@ func mayTakeOver(rec *election.LockRecord, heardTerm uint64, heardAt, now time.T
 // fenceState coordinates fence requests from the commit loop with the lock
 // writes of the watch loop.
 type fenceState struct {
-	mu      sync.Mutex
-	wantSeq int64
-	wantRev int64
-	done    chan struct{} // closed and replaced after each successful lock write
+	mu       sync.Mutex
+	wantSeq  int64
+	wantRev  int64
+	wantTerm uint64
+	done     chan struct{} // closed and replaced after each successful lock write
 }
 
 // fenceNeeded reports whether acknowledging entries up to seq would leave a
@@ -223,6 +224,24 @@ func (n *Node) fenceNeeded(seq int64) bool {
 	return outside >= n.fenceSeq.Load()
 }
 
+// committedFence returns this node's applied state as an election fence: the
+// position of its last applied entry and its revision.
+func (n *Node) committedFence() election.Fence {
+	db := n.db.Load()
+	pos := db.LastPosition()
+	return election.Fence{Rev: db.CurrentRevision(), Seq: pos.Seq, Term: pos.Term}
+}
+
+// leaderKnownFence returns what this node may claim as a takeover candidate:
+// its leader-known position (what it applied from a leader or wrote as one),
+// and its revision for lock records of earlier releases, which fence by
+// revision alone.
+func (n *Node) leaderKnownFence() election.Fence {
+	db := n.db.Load()
+	pos := db.LeaderKnownPosition()
+	return election.Fence{Rev: db.CurrentRevision(), Seq: pos.Seq, Term: pos.Term}
+}
+
 // fenced records a successful lock write whose CommittedRev covers seq.
 func (n *Node) fenced(seq int64) {
 	for {
@@ -237,32 +256,41 @@ func (n *Node) fenced(seq int64) {
 	n.fence.mu.Unlock()
 }
 
-// fenceWanted returns the sequence and revision the next lock write must
-// cover for pending fence requests.
-func (n *Node) fenceWanted() (seq, rev int64) {
+// fenceWanted returns the sequence, revision and entry term the next lock
+// write must cover for pending fence requests.
+func (n *Node) fenceWanted() (seq, rev int64, term uint64) {
 	n.fence.mu.Lock()
 	defer n.fence.mu.Unlock()
-	return n.fence.wantSeq, n.fence.wantRev
+	return n.fence.wantSeq, n.fence.wantRev, n.fence.wantTerm
 }
 
-// fencePending reports whether a fence request is waiting for a lock write.
+// fencePending reports whether a fence request is waiting for a lock write:
+// the fence must move, or the lock must record a change of the object
+// storage flag.
 func (n *Node) fencePending() bool {
-	wantSeq, _ := n.fenceWanted()
-	return wantSeq > n.fenceSeq.Load()
+	wantSeq, _, _ := n.fenceWanted()
+	return wantSeq > n.fenceSeq.Load() || n.flagStale()
+}
+
+// flagStale reports whether the lock's ObjectStoreComplete, as last written,
+// differs from what the commit loop now wants it to say.
+func (n *Node) flagStale() bool {
+	return n.lockObjectStoreComplete.Load() != n.objectStoreComplete.Load()
 }
 
 // awaitFence asks the watch loop to move the fence to cover the entry at
-// seq, of revision rev, and waits until it has.
-func (n *Node) awaitFence(ctx context.Context, seq, rev int64) error {
+// seq, of revision rev and term term, and to record the current object
+// storage flag, and waits until a lock write has done both.
+func (n *Node) awaitFence(ctx context.Context, seq, rev int64, term uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, fenceTimeout)
 	defer cancel()
 	for {
-		if n.fenceSeq.Load() >= seq {
+		if n.fenceSeq.Load() >= seq && !n.flagStale() {
 			return nil
 		}
 		n.fence.mu.Lock()
 		if seq > n.fence.wantSeq {
-			n.fence.wantSeq, n.fence.wantRev = seq, rev
+			n.fence.wantSeq, n.fence.wantRev, n.fence.wantTerm = seq, rev, term
 		}
 		done := n.fence.done
 		n.fence.mu.Unlock()

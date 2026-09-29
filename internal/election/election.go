@@ -49,6 +49,45 @@ type LockRecord struct {
 	CommittedRev   int64  `json:"committed_rev"`              // leader's highest committed revision; used as election fence
 	RenewedNano    int64  `json:"renewed_nano,omitempty"`     // Unix ns (leader clock) the last lock write started
 	ValidUntilNano int64  `json:"valid_until_nano,omitempty"` // Unix ns (leader clock) before which nobody else may take over
+
+	// CommittedSeq and CommittedTerm are the leader's log position when it
+	// wrote the lock: the sequence of its last applied entry and that entry's
+	// term. Records of earlier releases carry neither and fence by
+	// CommittedRev alone.
+	CommittedSeq  int64  `json:"committed_seq,omitempty"`
+	CommittedTerm uint64 `json:"committed_term,omitempty"`
+	// ObjectStoreComplete is set while object storage holds every write the
+	// leader acknowledged, so that a candidate may catch up from it past the
+	// fence (docs/design/takeover-fence.md).
+	ObjectStoreComplete bool `json:"object_store_complete,omitempty"`
+}
+
+// Fence is a committed state the lock fences candidates against: a candidate
+// that is behind it may lack acknowledged writes and must not take over.
+type Fence struct {
+	Rev  int64  // revision, for lock records of earlier releases
+	Seq  int64  // WAL sequence of the last applied entry
+	Term uint64 // term of that entry
+}
+
+// Fence returns the fence r records.
+func (r *LockRecord) Fence() Fence {
+	return Fence{Rev: r.CommittedRev, Seq: r.CommittedSeq, Term: r.CommittedTerm}
+}
+
+// Blocks reports whether r fences out a candidate whose committed state is c.
+// Positions order by term, then sequence, so that a node holding a deposed
+// leader's uncommitted entries ranks below the entries of the leader that
+// replaced it. Records of earlier releases, which carry no sequence, fence by
+// revision.
+func (r *LockRecord) Blocks(c Fence) bool {
+	if r.CommittedSeq == 0 && r.CommittedTerm == 0 {
+		return r.CommittedRev > c.Rev
+	}
+	if r.CommittedTerm != c.Term {
+		return r.CommittedTerm > c.Term
+	}
+	return r.CommittedSeq > c.Seq
 }
 
 // Released reports whether the leader released the lock on shutdown.
@@ -119,9 +158,9 @@ func NewLock(store object.Store, nodeID, advertiseAddr string) *Lock {
 //
 // floorTerm ensures the new term is always strictly greater than any
 // previously observed term, preventing term regression after restart.
-// committedRev is written into the lock so candidates can use it as a
-// revision fence (see TakeOver).
-func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64, committedRev int64) (*LockRecord, bool, error) {
+// fence is written into the lock so candidates can use it as the election
+// fence (see TakeOver).
+func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64, fence Fence) (*LockRecord, bool, error) {
 	cur, err := l.readWithETag(ctx)
 	if err != nil {
 		return nil, false, err
@@ -137,7 +176,7 @@ func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64, committedRev in
 		newTerm = cur.rec.Term + 1
 	}
 
-	return l.writeAtomic(ctx, newTerm, committedRev, cur)
+	return l.writeAtomic(ctx, newTerm, fence, cur)
 }
 
 // TakeOver forcefully attempts to acquire the lock, overwriting any existing
@@ -150,16 +189,16 @@ func (l *Lock) TryAcquire(ctx context.Context, floorTerm uint64, committedRev in
 // term higher than floorTerm, that node won a concurrent TakeOver race.
 // Back off and return (winner, false) so the caller can follow the new leader.
 //
-// committedRev is the caller's own highest committed revision.  If the current
-// lock's CommittedRev is higher, this node is behind the departing leader and
-// must not take over — it would either discard those entries or be unable to
-// serve reads that clients already received.
+// candidate is the caller's own committed state. If the current lock's fence
+// blocks it, this node is behind the departing leader and must not take over
+// — it would either discard those entries or be unable to serve reads that
+// clients already received.
 //
 // allow, if not nil, decides whether the current holder's lock may be taken
 // (see the leader-liveness rules in the caller). It is evaluated on the very
 // record whose ETag the conditional write is based on, so the holder cannot
 // renew between the check and the takeover.
-func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64, committedRev int64, allow func(*LockRecord) bool) (*LockRecord, bool, error) {
+func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64, candidate Fence, allow func(*LockRecord) bool) (*LockRecord, bool, error) {
 	cur, err := l.readWithETag(ctx)
 	if err != nil {
 		return nil, false, err
@@ -175,7 +214,7 @@ func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64, committedRev int6
 		}
 		// Current leader has committed entries we haven't applied yet: back off
 		// to prevent promoting a node that is missing data.
-		if cur.rec.CommittedRev > committedRev {
+		if cur.rec.Blocks(candidate) {
 			return cur.rec, false, nil
 		}
 	}
@@ -185,7 +224,7 @@ func (l *Lock) TakeOver(ctx context.Context, floorTerm uint64, committedRev int6
 		newTerm = cur.rec.Term + 1
 	}
 
-	return l.writeAtomic(ctx, newTerm, committedRev, cur)
+	return l.writeAtomic(ctx, newTerm, candidate, cur)
 }
 
 // ErrNotOwner is returned by Relinquish when the lock no longer belongs to
@@ -194,10 +233,10 @@ var ErrNotOwner = errors.New("election: lock held by another leader")
 
 // Relinquish marks the lock as released by a leader that has stopped serving:
 // LastSeenNano is cleared, so no candidate waits out the liveness TTL, while
-// CommittedRev keeps fencing out candidates that are behind. It writes only if
+// the fence keeps fencing out candidates that are behind. It writes only if
 // the caller still owns the lock at term, conditionally on the ETag it read,
 // and otherwise returns ErrNotOwner without touching a newer leader's lock.
-func (l *Lock) Relinquish(ctx context.Context, term uint64, committedRev int64) error {
+func (l *Lock) Relinquish(ctx context.Context, term uint64, fence Fence) error {
 	cur, err := l.readWithETag(ctx)
 	if err != nil {
 		return err
@@ -207,8 +246,11 @@ func (l *Lock) Relinquish(ctx context.Context, term uint64, committedRev int64) 
 	}
 	rec := *cur.rec
 	rec.LastSeenNano, rec.RenewedNano, rec.ValidUntilNano = 0, 0, 0
-	if committedRev > rec.CommittedRev {
-		rec.CommittedRev = committedRev
+	if fence.Rev > rec.CommittedRev {
+		rec.CommittedRev = fence.Rev
+	}
+	if fence.Term > rec.CommittedTerm || (fence.Term == rec.CommittedTerm && fence.Seq > rec.CommittedSeq) {
+		rec.CommittedSeq, rec.CommittedTerm = fence.Seq, fence.Term
 	}
 	if l.conditional == nil || cur.etag == "" {
 		return l.write(ctx, &rec)
@@ -291,12 +333,14 @@ func (l *Lock) readWithETag(ctx context.Context) (*lockWithETag, error) {
 //
 // Stamps the record as renewed now, in fast mode, so that a freshly elected
 // leader is immediately visible as alive to any follower checking liveness.
-func (l *Lock) writeAtomic(ctx context.Context, newTerm uint64, committedRev int64, observed *lockWithETag) (*LockRecord, bool, error) {
+func (l *Lock) writeAtomic(ctx context.Context, newTerm uint64, fence Fence, observed *lockWithETag) (*LockRecord, bool, error) {
 	rec := &LockRecord{
-		NodeID:       l.nodeID,
-		Term:         newTerm,
-		LeaderAddr:   l.advertiseAddr,
-		CommittedRev: committedRev,
+		NodeID:        l.nodeID,
+		Term:          newTerm,
+		LeaderAddr:    l.advertiseAddr,
+		CommittedRev:  fence.Rev,
+		CommittedSeq:  fence.Seq,
+		CommittedTerm: fence.Term,
 	}
 	rec.stamp(time.Now(), FastTTL)
 	b, err := json.Marshal(rec)
@@ -355,17 +399,20 @@ func (l *Lock) write(ctx context.Context, rec *LockRecord) error {
 }
 
 // Renew rewrites the lock of the leader holding term, recording a renewal
-// that started at start and stays valid for ttl, and committedRev as the
-// election fence. The write is conditional on etag, the ETag of the caller's
+// that started at start and stays valid for ttl, fence as the election fence,
+// and whether object storage holds every write it acknowledged. The write is conditional on etag, the ETag of the caller's
 // preceding read, so that it fails with object.ErrPreconditionFailed
 // (returned unwrapped) if another node wrote the lock in between. Without
 // conditional writes (etag == "" or no ConditionalStore) it is unconditional.
-func (l *Lock) Renew(ctx context.Context, term uint64, leaderAddr, etag string, committedRev int64, start time.Time, ttl time.Duration) error {
+func (l *Lock) Renew(ctx context.Context, term uint64, leaderAddr, etag string, fence Fence, objectStoreComplete bool, start time.Time, ttl time.Duration) error {
 	rec := &LockRecord{
-		NodeID:       l.nodeID,
-		Term:         term,
-		LeaderAddr:   leaderAddr,
-		CommittedRev: committedRev,
+		NodeID:              l.nodeID,
+		Term:                term,
+		LeaderAddr:          leaderAddr,
+		CommittedRev:        fence.Rev,
+		CommittedSeq:        fence.Seq,
+		CommittedTerm:       fence.Term,
+		ObjectStoreComplete: objectStoreComplete,
 	}
 	rec.stamp(start, ttl)
 	if l.conditional == nil || etag == "" {
