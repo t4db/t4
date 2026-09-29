@@ -227,8 +227,13 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		if slow {
 			ttl = n.slowTTL()
 		}
+		// The followers an election after this leader should wait for.
+		var followers []string
+		if srv := n.leasePeers.Load(); srv != nil {
+			followers = srv.Followers(start, knownFollowerWindow)
+		}
 		tCtx, tCancel := context.WithTimeout(ctx, 5*time.Second)
-		err = lock.Renew(tCtx, term, n.cfg.AdvertisePeerAddr, etag, rev, start, ttl)
+		err = lock.Renew(tCtx, term, n.cfg.AdvertisePeerAddr, etag, rev, start, ttl, followers)
 		tCancel()
 		if errors.Is(err, object.ErrPreconditionFailed) {
 			stepDown(reason, "renewal precondition failed — lock taken")

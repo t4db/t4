@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -189,6 +190,22 @@ func (s *Server) SlowSafe(now time.Time, recent, departedWindow time.Duration) b
 		}
 	}
 	return true
+}
+
+// Followers returns the node IDs of the followers an election after this
+// leader should expect to nominate: those connected, and those whose stream
+// ended within departedWindow without a goodbye. Sorted.
+func (s *Server) Followers(now time.Time, departedWindow time.Duration) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for id, m := range s.members {
+		if m.connected || (!m.graceful && now.Sub(m.departedAt) < departedWindow) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // MaxSeqWithout returns the highest sequence that a follower of this leader

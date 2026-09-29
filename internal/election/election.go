@@ -49,6 +49,13 @@ type LockRecord struct {
 	CommittedRev   int64  `json:"committed_rev"`              // leader's highest committed revision; used as election fence
 	RenewedNano    int64  `json:"renewed_nano,omitempty"`     // Unix ns (leader clock) the last lock write started
 	ValidUntilNano int64  `json:"valid_until_nano,omitempty"` // Unix ns (leader clock) before which nobody else may take over
+
+	// Followers lists the leader's known followers, written by every lock
+	// write of a leader: the candidates an election expects to nominate.
+	Followers []string `json:"followers,omitempty"`
+	// Nominations are candidates' bids to succeed the leader, written by
+	// candidates (Nominate) and cleared by every lock write of a leader.
+	Nominations []Nomination `json:"nominations,omitempty"`
 }
 
 // Released reports whether the leader released the lock on shutdown.
@@ -207,6 +214,7 @@ func (l *Lock) Relinquish(ctx context.Context, term uint64, committedRev int64) 
 	}
 	rec := *cur.rec
 	rec.LastSeenNano, rec.RenewedNano, rec.ValidUntilNano = 0, 0, 0
+	rec.Nominations = nil
 	if committedRev > rec.CommittedRev {
 		rec.CommittedRev = committedRev
 	}
@@ -355,17 +363,18 @@ func (l *Lock) write(ctx context.Context, rec *LockRecord) error {
 }
 
 // Renew rewrites the lock of the leader holding term, recording a renewal
-// that started at start and stays valid for ttl, and committedRev as the
-// election fence. The write is conditional on etag, the ETag of the caller's
+// that started at start and stays valid for ttl, committedRev as the
+// election fence, and followers as the candidates an election expects. The write is conditional on etag, the ETag of the caller's
 // preceding read, so that it fails with object.ErrPreconditionFailed
 // (returned unwrapped) if another node wrote the lock in between. Without
 // conditional writes (etag == "" or no ConditionalStore) it is unconditional.
-func (l *Lock) Renew(ctx context.Context, term uint64, leaderAddr, etag string, committedRev int64, start time.Time, ttl time.Duration) error {
+func (l *Lock) Renew(ctx context.Context, term uint64, leaderAddr, etag string, committedRev int64, start time.Time, ttl time.Duration, followers []string) error {
 	rec := &LockRecord{
 		NodeID:       l.nodeID,
 		Term:         term,
 		LeaderAddr:   leaderAddr,
 		CommittedRev: committedRev,
+		Followers:    followers,
 	}
 	rec.stamp(start, ttl)
 	if l.conditional == nil || etag == "" {

@@ -200,6 +200,25 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		}
 		return nil, false
 	}
+	// Ranked takeover (docs/design/takeover-ranking.md): unless the leader
+	// released the lock, candidates nominate themselves first and the most
+	// up-to-date one goes first. A candidate behind the fence catches up only
+	// once it leads, so a better-placed one is not overtaken by its catch-up.
+	ranked := !graceful && existing != nil && !existing.Released() &&
+		existing.NodeID != n.cfg.NodeID && lock.CanNominate()
+	if ranked {
+		rec, lead := n.awaitRank(ctx, lock, allow, existing)
+		if !lead {
+			if rec != nil && rec.Term != existing.Term && rec.NodeID != n.cfg.NodeID && rec.LeaderAddr != "" {
+				n.observeTerm(rec.Term)
+				n.log.Infof("t4: takeover: %s won the election (term=%d) — following", rec.NodeID, rec.Term)
+				return peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log, n.cfg.TracerProvider), false
+			}
+			return nil, false
+		}
+		existing = rec
+	}
+
 	// Revision fence: refuse to become leader if we are behind the last known
 	// committed revision. A node missing entries would either drop them (data
 	// loss) or fail to serve reads that clients already observed.
@@ -249,8 +268,17 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		// Caught up: fall through to TakeOver.
 	}
 
+	// The rank is checked again on the record the takeover replaces, so a
+	// better nomination that lands first makes it fail.
+	takeAllow := allow
+	if ranked {
+		self := n.cfg.NodeID
+		takeAllow = func(rec *election.LockRecord) bool {
+			return (allow == nil || allow(rec)) && rec.MayTakeOverByRank(self, time.Now(), takeoverRank)
+		}
+	}
 	takeoverStart := time.Now()
-	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), n.db.Load().CurrentRevision(), allow)
+	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), n.db.Load().CurrentRevision(), takeAllow)
 	if err != nil {
 		n.log.Errorf("t4: takeover election error: %v", err)
 		return nil, false
@@ -307,6 +335,65 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		return peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log, n.cfg.TracerProvider), false
 	}
 	return nil, false
+}
+
+// awaitRank nominates this node to succeed the leader of prev, whose lock it
+// may take over by allow, and waits until its rank among the nominees lets it
+// take over. It returns the lock record that allows it and true, or false with
+// the latest record (nil if unknown) once the lock has moved on to another
+// leader, can no longer be taken over, or ctx ends.
+func (n *Node) awaitRank(ctx context.Context, lock *election.Lock, allow func(*election.LockRecord) bool, prev *election.LockRecord) (*election.LockRecord, bool) {
+	self := n.cfg.NodeID
+	nominate := func() (*election.LockRecord, bool) {
+		db := n.db.Load()
+		seq := db.LastSequence()
+		nom := election.Nomination{NodeID: self, Seq: seq, Rev: db.CurrentRevision(), AtNano: time.Now().UnixNano()}
+		rec, ok, err := lock.Nominate(ctx, nom, allow)
+		if err != nil {
+			n.log.Errorf("t4: takeover: nominate: %v", err)
+			return nil, false
+		}
+		if ok {
+			n.log.Infof("t4: takeover: nominated (seq=%d, rev=%d)", nom.Seq, nom.Rev)
+		}
+		return rec, ok
+	}
+	rec, ok := nominate()
+	if !ok {
+		return rec, false
+	}
+	tick := time.NewTicker(leaderCheckInterval)
+	defer tick.Stop()
+	for {
+		if rec.Term != prev.Term || rec.NodeID != prev.NodeID {
+			return rec, false
+		}
+		now := time.Now()
+		if !rec.Nominated(self, now, takeoverRank) {
+			// Cleared by a lock write of an earlier release, or aged out.
+			if rec, ok = nominate(); !ok {
+				return rec, false
+			}
+			continue
+		}
+		if rec.MayTakeOverByRank(self, now, takeoverRank) {
+			return rec, true
+		}
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			return nil, false
+		}
+		latest, err := lock.Read(ctx)
+		if err != nil {
+			n.log.Errorf("t4: takeover: read lock: %v", err)
+			return nil, false
+		}
+		if latest == nil {
+			return nil, false
+		}
+		rec = latest
+	}
 }
 
 // forwardWrite sends a write request to the leader and decodes the response.

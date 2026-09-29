@@ -110,7 +110,23 @@ const (
 
 	// leaderCheckInterval is how often the leader re-evaluates its mode.
 	leaderCheckInterval = 250 * time.Millisecond
+
+	// nominationWindow is how long after the first nomination an election
+	// waits for expected candidates that have not nominated. It covers the
+	// spread between known followers noticing the leader is gone.
+	nominationWindow = 2 * time.Second
 )
+
+// takeoverRank are the timings of a ranked takeover
+// (docs/design/takeover-ranking.md). A nominee may keep the lead for a fast
+// TTL before the next one may take over, and a nomination older than the
+// window a departed follower stays known is ignored.
+var takeoverRank = election.RankTimes{
+	Window:  nominationWindow,
+	Stagger: fastTTL,
+	Skew:    leaseSafetyMargin,
+	MaxAge:  knownFollowerWindow,
+}
 
 // leaseGrant is the result of the last successful lock write of this leader.
 type leaseGrant struct {
