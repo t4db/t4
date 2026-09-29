@@ -142,9 +142,14 @@ func (f *fakeWAL) setBlockChan(ch chan struct{}) {
 	f.mu.Unlock()
 }
 
+// newFakeWAL wraps the WAL of a running node. The swap holds fenceMu
+// exclusively: checkpoints and Flush read n.wal under it, and the commit loop
+// reads it only while processing a batch, which a write holds fenceMu's read
+// lock around until it is acknowledged.
 func newFakeWAL(n *Node) *fakeWAL {
-	real := n.wal
-	fw := &fakeWAL{real: real}
+	n.fenceMu.Lock()
+	defer n.fenceMu.Unlock()
+	fw := &fakeWAL{real: n.wal}
 	n.wal = fw
 	return fw
 }
@@ -650,4 +655,25 @@ func TestFollowerReconnectDropsStagedUncommittedEntries(t *testing.T) {
 	afterKV, afterErr := follower.Get("/reconnect/after")
 	t.Fatalf("unexpected follower state after reconnect: ghost=(kv=%+v err=%v) after=(kv=%+v err=%v)",
 		ghostKV, ghostErr, afterKV, afterErr)
+}
+
+// newFakeWAL swaps the WAL of a running node, whose checkpoint loop reads it
+// concurrently. The swap must be ordered with those reads, or every test that
+// injects WAL faults is racy (run with go test -race).
+func TestFakeWALSwapIsRaceFree(t *testing.T) {
+	n, err := Open(Config{DataDir: t.TempDir(), ObjectStore: object.NewMem(), CheckpointInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = n.Close() }()
+	ctx := context.Background()
+	for i := 0; i < 50; i++ {
+		// A write gives the checkpoint loop something to checkpoint, so it
+		// reads n.wal.
+		if _, err := n.Put(ctx, fmt.Sprintf("/swap/%d", i), []byte("v"), 0); err != nil {
+			t.Fatal(err)
+		}
+		newFakeWAL(n)
+		time.Sleep(2 * time.Millisecond)
+	}
 }
