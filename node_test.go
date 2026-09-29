@@ -1097,7 +1097,7 @@ func cloneMem(t *testing.T, src *object.Mem) *object.Mem {
 		if err := dst.Put(c, k, rc); err != nil {
 			t.Fatalf("Put %q: %v", k, err)
 		}
-		rc.Close()
+		_ = rc.Close()
 	}
 	return dst
 }

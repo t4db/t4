@@ -207,8 +207,8 @@ func (w *WAL) discardEmptyActiveLocked() {
 	if w.active == nil || w.active.EntryCount() > 0 {
 		return
 	}
-	w.active.Close()
-	os.Remove(w.active.Path())
+	_ = w.active.Close()
+	_ = os.Remove(w.active.Path())
 	w.active = nil
 }
 

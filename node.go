@@ -1384,7 +1384,7 @@ func segmentPublished(ctx context.Context, obj object.Store, localPath, objectKe
 	if err != nil {
 		return fmt.Errorf("read existing %q to compare with %q: %w", objectKey, localPath, err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	existing, err := io.ReadAll(rc)
 	if err != nil {
 		return fmt.Errorf("read existing %q to compare with %q: %w", objectKey, localPath, err)
