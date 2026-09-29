@@ -655,6 +655,12 @@ func (n *Node) stepDownOnFatalCommitError() {
 // guard: the outgoing leader's uploadLoop may publish a segment between the
 // List and our Put. Safety comes from makeUploader's conditional write, which
 // keeps whichever copy was published first.
+//
+// A segment whose key is taken by different entries is skipped, as a listed
+// one is: a follower cuts segments at its own boundaries, so its copy of a key
+// can legitimately differ from the leader's. Entries it holds past the
+// published object are in Pebble, and the new leader's first checkpoint makes
+// them durable.
 func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Store, log Logger) error {
 	if store == nil {
 		return nil
@@ -688,6 +694,10 @@ func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Sto
 			continue // already uploaded
 		}
 		if err := up(ctx, path, objKey); err != nil {
+			if errors.Is(err, wal.ErrSegmentConflict) {
+				log.Warnf("t4: local WAL segment %q differs from published %q — keeping the published object", path, objKey)
+				continue
+			}
 			return fmt.Errorf("upload %q to %q: %w", path, objKey, err)
 		}
 	}

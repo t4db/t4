@@ -1078,3 +1078,73 @@ func TestTxnDuplicateKey(t *testing.T) {
 		t.Errorf("key a should not exist after rejected txn, got %v", kv)
 	}
 }
+
+// cloneMem copies every object in src into a fresh store, modelling the object
+// store contents at the instant a node is hard-killed (no Close, no final flush).
+func cloneMem(t *testing.T, src *object.Mem) *object.Mem {
+	t.Helper()
+	c := ctx(t)
+	keys, err := src.List(c, "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	dst := object.NewMem()
+	for _, k := range keys {
+		rc, err := src.Get(c, k)
+		if err != nil {
+			t.Fatalf("Get %q: %v", k, err)
+		}
+		if err := dst.Put(c, k, rc); err != nil {
+			t.Fatalf("Put %q: %v", k, err)
+		}
+		rc.Close()
+	}
+	return dst
+}
+
+// TestNodeWriteAfterDiskLossIsDurable reproduces a data-loss bug: after a
+// node lost its disk and recovered from S3, it opened its WAL segment before
+// remote replay, so the segment reused the object key of the segment it had
+// just replayed from. The sync upload hit a PutIfAbsent conflict, treated it
+// as success, and acknowledged a write that never reached object storage.
+func TestNodeWriteAfterDiskLossIsDurable(t *testing.T) {
+	syncUpload := true
+	open := func(obj *object.Mem) *t4.Node {
+		t.Helper()
+		n, err := t4.Open(t4.Config{
+			DataDir:       t.TempDir(), // fresh disk every time
+			ObjectStore:   obj,
+			WALSyncUpload: &syncUpload,
+		})
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		t.Cleanup(func() { _ = n.Close() })
+		return n
+	}
+	c := ctx(t)
+
+	obj0 := object.NewMem()
+	n1 := open(obj0)
+	if _, err := n1.Put(c, "a", []byte("A"), 0); err != nil {
+		t.Fatalf("Put a: %v", err)
+	}
+	obj1 := cloneMem(t, obj0)
+
+	n2 := open(obj1)
+	if kv, err := n2.Get("a"); err != nil || kv == nil {
+		t.Fatalf("Get a after first disk loss: kv=%v err=%v", kv, err)
+	}
+	if _, err := n2.Put(c, "b", []byte("B"), 0); err != nil {
+		t.Fatalf("Put b: %v", err)
+	}
+	obj2 := cloneMem(t, obj1)
+
+	n3 := open(obj2)
+	for _, k := range []string{"a", "b"} {
+		kv, err := n3.Get(k)
+		if err != nil || kv == nil {
+			t.Fatalf("Get %q after second disk loss: kv=%v err=%v (acknowledged write lost)", k, kv, err)
+		}
+	}
+}

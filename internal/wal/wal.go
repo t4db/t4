@@ -80,6 +80,12 @@ type WAL struct {
 	pending   map[string]string // object key → local path
 }
 
+// ErrSegmentConflict is returned by an Uploader when the segment's object key
+// is already taken by an object that does not contain all of the segment's
+// entries. Retrying cannot succeed: the key is immutable, so the entries are
+// not in object storage under that key and never will be.
+var ErrSegmentConflict = errors.New("wal: segment key already holds different entries")
+
 type uploadTask struct {
 	localPath string
 	objectKey string
@@ -511,6 +517,12 @@ func (w *WAL) uploadLoop(ctx context.Context) {
 				// cleaned up (or discarded as empty). Retrying cannot help.
 				if errors.Is(err, os.ErrNotExist) {
 					w.donePending(task.objectKey)
+					continue
+				}
+				// A conflict is permanent, so don't re-queue. The segment stays
+				// pending: sync-upload mode must not publish later writes past
+				// entries that are missing from object storage.
+				if errors.Is(err, ErrSegmentConflict) {
 					continue
 				}
 				// Re-queue with a delay so we don't spin on transient S3 errors.
