@@ -666,20 +666,6 @@ func Open(cfg Config) (*Node, error) {
 	// must not let the next live write reuse an already-applied sequence.
 	if ls := db.LastSequence(); ls > nextSeq {
 		nextSeq = ls
-		// The WAL was opened at the pre-replay sequence, so its active segment
-		// is named after a sequence that replay has since applied — after a
-		// disk loss, the very key of the S3 segment just replayed from. Writing
-		// into it would make the upload collide with that object, and the
-		// conditional put would keep the old copy and drop the new entries.
-		// Nothing has been appended yet, so reopen at the right sequence.
-		if err := w.Close(); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("t4: close wal after replay: %w", err)
-		}
-		if err := w.Open(walDir, term, nextSeq+1); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("t4: reopen wal after replay: %w", err)
-		}
 	}
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())

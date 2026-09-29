@@ -161,8 +161,13 @@ func MaxSequence(dir string) (int64, error) {
 	return maxSeq, firstErr
 }
 
-// Open opens (or creates) the WAL directory and prepares the active segment.
-// Callers must call Start to begin background processing.
+// Open opens (or creates) the WAL directory. Callers must call Start to begin
+// background processing.
+//
+// No segment is created here: the first append creates one named after its
+// first entry's sequence (see ensureActiveLocked). startRev is not used to
+// name it — at Open the caller may not yet know the next sequence, since
+// recovery can advance it — and is kept for the WALWriter interface.
 func (w *WAL) Open(dir string, term uint64, startRev int64) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("wal: mkdir %q: %w", dir, err)
@@ -173,12 +178,38 @@ func (w *WAL) Open(dir string, term uint64, startRev int64) error {
 	w.term = term
 	w.closed = false
 	w.uploadC = make(chan uploadTask, 64)
-	sw, err := OpenSegmentWriter(dir, term, startRev)
+	w.active = nil
+	return nil
+}
+
+// ensureActiveLocked creates the active segment, named after firstSeq, if
+// there is none. Segments are created lazily, by the append that writes their
+// first entry, so a segment's name always matches its first entry. A name
+// picked in advance is a guess: after recovery it can name a segment that is
+// already in object storage, and uploading different entries under that key
+// collides with it. Must be called with w.mu held.
+func (w *WAL) ensureActiveLocked(firstSeq int64) error {
+	if w.active != nil {
+		return nil
+	}
+	sw, err := OpenSegmentWriter(w.dir, w.term, firstSeq)
 	if err != nil {
 		return err
 	}
 	w.active = sw
 	return nil
+}
+
+// discardEmptyActiveLocked removes the active segment if it holds no entries,
+// so the next append creates one named after its own first entry. Must be
+// called with w.mu held.
+func (w *WAL) discardEmptyActiveLocked() {
+	if w.active == nil || w.active.EntryCount() > 0 {
+		return
+	}
+	w.active.Close()
+	os.Remove(w.active.Path())
+	w.active = nil
 }
 
 // ReplayLocal replays locally stored WAL segments into db, applying entries
@@ -284,6 +315,9 @@ func (w *WAL) Append(e *Entry) error {
 	if w.closed {
 		return fmt.Errorf("wal: closed")
 	}
+	if err := w.ensureActiveLocked(e.Sequence()); err != nil {
+		return err
+	}
 	if err := w.active.Append(e); err != nil {
 		return err
 	}
@@ -312,6 +346,12 @@ func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 	defer w.mu.Unlock()
 	if w.closed {
 		return fmt.Errorf("wal: closed")
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	if err := w.ensureActiveLocked(entries[0].Sequence()); err != nil {
+		return err
 	}
 	rollbackSize := w.active.Size()
 	rollbackEntryCount := w.active.EntryCount()
@@ -352,9 +392,9 @@ func (w *WAL) rotateSyncLocked(rollbackSize int64, rollbackEntryCount int) error
 		if rollbackErr := seg.rollback(rollbackSize, rollbackEntryCount); rollbackErr != nil {
 			return fmt.Errorf("wal: upload of earlier segments failed and rollback failed: upload: %w; rollback: %v", err, rollbackErr)
 		}
+		w.discardEmptyActiveLocked()
 		return err
 	}
-	nextRev := seg.FirstRev() + int64(seg.EntryCount())
 	objKey := ObjectKey(seg.Term(), seg.FirstRev())
 	localPath := seg.Path()
 
@@ -364,17 +404,14 @@ func (w *WAL) rotateSyncLocked(rollbackSize int64, rollbackEntryCount int) error
 		if rollbackErr := seg.rollback(rollbackSize, rollbackEntryCount); rollbackErr != nil {
 			return fmt.Errorf("wal: sync upload failed and rollback failed: upload: %w; rollback: %v", uploadErr, rollbackErr)
 		}
+		w.discardEmptyActiveLocked()
 		return uploadErr
 	}
 
 	if err := seg.Seal(); err != nil {
 		return fmt.Errorf("wal: seal segment after sync upload: %w", err)
 	}
-	sw, err := OpenSegmentWriter(w.dir, w.term, nextRev)
-	if err != nil {
-		return fmt.Errorf("wal: open segment after sync rotate: %w", err)
-	}
-	w.active = sw
+	w.active = nil
 	return nil
 }
 
@@ -426,7 +463,6 @@ func (w *WAL) rotateLocked() {
 		return
 	}
 	seg := w.active
-	nextRev := seg.FirstRev() + int64(seg.EntryCount())
 	if err := seg.Seal(); err != nil {
 		// Seal failed; keep the old (unsealed) segment as active so the next
 		// Append returns an error rather than panicking on a nil dereference.
@@ -443,15 +479,7 @@ func (w *WAL) rotateLocked() {
 		}
 	}
 	w.log.Debugf("wal: sealed segment %q (%d entries, %d bytes)", seg.Path(), seg.EntryCount(), seg.Size())
-	sw, err := OpenSegmentWriter(w.dir, w.term, nextRev)
-	if err != nil {
-		// Cannot open the next segment. Keep the sealed segment as active so
-		// the next Append call returns a write error rather than panicking.
-		w.log.Errorf("wal: open new segment after rotation: %v", err)
-		w.active = seg
-		return
-	}
-	w.active = sw
+	w.active = nil
 }
 
 // rotationLoop periodically rotates the active segment based on age.
@@ -464,22 +492,13 @@ func (w *WAL) rotationLoop(ctx context.Context) {
 		case <-ticker.C:
 			w.mu.Lock()
 			if w.active != nil && w.active.EntryCount() > 0 {
-				rev := w.active.FirstRev() + int64(w.active.EntryCount()) // approx next rev
 				if err := w.active.Seal(); err != nil {
 					w.log.Errorf("wal: age-rotate seal: %v", err)
 					w.mu.Unlock()
 					continue
 				}
 				old := w.active
-				sw, err := OpenSegmentWriter(w.dir, w.term, rev)
-				if err != nil {
-					// Keep the sealed segment as active so Append returns an
-					// error rather than panicking on a nil dereference.
-					w.log.Errorf("wal: age-rotate open new segment: %v", err)
-					w.active = old
-					w.mu.Unlock()
-					continue
-				}
+				w.active = nil
 				if w.uploader != nil {
 					objKey := ObjectKey(old.Term(), old.FirstRev())
 					w.addPending(objKey, old.Path())
@@ -489,7 +508,6 @@ func (w *WAL) rotationLoop(ctx context.Context) {
 						w.log.Warnf("wal: upload queue full, segment %q will be retried on restart", old.Path())
 					}
 				}
-				w.active = sw
 			}
 			w.mu.Unlock()
 
@@ -622,8 +640,9 @@ drained:
 }
 
 // SealAndFlush seals the active segment immediately (blocking) and queues it
-// for upload. nextSeq is the first WAL sequence expected in the new segment.
-// Used before taking a checkpoint.
+// for upload. The next append starts a new segment named after its first
+// entry; nextSeq is kept for the WALWriter interface. Used before taking a
+// checkpoint.
 func (w *WAL) SealAndFlush(nextSeq int64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -634,11 +653,7 @@ func (w *WAL) SealAndFlush(nextSeq int64) error {
 	if err := old.Seal(); err != nil {
 		return err
 	}
-	sw, err := OpenSegmentWriter(w.dir, w.term, nextSeq)
-	if err != nil {
-		return err
-	}
-	w.active = sw
+	w.active = nil
 	if w.uploader != nil {
 		objKey := ObjectKey(old.Term(), old.FirstRev())
 		w.addPending(objKey, old.Path())

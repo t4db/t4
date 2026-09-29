@@ -3,6 +3,8 @@ package wal
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -115,42 +117,43 @@ func TestWALCloseNoUploadWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestWALRotationOpenFailureNoNilPanic verifies that when OpenSegmentWriter
-// fails during a rotation triggered by Append, the WAL leaves a valid (non-nil)
-// active writer so subsequent Append calls return an error rather than panicking.
-func TestWALRotationOpenFailureNoNilPanic(t *testing.T) {
-	// Use a very small segment so rotation is triggered immediately.
+// TestWALSegmentNamedAfterFirstEntry verifies that every segment is named
+// after the sequence of its first entry, whatever startRev Open was given and
+// across rotations. A segment named in advance can carry a stale name: after
+// a disk loss, Open ran before remote replay advanced the sequence, and the
+// segment reused the object key of one already in object storage.
+func TestWALSegmentNamedAfterFirstEntry(t *testing.T) {
 	dir := t.TempDir()
+	// startRev 1 is stale: the first entry written is sequence 5.
 	w, err := Open(dir, 1, 1, WithSegmentMaxSize(1))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
+	}
+	if paths, _ := LocalSegments(dir); len(paths) != 0 {
+		t.Fatalf("Open created segments %v before any append", paths)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	w.Start(ctx)
 	defer cancel()
 
-	// Write entries that each exceed the tiny max size. Each Append may trigger
-	// a rotation. The WAL directory is healthy, so rotation will succeed, but
-	// we verify the invariant: active is never nil between Appends.
-	for i := int64(1); i <= 5; i++ {
-		err := w.Append(&Entry{
-			Revision: i, Term: 1, Op: OpCreate,
-			Key:   "key",
-			Value: make([]byte, 64),
-		})
-		// Append may fail if the active segment is in a bad state, but must
-		// never panic with a nil pointer dereference.
-		if err != nil {
-			t.Logf("Append %d: %v (non-nil error is acceptable)", i, err)
-		}
-
-		w.mu.Lock()
-		active := w.active
-		w.mu.Unlock()
-		if active == nil {
-			t.Fatalf("w.active is nil after Append %d — next call would panic", i)
+	// Each append exceeds the tiny max size and rotates the segment.
+	for rev := int64(5); rev <= 7; rev++ {
+		if err := w.Append(&Entry{Revision: rev, Term: 1, Op: OpCreate, Key: "key", Value: make([]byte, 64)}); err != nil {
+			t.Fatalf("Append %d: %v", rev, err)
 		}
 	}
-
 	w.Close()
+
+	paths, err := LocalSegments(dir)
+	if err != nil {
+		t.Fatalf("LocalSegments: %v", err)
+	}
+	var names []string
+	for _, p := range paths {
+		names = append(names, filepath.Base(p))
+	}
+	want := []string{SegmentName(1, 5), SegmentName(1, 6), SegmentName(1, 7)}
+	if !slices.Equal(names, want) {
+		t.Fatalf("segments = %v, want %v", names, want)
+	}
 }
