@@ -106,7 +106,10 @@ func testTakeoverCatchUp(t *testing.T, followersHaveWarmup bool) bool {
 	// Crash the leader: no graceful shutdown, no object storage access.
 	cluster.stores[leaderIdx].block()
 
-	newLeader := waitForLeaderNodeLocal(t, cluster.survivors(leader), 30*time.Second)
+	// A leader none of whose followers connected renews in slow mode, and
+	// followers it never heard from wait out that lease (3 × the default
+	// 20 s LeaderWatchInterval) before they may take over.
+	newLeader := waitForLeaderNodeLocal(t, cluster.survivors(leader), 70*time.Second)
 	if kv, err := newLeader.Get("/committed"); err != nil || kv == nil {
 		t.Fatalf("new leader lost the committed write: %+v, %v", kv, err)
 	}
