@@ -1,9 +1,11 @@
 package t4
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -1306,10 +1308,14 @@ func toKV(sv *istore.KeyValue) *KeyValue { return sv }
 // last-writer-wins it could, resurrecting entries the new term discarded or
 // replacing a segment with a shorter prefix of itself.
 //
-// A conflict is therefore success, not failure: the segment is durable in
-// object storage, which is all the caller asked for. This also makes retries
-// after an ambiguous timeout (the PUT landed but the response was lost)
-// idempotent rather than a source of duplicate writes.
+// A conflict is success only when the existing object already holds every
+// entry of the local segment: it is byte-identical (a retry after an ambiguous
+// timeout whose PUT landed) or the local segment is a prefix of it (a shorter
+// copy of the same segment). Segments are append-only and every frame carries
+// a CRC, so a byte prefix is exactly "these entries, in this order". Any other
+// conflict means the local entries are not in object storage; it returns
+// wal.ErrSegmentConflict and keeps the local file, so a synchronous upload
+// fails the write instead of acknowledging entries that were never persisted.
 func makeUploader(obj object.Store, log Logger) wal.Uploader {
 	// Resolved once: the wrappers in pkg/object (instrumented, encrypted)
 	// forward the conditional methods and preserve this assertion.
@@ -1342,9 +1348,14 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 		if cond != nil {
 			err = cond.PutIfAbsent(ctx, objectKey, f)
 			if errors.Is(err, object.ErrPreconditionFailed) {
-				// Another writer published this segment first. Its copy is
-				// authoritative; drop ours and reclaim the local file.
 				metrics.WALUploadConflicts.Inc()
+				if err := segmentPublished(ctx, obj, localPath, objectKey); err != nil {
+					metrics.WALUploadErrors.Inc()
+					log.Errorf("uploader: %v", err)
+					return err
+				}
+				// Another writer published these entries first. Its copy is
+				// authoritative; drop ours and reclaim the local file.
 				log.Debugf("uploader: %q already present in object storage — keeping the existing object", objectKey)
 				return os.Remove(localPath)
 			}
@@ -1359,4 +1370,28 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 		metrics.WALUploadDuration.Observe(time.Since(start).Seconds())
 		return os.Remove(localPath)
 	}
+}
+
+// segmentPublished reports whether the object at objectKey already holds every
+// entry of the local segment at localPath, i.e. the local bytes are a prefix of
+// (or equal to) the object's. It returns a wal.ErrSegmentConflict error if not.
+func segmentPublished(ctx context.Context, obj object.Store, localPath, objectKey string) error {
+	local, err := os.ReadFile(localPath)
+	if err != nil {
+		return fmt.Errorf("read %q to compare with existing %q: %w", localPath, objectKey, err)
+	}
+	rc, err := obj.Get(ctx, objectKey)
+	if err != nil {
+		return fmt.Errorf("read existing %q to compare with %q: %w", objectKey, localPath, err)
+	}
+	defer func() { _ = rc.Close() }()
+	existing, err := io.ReadAll(rc)
+	if err != nil {
+		return fmt.Errorf("read existing %q to compare with %q: %w", objectKey, localPath, err)
+	}
+	if !bytes.HasPrefix(existing, local) {
+		return fmt.Errorf("%w: %q (%d bytes) does not contain local segment %q (%d bytes)",
+			wal.ErrSegmentConflict, objectKey, len(existing), localPath, len(local))
+	}
+	return nil
 }
