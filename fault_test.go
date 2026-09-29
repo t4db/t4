@@ -338,8 +338,8 @@ func newBlockableProxyLocal(t *testing.T, target string) *blockableProxyLocal {
 func (p *blockableProxyLocal) Addr() string { return p.lis.Addr().String() }
 
 func (p *blockableProxyLocal) block() {
-	atomic.StoreInt32(&p.blocked, 1)
 	p.connsMu.Lock()
+	atomic.StoreInt32(&p.blocked, 1)
 	for _, c := range p.conns {
 		_ = c.Close()
 	}
@@ -364,7 +364,15 @@ func (p *blockableProxyLocal) serve() {
 			_ = c.Close()
 			continue
 		}
+		// Check again under connsMu: a block that ran while dialling has
+		// already closed the connections it saw, and would miss this one.
 		p.connsMu.Lock()
+		if atomic.LoadInt32(&p.blocked) == 1 {
+			p.connsMu.Unlock()
+			_ = c.Close()
+			_ = dst.Close()
+			continue
+		}
 		p.conns = append(p.conns, c, dst)
 		p.connsMu.Unlock()
 		go func() { _, _ = io.Copy(dst, c); _ = dst.Close(); _ = c.Close() }()
