@@ -30,23 +30,25 @@ func TestTakeoverCatchesUpFromObjectStorage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Rarely the cut-off leader is deposed before the write commits
 			// (its liveness touch waits behind the write, which waits on a
-			// follower whose broken stream is not yet detected). Nothing is
-			// committed then, so the scenario was not reached: retry it.
+			// follower whose broken stream is not yet detected), or the
+			// followers are not behind the fence. The scenario was not
+			// reached then: retry it.
 			for attempt := 1; ; attempt++ {
 				if testTakeoverCatchUp(t, tc.followersHave) {
 					return
 				}
 				if attempt == 3 {
-					t.Fatal("leader was deposed before the write committed in every attempt")
+					t.Fatal("scenario not reached in any attempt")
 				}
-				t.Logf("attempt %d: leader deposed before the write committed; retrying", attempt)
+				t.Logf("attempt %d: scenario not reached; retrying", attempt)
 			}
 		})
 	}
 }
 
 // testTakeoverCatchUp runs the scenario on a fresh cluster. It returns false
-// if the leader lost leadership before the write under test committed.
+// if the scenario was not reached: the leader lost leadership before the write
+// under test committed, or the followers were not behind the fence.
 func testTakeoverCatchUp(t *testing.T, followersHaveWarmup bool) bool {
 	cluster := newFailoverCluster(t, 3)
 	leader := cluster.leader(t, 10*time.Second)
@@ -88,17 +90,28 @@ func testTakeoverCatchUp(t *testing.T, followersHaveWarmup bool) bool {
 		t.Fatal(err)
 	}
 
-	// Wait until the lock records the write as committed: the followers are
-	// now behind the election fence.
+	// Wait until the followers, all lacking the write, are behind the
+	// election fence, judged by what they received from a leader. The fence
+	// need not move for this write if an earlier one already blocks them.
 	lock := election.NewLock(cluster.shared, "observer", "")
+	survivors := cluster.survivors(leader)
+	fenced := func(rec *election.LockRecord) bool {
+		for _, n := range survivors {
+			if !rec.Blocks(n.leaderKnownFence()) {
+				return false
+			}
+		}
+		return true
+	}
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		rec, err := lock.Read(ctx)
-		if err == nil && rec != nil && rec.CommittedRev >= rev {
+		if err == nil && rec != nil && fenced(rec) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("lock never recorded committed revision %d (%+v, %v)", rev, rec, err)
+			t.Logf("followers lacking revision %d not behind the fence (%+v, %v)", rev, rec, err)
+			return false
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
