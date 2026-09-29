@@ -272,6 +272,22 @@ func (n *Node) fencePending() bool {
 	return wantSeq > n.fenceSeq.Load() || n.flagStale()
 }
 
+// flagWriteStarting records that a lock write carrying complete as the lock's
+// ObjectStoreComplete is about to be attempted. A write that reports an error
+// may still have landed, and the lock claiming object storage is complete
+// when it is not is the unsafe direction: a write of true counts from the
+// attempt on, and only a successful write of false (flagWritten) clears it.
+func (n *Node) flagWriteStarting(complete bool) {
+	if complete {
+		n.lockObjectStoreComplete.Store(true)
+	}
+}
+
+// flagWritten records that a lock write carrying complete succeeded.
+func (n *Node) flagWritten(complete bool) {
+	n.lockObjectStoreComplete.Store(complete)
+}
+
 // flagStale reports whether the lock's ObjectStoreComplete, as last written,
 // differs from what the commit loop now wants it to say.
 func (n *Node) flagStale() bool {

@@ -259,3 +259,27 @@ func TestObjectStoreFlagClearedWhenFollowerConnects(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A lock write setting ObjectStoreComplete that reports an error may still
+// have landed. Until a write of false succeeds, the leader must treat the lock
+// as claiming object storage is complete, so that it does not acknowledge a
+// write it did not upload without first clearing the flag.
+func TestObjectStoreFlagClaimedFromAttempt(t *testing.T) {
+	n := &Node{}
+	n.objectStoreComplete.Store(true)
+	n.flagWriteStarting(true) // the write reports an error: no flagWritten
+
+	n.objectStoreComplete.Store(false) // a follower is back
+	if !n.flagStale() {
+		t.Fatal("a write of the flag that may have landed was not counted: an unuploaded write would be acknowledged without clearing it")
+	}
+	n.flagWriteStarting(false) // this write fails too
+	if !n.flagStale() {
+		t.Fatal("a failed write of false cleared the flag")
+	}
+	n.flagWriteStarting(false)
+	n.flagWritten(false)
+	if n.flagStale() {
+		t.Fatal("a successful write of false did not clear the flag")
+	}
+}

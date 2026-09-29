@@ -238,8 +238,10 @@ type Node struct {
 	fenceReqC    chan struct{}
 	// objectStoreComplete is set by the commit loop while object storage
 	// holds every write this leader acknowledged; lockObjectStoreComplete is
-	// the value of the lock's ObjectStoreComplete as last written. A write is
-	// acknowledged only while they agree (docs/design/takeover-fence.md).
+	// what the lock's ObjectStoreComplete may say: true from any attempt to
+	// write true (it may land though the write reports an error), false only
+	// once a write of false succeeded. A write is acknowledged only while they
+	// agree (docs/design/takeover-fence.md).
 	objectStoreComplete     atomic.Bool
 	lockObjectStoreComplete atomic.Bool
 

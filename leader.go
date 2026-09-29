@@ -231,6 +231,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		// The flag as the commit loop wants it now; a write waiting on it is
 		// acknowledged only once this renewal has recorded it.
 		complete := n.objectStoreComplete.Load()
+		n.flagWriteStarting(complete)
 		ttl := fastTTL
 		if slow {
 			ttl = n.slowTTL()
@@ -247,7 +248,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 			return true
 		}
 		n.extendLease(start, slow)
-		n.lockObjectStoreComplete.Store(complete)
+		n.flagWritten(complete)
 		n.fenced(seq)
 		return true
 	}
