@@ -115,3 +115,81 @@ func testTakeoverCatchUp(t *testing.T, followersHaveWarmup bool) bool {
 	}
 	return true
 }
+
+// TestTakeoverFencesMetaWrites covers a leader that dies after acknowledging
+// a meta write its followers never received. A meta write does not advance
+// the revision, so a revision fence cannot tell a follower that lacks it
+// from one that has it: the fence has to cover sequences too, or a follower
+// takes over without catching up and the acknowledged write is lost.
+func TestTakeoverFencesMetaWrites(t *testing.T) {
+	for attempt := 1; ; attempt++ {
+		if testTakeoverFencesMetaWrite(t) {
+			return
+		}
+		if attempt == 3 {
+			t.Fatal("leader was deposed before the meta write committed in every attempt")
+		}
+		t.Logf("attempt %d: leader deposed before the meta write committed; retrying", attempt)
+	}
+}
+
+func testTakeoverFencesMetaWrite(t *testing.T) bool {
+	cluster := newFailoverCluster(t, 3)
+	leader := cluster.leader(t, 10*time.Second)
+	leaderIdx := cluster.indexOf(leader)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if on, err := leader.MetaEnabled(); err != nil || !on {
+		t.Fatalf("meta keyspace not enabled: %v, %v", on, err)
+	}
+
+	// Followers hold every data write, so the revision fence cannot block
+	// them: only the meta write below sets them apart.
+	warm, err := leader.Put(ctx, "/warmup", []byte("v"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range cluster.survivors(leader) {
+		if err := n.WaitForRevision(ctx, warm); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cluster.proxies[leaderIdx].block()
+	deadline := time.Now().Add(10 * time.Second)
+	for !leader.replicationDegraded() {
+		if time.Now().After(deadline) {
+			t.Fatal("leader did not notice its followers were gone")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Acknowledged only once durable in object storage and fenced.
+	err = leader.MetaPut(ctx, "fenced", []byte("v"))
+	if errors.Is(err, ErrClosed) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The fence is written before the write is acknowledged, and every
+	// survivor lacks the write: the lock must block each of them.
+	rec, err := election.NewLock(cluster.shared, "observer", "").Read(ctx)
+	if err != nil || rec == nil {
+		t.Fatalf("read lock: %+v, %v", rec, err)
+	}
+	for _, n := range cluster.survivors(leader) {
+		if f := n.leaderKnownFence(); !rec.Blocks(f) {
+			t.Fatalf("lock fence %+v does not block %s at %+v, which lacks an acknowledged meta write", rec.Fence(), n.cfg.NodeID, f)
+		}
+	}
+
+	// Crash the leader: no graceful shutdown, no object storage access.
+	cluster.stores[leaderIdx].block()
+
+	newLeader := waitForLeaderNodeLocal(t, cluster.survivors(leader), 30*time.Second)
+	if _, ok, err := newLeader.MetaGet("fenced"); err != nil || !ok {
+		t.Fatalf("new leader lost the acknowledged meta write: ok=%v, %v", ok, err)
+	}
+	return true
+}
