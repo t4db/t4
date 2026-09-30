@@ -105,6 +105,10 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.leasePeers.Store(peerSrv)
 	n.termStartSeq.Store(nextSeq)
 	n.fenceSeq.Store(-1)
+	// A term starts with the flag clear, in the lock (TakeOver and
+	// TryAcquire never set it) and here.
+	n.objectStoreComplete.Store(false)
+	n.lockObjectStoreComplete.Store(false)
 	n.storeRole(roleLeader)
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.nextSeq = nextSeq
@@ -214,21 +218,26 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 			stepDown(reason, fmt.Sprintf("lock superseded (current: %+v)", rec))
 			return false
 		}
-		// Sequence before revision: the revision read afterwards covers it.
-		seq := n.db.Load().LastSequence()
+		// Position before revision: the revision read afterwards covers it.
+		pos := n.db.Load().LastPosition()
 		rev := n.db.Load().CurrentRevision()
-		if wantSeq, wantRev := n.fenceWanted(); wantSeq > seq {
-			seq = wantSeq
+		if wantSeq, wantRev, wantTerm := n.fenceWanted(); wantSeq > pos.Seq {
+			pos.Seq, pos.Term = wantSeq, max(pos.Term, wantTerm)
 			if wantRev > rev {
 				rev = wantRev
 			}
 		}
+		seq := pos.Seq
+		// The flag as the commit loop wants it now; a write waiting on it is
+		// acknowledged only once this renewal has recorded it.
+		complete := n.objectStoreComplete.Load()
+		n.flagWriteStarting(complete)
 		ttl := fastTTL
 		if slow {
 			ttl = n.slowTTL()
 		}
 		tCtx, tCancel := context.WithTimeout(ctx, 5*time.Second)
-		err = lock.Renew(tCtx, term, n.cfg.AdvertisePeerAddr, etag, rev, start, ttl)
+		err = lock.Renew(tCtx, term, n.cfg.AdvertisePeerAddr, etag, election.Fence{Rev: rev, Seq: pos.Seq, Term: pos.Term}, complete, start, ttl)
 		tCancel()
 		if errors.Is(err, object.ErrPreconditionFailed) {
 			stepDown(reason, "renewal precondition failed — lock taken")
@@ -239,6 +248,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 			return true
 		}
 		n.extendLease(start, slow)
+		n.flagWritten(complete)
 		n.fenced(seq)
 		return true
 	}
@@ -501,6 +511,12 @@ func (n *Node) commitLoop(ctx context.Context) {
 				}
 			}
 		}
+		// A batch that is not uploaded before it is acknowledged ends object
+		// storage holding every acknowledged write: clear the flag before
+		// appending it, and acknowledge it only once the lock says so.
+		if !degraded {
+			n.objectStoreComplete.Store(false)
+		}
 
 		// Append locally before exposing IDs or payloads to followers. This
 		// sacrifices a small amount of fsync/network overlap, but ensures failed
@@ -508,6 +524,12 @@ func (n *Node) commitLoop(ctx context.Context) {
 		walStart := time.Now()
 		err := n.wal.AppendBatch(batchCtx, entries)
 		walEnd := time.Now()
+		if err == nil && degraded {
+			// A synchronous upload uploads every earlier segment still pending
+			// before this one, so object storage now holds every write this
+			// leader acknowledged, and this batch.
+			n.objectStoreComplete.Store(true)
+		}
 		var quorumStart, quorumEnd time.Time
 		if err == nil && n.peerSrv != nil {
 			for _, req := range batch {
@@ -562,9 +584,9 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// before the batch is acknowledged. The batch is committed either
 		// way; a failure only withholds the acknowledgement.
 		ackErr := err
-		if err == nil && fenceWrites && n.peerSrv != nil && n.fenceNeeded(batch[len(batch)-1].entry.Sequence()) {
+		if err == nil && fenceWrites && n.peerSrv != nil && (n.fenceNeeded(batch[len(batch)-1].entry.Sequence()) || n.flagStale()) {
 			last := batch[len(batch)-1].entry
-			ackErr = n.awaitFence(ctx, last.Sequence(), last.Revision)
+			ackErr = n.awaitFence(ctx, last.Sequence(), last.Revision, last.Term)
 		}
 
 		// Signal all callers, stamping the phase timings first. await turns
@@ -597,21 +619,32 @@ func (n *Node) commitLoop(ctx context.Context) {
 	}
 }
 
-// replicationDegraded reports whether this leader currently lacks the followers
-// needed to meet cfg.FollowerWaitMode's ACK target.
+// replicationDegraded reports whether this leader must upload each batch to
+// object storage before acknowledging it.
 //
-// Only consulted when WALSyncUpload is set: that flag is the existing knob for
-// "block on object storage so an acknowledged write survives losing this disk",
-// and an operator who turned it off for a durable volume has already answered
-// this question.
+// With no follower connected it always must, whatever WALSyncUpload says:
+// object storage is then the only other copy of a write, and a candidate
+// catches up from it only while it holds every acknowledged write
+// (docs/design/takeover-fence.md). Wait mode none opts out of replication
+// durability, and with it of this.
+//
+// With some followers connected but fewer than cfg.FollowerWaitMode's ACK
+// target, WALSyncUpload decides: that flag is the existing knob for "block on
+// object storage so an acknowledged write survives losing this disk", and an
+// operator who turned it off for a durable volume has already answered this
+// question. Every write is still acknowledged by a follower then.
 func (n *Node) replicationDegraded() bool {
 	if n.peerSrv == nil || n.cfg.ObjectStore == nil {
 		return false
 	}
+	mode := peer.WaitMode(n.cfg.FollowerWaitMode)
+	if mode != peer.WaitNone && n.peerSrv.ConnectedFollowers() == 0 {
+		return true
+	}
 	if n.cfg.WALSyncUpload == nil || !*n.cfg.WALSyncUpload {
 		return false
 	}
-	return !n.peerSrv.ReplicationSatisfiable(peer.WaitMode(n.cfg.FollowerWaitMode))
+	return !n.peerSrv.ReplicationSatisfiable(mode)
 }
 
 func boolToFloat(b bool) float64 {

@@ -129,6 +129,9 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	// reverse order, so no deadlock is possible here).
 	n.fenceMu.Lock()
 	oldDB := n.db.Load()
+	// The checkpoint carries the writer's leader-known position, not this
+	// node's: keep this node's own across the swap.
+	known := oldDB.LeaderKnownPosition()
 	oldDB.SignalClose() // unblocks WaitForRevision waiters before we take readMu.Lock
 	n.readMu.Lock()
 	if rerr := oldDB.Close(); rerr != nil {
@@ -154,6 +157,18 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 		n.readMu.Unlock()
 		n.fenceMu.Unlock()
 		return false, fmt.Errorf("open new pebble after restore: %w", rerr)
+	}
+	if n.cfg.NodeID != "" {
+		rerr = newDB.SetNodeID(n.cfg.NodeID)
+		if rerr == nil {
+			rerr = newDB.SetLeaderKnownPosition(known)
+		}
+		if rerr != nil {
+			_ = newDB.Close()
+			n.readMu.Unlock()
+			n.fenceMu.Unlock()
+			return false, fmt.Errorf("keep leader-known position across restore: %w", rerr)
+		}
 	}
 	n.db.Store(newDB)
 	n.readMu.Unlock()

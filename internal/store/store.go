@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
@@ -45,6 +46,14 @@ type Store struct {
 	currentRev int64
 	compactRev int64
 	lastSeq    int64
+	// lastTerm is the term of the entry at lastSeq (see position.go).
+	lastTerm atomic.Uint64
+
+	// posMu guards the leader-known position: the key it is stored under
+	// (nil until SetNodeID) and its value.
+	posMu     sync.Mutex
+	streamKey []byte
+	streamPos Position
 
 	// mu protects notify and watch prefix accounting.
 	mu        sync.RWMutex
@@ -251,6 +260,17 @@ func (s *Store) loadMeta() error {
 		return fmt.Errorf("store: read compact rev: %w", err)
 	}
 
+	// Read the term of the last applied entry (absent in older stores).
+	v, closer, err = s.db.Get(metaLastTermKey)
+	if err == nil {
+		if len(v) == 8 {
+			s.lastTerm.Store(binary.BigEndian.Uint64(v))
+		}
+		_ = closer.Close()
+	} else if err != pebble.ErrNotFound {
+		return fmt.Errorf("store: read last term: %w", err)
+	}
+
 	// Read last applied WAL sequence. Older stores written before
 	// metaLastSeqKey fall back to currentRev (which equals sequence in the
 	// pre-Compact-doesn't-bump-rev world).
@@ -406,8 +426,12 @@ func (s *Store) Apply(entries []wal.Entry) error {
 	}
 	b := s.db.NewBatch()
 	var maxRev, maxSeq int64
+	var tip Position
 	for i := range entries {
 		e := &entries[i]
+		if seq := e.Sequence(); seq > tip.Seq {
+			tip = Position{Term: e.Term, Seq: seq}
+		}
 		if e.Op == wal.OpCompact {
 			// PrevRevision carries the compact target (see node.go Compact).
 			if err := s.applyCompact(b, e.PrevRevision); err != nil {
@@ -430,7 +454,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			maxSeq = seq
 		}
 	}
-	if err := s.commitBatch(b, maxRev, maxSeq, false); err != nil {
+	if err := s.commitBatch(b, maxRev, maxSeq, tip, true, false); err != nil {
 		return err
 	}
 	s.broadcast()
@@ -441,7 +465,16 @@ func (s *Store) Apply(entries []wal.Entry) error {
 // commits it (durably when sync is true), then advances the in-memory
 // currentRev/lastSeq counters. The counters only ever move forward. On any
 // error b is closed and the error is returned.
-func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, sync bool) error {
+//
+// tip is the position of the batch's last entry. fromLeader marks entries a
+// leader streamed to this node or it wrote as leader: only those advance the
+// leader-known position (position.go).
+func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, tip Position, fromLeader, sync bool) error {
+	known, advanceKnown, err := s.recordPositions(b, tip, fromLeader)
+	if err != nil {
+		_ = b.Close()
+		return err
+	}
 	if maxRev > 0 {
 		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
 			_ = b.Close()
@@ -465,8 +498,18 @@ func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, sync bool) er
 	if maxRev > atomic.LoadInt64(&s.currentRev) {
 		atomic.StoreInt64(&s.currentRev, maxRev)
 	}
+	if maxSeq >= atomic.LoadInt64(&s.lastSeq) && tip.Seq == maxSeq {
+		s.lastTerm.Store(tip.Term)
+	}
 	if maxSeq > atomic.LoadInt64(&s.lastSeq) {
 		atomic.StoreInt64(&s.lastSeq, maxSeq)
+	}
+	if advanceKnown {
+		s.posMu.Lock()
+		if s.streamPos.Less(known) {
+			s.streamPos = known
+		}
+		s.posMu.Unlock()
 	}
 	return nil
 }
@@ -479,10 +522,12 @@ func (s *Store) Recover(entries []wal.Entry) error {
 	}
 	b := s.db.NewBatch()
 	var maxRev, maxSeq int64
+	var tip Position
 	for i := range entries {
 		e := &entries[i]
 		if seq := e.Sequence(); seq > maxSeq {
 			maxSeq = seq
+			tip = Position{Term: e.Term, Seq: seq}
 		}
 		if e.Op == wal.OpCompact {
 			if err := s.applyCompact(b, e.PrevRevision); err != nil {
@@ -533,7 +578,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 			maxRev = e.Revision
 		}
 	}
-	return s.commitBatch(b, maxRev, maxSeq, true)
+	return s.commitBatch(b, maxRev, maxSeq, tip, false, true)
 }
 
 func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {

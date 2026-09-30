@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/pkg/object"
 
 	"github.com/t4db/t4/internal/testutil"
@@ -127,9 +128,12 @@ func TestReplicatedLeaderDoesNotFlushPerBatch(t *testing.T) {
 	}
 }
 
-// WALSyncUpload=false is the operator asserting local storage is durable, so
-// degradation must not start blocking writes on S3.
-func TestDegradedLeaderRespectsSyncUploadOptOut(t *testing.T) {
+// A cluster leader with no follower connected uploads each batch before
+// acknowledging it even with WALSyncUpload=false: object storage is then the
+// only other copy of a write, and a candidate may catch up from it only while
+// the lock records that it holds every acknowledged write
+// (docs/design/takeover-fence.md).
+func TestLeaderWithoutFollowersUploadsDespiteOptOut(t *testing.T) {
 	store := object.NewMem()
 	addr := freeLocalAddr(t)
 	off := false
@@ -154,7 +158,128 @@ func TestDegradedLeaderRespectsSyncUploadOptOut(t *testing.T) {
 	if _, err := n.Put(context.Background(), "/optout/key", []byte("v"), 0); err != nil {
 		t.Fatalf("put: %v", err)
 	}
+	if got := len(walObjects(t, store)); got != before+1 {
+		t.Fatalf("leader without followers did not upload synchronously (before=%d after=%d)", before, got)
+	}
+	rec, err := election.NewLock(store, "observer", "").Read(context.Background())
+	if err != nil || rec == nil || !rec.ObjectStoreComplete {
+		t.Fatalf("lock does not record object storage as complete: %+v, %v", rec, err)
+	}
+}
+
+// WALSyncUpload=false is the operator asserting local storage is durable. A
+// single node has no failover, so it keeps uploading asynchronously.
+func TestSingleNodeRespectsSyncUploadOptOut(t *testing.T) {
+	store := object.NewMem()
+	off := false
+	n, err := Open(Config{
+		DataDir:       t.TempDir(),
+		ObjectStore:   store,
+		WALSyncUpload: &off,
+		SegmentMaxAge: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() {
+		_ = n.Close()
+	}()
+
+	before := len(walObjects(t, store))
+	if _, err := n.Put(context.Background(), "/optout/key", []byte("v"), 0); err != nil {
+		t.Fatalf("put: %v", err)
+	}
 	if got := len(walObjects(t, store)); got != before {
-		t.Fatalf("opt-out still uploaded synchronously (before=%d after=%d)", before, got)
+		t.Fatalf("single node with the opt-out uploaded synchronously (before=%d after=%d)", before, got)
+	}
+}
+
+// When a follower connects to a leader that was uploading every batch, the
+// leader clears the lock's ObjectStoreComplete before it acknowledges a write
+// it does not upload: otherwise a candidate could trust object storage while
+// that write exists only on the leader and the follower.
+func TestObjectStoreFlagClearedWhenFollowerConnects(t *testing.T) {
+	store := object.NewMem()
+	open := func(id string) *Node {
+		addr := freeLocalAddr(t)
+		n, err := Open(Config{
+			DataDir:           t.TempDir(),
+			ObjectStore:       store,
+			NodeID:            id,
+			PeerListenAddr:    addr,
+			AdvertisePeerAddr: addr,
+			SegmentMaxAge:     time.Hour,
+		})
+		if err != nil {
+			t.Fatalf("open %s: %v", id, err)
+		}
+		t.Cleanup(func() { _ = n.Close() })
+		return n
+	}
+	ctx := context.Background()
+	lock := election.NewLock(store, "observer", "")
+	flag := func() bool {
+		t.Helper()
+		rec, err := lock.Read(ctx)
+		if err != nil || rec == nil {
+			t.Fatalf("read lock: %+v, %v", rec, err)
+		}
+		return rec.ObjectStoreComplete
+	}
+
+	leader := open("flag-leader")
+	waitLeader(t, leader)
+	if _, err := leader.Put(ctx, "/alone", []byte("v"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if !flag() {
+		t.Fatal("leader without followers did not record object storage as complete")
+	}
+
+	follower := open("flag-follower")
+	deadline := time.Now().Add(10 * time.Second)
+	for leader.peerSrv.ConnectedFollowers() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("follower never connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	before := len(walObjects(t, store))
+	rev, err := leader.Put(ctx, "/replicated", []byte("v"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(walObjects(t, store)); got != before {
+		t.Fatalf("write with a follower connected was uploaded synchronously (before=%d after=%d)", before, got)
+	}
+	if flag() {
+		t.Fatal("write acknowledged without upload while the lock still claims object storage is complete")
+	}
+	if err := follower.WaitForRevision(ctx, rev); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A lock write setting ObjectStoreComplete that reports an error may still
+// have landed. Until a write of false succeeds, the leader must treat the lock
+// as claiming object storage is complete, so that it does not acknowledge a
+// write it did not upload without first clearing the flag.
+func TestObjectStoreFlagClaimedFromAttempt(t *testing.T) {
+	n := &Node{}
+	n.objectStoreComplete.Store(true)
+	n.flagWriteStarting(true) // the write reports an error: no flagWritten
+
+	n.objectStoreComplete.Store(false) // a follower is back
+	if !n.flagStale() {
+		t.Fatal("a write of the flag that may have landed was not counted: an unuploaded write would be acknowledged without clearing it")
+	}
+	n.flagWriteStarting(false) // this write fails too
+	if !n.flagStale() {
+		t.Fatal("a failed write of false cleared the flag")
+	}
+	n.flagWriteStarting(false)
+	n.flagWritten(false)
+	if n.flagStale() {
+		t.Fatal("a successful write of false did not clear the flag")
 	}
 }

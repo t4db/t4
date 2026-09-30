@@ -200,19 +200,30 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		}
 		return nil, false
 	}
-	// Revision fence: refuse to become leader if we are behind the last known
-	// committed revision. A node missing entries would either drop them (data
-	// loss) or fail to serve reads that clients already observed.
-	if existing != nil && existing.CommittedRev > n.db.Load().CurrentRevision() {
-		// The leader is gone: it shut down gracefully (and uploaded its WAL
-		// before recording its final CommittedRev), or its liveness record
-		// went stale above. Following its address cannot catch this node up,
-		// so catch up from object storage (checkpoint, then WAL), where every
-		// committed write is durable once no follower acknowledges it, then
-		// take over.
-		if n.cfg.ObjectStore != nil {
-			n.log.Infof("t4: takeover: catching up from object storage before takeover (ours=%d, leader=%d)",
-				n.db.Load().CurrentRevision(), existing.CommittedRev)
+	// Election fence: refuse to become leader while the lock's fence blocks
+	// this node. A node missing entries would either drop them (data loss) or
+	// fail to serve reads that clients already observed.
+	//
+	// The node is judged by its leader-known position: what it applied from a
+	// leader, not what it restored from object storage. Object storage can hold
+	// more than the fence covers and less than the leader acknowledged, so
+	// catching up from it could carry this node past the fence while it still
+	// lacks writes another node holds (docs/design/takeover-fence.md).
+	candidate := n.leaderKnownFence()
+	if existing != nil && existing.NodeID == n.cfg.NodeID {
+		// Its own lock: every entry it holds, it wrote or received as a
+		// member of this cluster.
+		candidate = n.committedFence()
+	}
+	if existing != nil && existing.NodeID != n.cfg.NodeID && existing.Blocks(candidate) {
+		// Catching up from object storage (checkpoint, then WAL) and taking
+		// over is safe only while it holds every acknowledged write: the
+		// leader released the lock after uploading its WAL, or recorded that
+		// it uploaded every write before acknowledging it.
+		complete := existing.Released() || existing.ObjectStoreComplete
+		if complete && n.cfg.ObjectStore != nil {
+			n.log.Infof("t4: takeover: catching up from object storage before takeover (ours=%+v, leader=%+v)",
+				candidate, existing.Fence())
 			// WAL segments covered by the latest checkpoint may already be
 			// garbage-collected: restore the checkpoint first if this node is
 			// behind it, as the follow loop's resync does.
@@ -228,18 +239,25 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 				return nil, false
 			}
 			n.db.Load().NotifyRevision()
+			candidate = n.committedFence()
 		}
-		if existing.CommittedRev > n.db.Load().CurrentRevision() {
+		if existing.Blocks(candidate) {
 			if graceful {
-				n.log.Warnf("t4: takeover: still behind after catch-up (ours=%d, leader=%d) — will retry once WAL upload completes",
-					n.db.Load().CurrentRevision(), existing.CommittedRev)
+				n.log.Warnf("t4: takeover: still behind the fence (ours=%+v, leader=%+v) — will retry once the leader has released the lock",
+					candidate, existing.Fence())
 				return nil, false
 			}
-			// Some committed entries are not in object storage yet, so a
-			// leader that still has them may be alive after all. Follow it;
-			// connecting triggers an in-place resync of this node.
-			n.log.Infof("t4: takeover: node is behind leader committed rev after catch-up (ours=%d, leader=%d) — following current leader",
-				n.db.Load().CurrentRevision(), existing.CommittedRev)
+			// Acknowledged writes may exist only on nodes this one cannot see:
+			// the leader, if it is alive after all, or followers that heard
+			// it. Follow the leader; connecting triggers an in-place resync of
+			// this node. Otherwise wait for one of them to take over.
+			if complete {
+				n.log.Infof("t4: takeover: still behind the fence after catch-up (ours=%+v, leader=%+v) — following current leader",
+					candidate, existing.Fence())
+			} else {
+				n.log.Infof("t4: takeover: behind the fence and object storage may lack acknowledged writes (ours=%+v, leader=%+v) — waiting for a node that has them",
+					candidate, existing.Fence())
+			}
 			if existing.LeaderAddr != "" {
 				n.observeTerm(existing.Term)
 				return peer.NewClient(existing.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log, n.cfg.TracerProvider), false
@@ -250,7 +268,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	}
 
 	takeoverStart := time.Now()
-	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), n.db.Load().CurrentRevision(), allow)
+	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), candidate, allow)
 	if err != nil {
 		n.log.Errorf("t4: takeover election error: %v", err)
 		return nil, false

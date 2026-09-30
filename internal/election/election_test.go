@@ -19,7 +19,7 @@ func newLockShared(store *object.Mem, nodeID, addr string) *Lock {
 
 func TestTryAcquireEmpty(t *testing.T) {
 	l := newLock(t, "node-1", "localhost:2380")
-	rec, won, err := l.TryAcquire(context.Background(), 0, 0)
+	rec, won, err := l.TryAcquire(context.Background(), 0, Fence{})
 	if err != nil {
 		t.Fatalf("TryAcquire: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestTryAcquireEmpty(t *testing.T) {
 
 func TestTryAcquireFloorTerm(t *testing.T) {
 	l := newLock(t, "node-1", "localhost:2380")
-	rec, won, err := l.TryAcquire(context.Background(), 5, 5)
+	rec, won, err := l.TryAcquire(context.Background(), 5, Fence{Rev: 5})
 	if err != nil || !won {
 		t.Fatalf("TryAcquire: won=%v err=%v", won, err)
 	}
@@ -50,13 +50,13 @@ func TestTwoNodeElection(t *testing.T) {
 	l1 := newLockShared(store, "node-1", "localhost:2380")
 	l2 := newLockShared(store, "node-2", "localhost:2381")
 
-	_, won1, err := l1.TryAcquire(context.Background(), 0, 0)
+	_, won1, err := l1.TryAcquire(context.Background(), 0, Fence{})
 	if err != nil || !won1 {
 		t.Fatalf("node-1 should win: won=%v err=%v", won1, err)
 	}
 
 	// node-2 tries while node-1 holds the lock → should lose.
-	existing, won2, err := l2.TryAcquire(context.Background(), 0, 0)
+	existing, won2, err := l2.TryAcquire(context.Background(), 0, Fence{})
 	if err != nil {
 		t.Fatalf("node-2 TryAcquire: %v", err)
 	}
@@ -74,19 +74,19 @@ func TestTakeOverAfterLeaderDead(t *testing.T) {
 	l2 := newLockShared(store, "node-2", "localhost:2381")
 
 	// node-1 acquires.
-	rec1, won1, err := l1.TryAcquire(context.Background(), 0, 0)
+	rec1, won1, err := l1.TryAcquire(context.Background(), 0, Fence{})
 	if err != nil || !won1 {
 		t.Fatalf("node-1 should win: %v", err)
 	}
 
 	// node-2 cannot acquire normally (node-1 still holds it, no TTL).
-	_, won2, err := l2.TryAcquire(context.Background(), 0, 0)
+	_, won2, err := l2.TryAcquire(context.Background(), 0, Fence{})
 	if err != nil || won2 {
 		t.Fatalf("node-2 should lose TryAcquire: won=%v err=%v", won2, err)
 	}
 
 	// Simulate: node-2 detects leader dead via stream → calls TakeOver.
-	rec2, won2, err := l2.TakeOver(context.Background(), rec1.Term, rec1.CommittedRev, nil)
+	rec2, won2, err := l2.TakeOver(context.Background(), rec1.Term, Fence{Rev: rec1.CommittedRev}, nil)
 	if err != nil {
 		t.Fatalf("TakeOver: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestTakeOverRace(t *testing.T) {
 	// Two followers simultaneously attempt TakeOver — exactly one should win.
 	store := object.NewMem()
 	l1 := newLockShared(store, "leader", "localhost:2380")
-	_, won, _ := l1.TryAcquire(context.Background(), 0, 0)
+	_, won, _ := l1.TryAcquire(context.Background(), 0, Fence{})
 	if !won {
 		t.Fatal("leader should win initial election")
 	}
@@ -119,11 +119,11 @@ func TestTakeOverRace(t *testing.T) {
 	}
 	ch := make(chan result, 2)
 	go func() {
-		rec, won, _ := f1.TakeOver(context.Background(), 1, 0, nil)
+		rec, won, _ := f1.TakeOver(context.Background(), 1, Fence{}, nil)
 		ch <- result{rec, won}
 	}()
 	go func() {
-		rec, won, _ := f2.TakeOver(context.Background(), 1, 0, nil)
+		rec, won, _ := f2.TakeOver(context.Background(), 1, Fence{}, nil)
 		ch <- result{rec, won}
 	}()
 
@@ -144,7 +144,7 @@ func TestTakeOverRace(t *testing.T) {
 func TestRelease(t *testing.T) {
 	store := object.NewMem()
 	l1 := newLockShared(store, "node-1", "addr1")
-	_, _, _ = l1.TryAcquire(context.Background(), 0, 0)
+	_, _, _ = l1.TryAcquire(context.Background(), 0, Fence{})
 
 	if err := l1.Release(context.Background()); err != nil {
 		t.Fatalf("Release: %v", err)
@@ -168,7 +168,7 @@ func TestTermMonotonicity(t *testing.T) {
 		// Simulate a takeover on each iteration.
 		l := newLockShared(store, "node-1", "addr")
 		time.Sleep(time.Millisecond) // ensure distinct wall-clock instants
-		rec, won, err := l.TakeOver(context.Background(), lastTerm, committedRev, nil)
+		rec, won, err := l.TakeOver(context.Background(), lastTerm, Fence{Rev: committedRev}, nil)
 		if err != nil || !won {
 			t.Fatalf("iter %d: TakeOver won=%v err=%v", i, won, err)
 		}
@@ -185,10 +185,10 @@ func TestLeaderWatchDetectsSupersession(t *testing.T) {
 	l1 := newLockShared(store, "node-1", "addr1")
 	l2 := newLockShared(store, "node-2", "addr2")
 
-	rec1, _, _ := l1.TryAcquire(context.Background(), 0, 0)
+	rec1, _, _ := l1.TryAcquire(context.Background(), 0, Fence{})
 
 	// node-2 takes over.
-	rec2, won, _ := l2.TakeOver(context.Background(), rec1.Term, rec1.CommittedRev, nil)
+	rec2, won, _ := l2.TakeOver(context.Background(), rec1.Term, Fence{Rev: rec1.CommittedRev}, nil)
 	if !won {
 		t.Fatal("node-2 should win TakeOver")
 	}
@@ -203,5 +203,75 @@ func TestLeaderWatchDetectsSupersession(t *testing.T) {
 	}
 	if current.NodeID != "node-2" || current.Term != rec2.Term {
 		t.Errorf("expected node-2 term=%d, got %+v", rec2.Term, current)
+	}
+}
+
+// The fence orders positions by the term of the last entry, then sequence: a
+// candidate holding a deposed leader's uncommitted suffix is behind the next
+// leader's entries however long that suffix is.
+func TestBlocksByTermThenSequence(t *testing.T) {
+	rec := &LockRecord{CommittedRev: 50, CommittedSeq: 100, CommittedTerm: 2}
+	for _, c := range []struct {
+		name  string
+		cand  Fence
+		block bool
+	}{
+		{"at the fence", Fence{Seq: 100, Term: 2}, false},
+		{"past the fence", Fence{Seq: 120, Term: 2}, false},
+		{"behind in sequence", Fence{Seq: 99, Term: 2}, true},
+		{"older term, longer log", Fence{Seq: 150, Term: 1}, true},
+		{"newer term", Fence{Seq: 1, Term: 3}, false},
+	} {
+		if got := rec.Blocks(c.cand); got != c.block {
+			t.Errorf("%s: Blocks(%+v) = %v, want %v", c.name, c.cand, got, c.block)
+		}
+	}
+}
+
+// A lock record of an earlier release carries only CommittedRev.
+func TestBlocksLegacyRecord(t *testing.T) {
+	rec := &LockRecord{CommittedRev: 5}
+	if rec.Blocks(Fence{Rev: 5}) || !rec.Blocks(Fence{Rev: 4, Seq: 100, Term: 9}) {
+		t.Fatal("a record without positions should fence by revision alone")
+	}
+}
+
+// Renew records the fence and the object storage flag; a new term starts
+// without the flag; Relinquish keeps the later of the recorded and given
+// positions.
+func TestLockRecordsFenceAndFlag(t *testing.T) {
+	store := object.NewMem()
+	ctx := context.Background()
+	l := newLockShared(store, "node-1", "addr1")
+	rec, _, err := l.TryAcquire(ctx, 0, Fence{Rev: 3, Seq: 4, Term: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ObjectStoreComplete || rec.Fence() != (Fence{Rev: 3, Seq: 4, Term: 1}) {
+		t.Fatalf("acquired record = %+v", rec)
+	}
+	_, etag, err := l.ReadETag(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Renew(ctx, rec.Term, "addr1", etag, Fence{Rev: 5, Seq: 7, Term: 2}, true, time.Now(), FastTTL); err != nil {
+		t.Fatal(err)
+	}
+	got, err := l.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObjectStoreComplete || got.Fence() != (Fence{Rev: 5, Seq: 7, Term: 2}) {
+		t.Fatalf("renewed record = %+v", got)
+	}
+
+	if err := l.Relinquish(ctx, rec.Term, Fence{Rev: 4, Seq: 9, Term: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = l.Read(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got.Fence() != (Fence{Rev: 5, Seq: 7, Term: 2}) {
+		t.Fatalf("relinquish lowered the fence: %+v", got.Fence())
 	}
 }

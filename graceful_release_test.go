@@ -80,7 +80,7 @@ func TestGracefulShutdownKeepsNewerLeadersLock(t *testing.T) {
 	// which react to the shutdown broadcast, cannot win the lock back and
 	// hide an overwrite.
 	lock := election.NewLock(cluster.shared, "newer-leader", "127.0.0.1:1")
-	newRec, won, err := lock.TakeOver(ctx, candidate.currentTerm(), candidate.db.Load().CurrentRevision(), nil)
+	newRec, won, err := lock.TakeOver(ctx, candidate.currentTerm(), candidate.committedFence(), nil)
 	if err != nil || !won {
 		t.Fatalf("precondition: takeover won=%v err=%v", won, err)
 	}
