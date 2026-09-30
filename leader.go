@@ -428,7 +428,8 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 // TxnDelete. It ignored anything newer instead of rejecting it.
 func v1ForwardSupported(req *peer.ForwardRequest) error {
 	if req.Op > peer.ForwardTxn {
-		return fmt.Errorf("t4: forward op %d is unknown to a v1.1 leader", req.Op)
+		// A v1.1 leader's HandleForward rejects unknown ops with exactly this.
+		return fmt.Errorf("t4: unknown forward op %d", req.Op)
 	}
 	if req.TxnReq == nil {
 		return nil

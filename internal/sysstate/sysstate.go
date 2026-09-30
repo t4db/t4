@@ -8,7 +8,10 @@
 //
 // A database's mode is fixed before it serves its first write (see
 // t4.Node.MetaEnabled), so each call picks the requests for its mode up
-// front. In the legacy mode it sends exactly the requests earlier releases
+// front. Writes and linearizable reads ask MetaEnabledSync: a node that has
+// applied no entry yet cannot tell the mode locally and learns it from the
+// leader. Local reads ask MetaEnabled: such a node has nothing to read in
+// either mode. In the legacy mode it sends exactly the requests earlier releases
 // send: during a rolling upgrade a follower on this release forwards them to
 // a leader that may still run an earlier release, which does not understand
 // meta ops or meta conditions.
@@ -32,6 +35,7 @@ type Node interface {
 	LinearizableGet(ctx context.Context, key string, opts ...t4.ReadOption) (*t4.KeyValue, error)
 	LinearizableList(ctx context.Context, prefix string, opts ...t4.ReadOption) ([]*t4.KeyValue, error)
 	MetaEnabled() (bool, error)
+	MetaEnabledSync(ctx context.Context) (bool, error)
 	MetaGet(key string) ([]byte, bool, error)
 	MetaList(prefix string) ([]t4.MetaKV, error)
 	LinearizableMetaGet(ctx context.Context, key string) ([]byte, bool, error)
@@ -49,10 +53,14 @@ type Change struct {
 // Apply commits ops (ordinary puts and deletes) atomically with the state
 // changes.
 func Apply(ctx context.Context, n Node, ops []t4.TxnOp, changes ...Change) error {
-	on, err := n.MetaEnabled()
+	on, err := n.MetaEnabledSync(ctx)
 	if err != nil {
 		return err
 	}
+	return apply(ctx, n, on, ops, changes...)
+}
+
+func apply(ctx context.Context, n Node, on bool, ops []t4.TxnOp, changes ...Change) error {
 	all := append([]t4.TxnOp(nil), ops...)
 	for _, c := range changes {
 		op := t4.TxnOp{Type: t4.TxnPut, Key: c.Key, Value: c.Value}
@@ -66,18 +74,18 @@ func Apply(ctx context.Context, n Node, ops []t4.TxnOp, changes ...Change) error
 		}
 		all = append(all, op)
 	}
-	_, err = n.Txn(ctx, t4.TxnRequest{Success: all})
+	_, err := n.Txn(ctx, t4.TxnRequest{Success: all})
 	return err
 }
 
 // Put stores value under key.
 func Put(ctx context.Context, n Node, key string, value []byte) error {
-	on, err := n.MetaEnabled()
+	on, err := n.MetaEnabledSync(ctx)
 	if err != nil {
 		return err
 	}
 	if on {
-		return Apply(ctx, n, nil, Change{Key: key, Value: value})
+		return apply(ctx, n, on, nil, Change{Key: key, Value: value})
 	}
 	_, err = n.Put(ctx, key, value, 0)
 	return err
@@ -85,12 +93,12 @@ func Put(ctx context.Context, n Node, key string, value []byte) error {
 
 // Delete removes key. Removing a missing key is not an error.
 func Delete(ctx context.Context, n Node, key string) error {
-	on, err := n.MetaEnabled()
+	on, err := n.MetaEnabledSync(ctx)
 	if err != nil {
 		return err
 	}
 	if on {
-		return Apply(ctx, n, nil, Change{Key: key, Delete: true})
+		return apply(ctx, n, on, nil, Change{Key: key, Delete: true})
 	}
 	_, err = n.Delete(ctx, key)
 	return err
@@ -99,7 +107,7 @@ func Delete(ctx context.Context, n Node, key string) error {
 // Create stores value under key only if key does not exist yet. It reports
 // whether the value was stored.
 func Create(ctx context.Context, n Node, key string, value []byte) (bool, error) {
-	on, err := n.MetaEnabled()
+	on, err := n.MetaEnabledSync(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -135,7 +143,7 @@ func Get(n Node, key string) ([]byte, bool, error) {
 
 // LinearizableGet returns key's value with linearizability guaranteed.
 func LinearizableGet(ctx context.Context, n Node, key string) ([]byte, bool, error) {
-	on, err := n.MetaEnabled()
+	on, err := n.MetaEnabledSync(ctx)
 	if err != nil || on {
 		if err != nil {
 			return nil, false, err
@@ -165,7 +173,7 @@ func List(n Node, prefix string) ([]t4.MetaKV, error) {
 // LinearizableList returns all entries under prefix with linearizability
 // guaranteed, sorted by key.
 func LinearizableList(ctx context.Context, n Node, prefix string) ([]t4.MetaKV, error) {
-	on, err := n.MetaEnabled()
+	on, err := n.MetaEnabledSync(ctx)
 	if err != nil || on {
 		if err != nil {
 			return nil, err

@@ -231,6 +231,8 @@ type Node struct {
 	// and batches resolve in that order, so every token up to it is resolved.
 	// Guarded by mu.
 	resolvedMetaToken uint64
+	// metaModeCache caches the meta keyspace mode once known (see metaMode).
+	metaModeCache atomic.Int32
 	// pendingMeta holds in-flight meta keyspace writes; metaTokenSeq issues
 	// their tokens. Protected by mu.
 	pendingMeta  map[string]pendingMeta
