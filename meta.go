@@ -330,6 +330,9 @@ func (n *Node) MetaGet(key string) (value []byte, ok bool, err error) {
 	if n.closed.Load() {
 		return nil, false, ErrClosed
 	}
+	if key == metaFormatKey {
+		return nil, false, nil // reserved: internal state, not user data
+	}
 	return n.db.Load().MetaGet(key)
 }
 
@@ -348,9 +351,12 @@ func (n *Node) MetaList(prefix string) ([]MetaKV, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]MetaKV, len(kvs))
-	for i, kv := range kvs {
-		out[i] = MetaKV(kv)
+	out := make([]MetaKV, 0, len(kvs))
+	for _, kv := range kvs {
+		if kv.Key == metaFormatKey {
+			continue // reserved: internal state, not user data
+		}
+		out = append(out, MetaKV(kv))
 	}
 	return out, nil
 }

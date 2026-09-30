@@ -173,6 +173,13 @@ func TestMetaKeyValidation(t *testing.T) {
 	}}); err == nil {
 		t.Fatal("Txn with a duplicate meta key succeeded")
 	}
+	// The reserved key is internal state: reads do not return it.
+	if _, ok, err := n.MetaGet(metaFormatKey); err != nil || ok {
+		t.Fatalf("MetaGet of the reserved format key = ok %v, err %v; want absent", ok, err)
+	}
+	if kvs, err := n.MetaList(""); err != nil || len(kvs) != 0 {
+		t.Fatalf("MetaList(\"\") = %+v, %v; want nothing", kvs, err)
+	}
 	// The same name in the data and meta keyspaces is not a duplicate.
 	if _, err := n.Txn(ctx, TxnRequest{Success: []TxnOp{
 		{Type: TxnPut, Key: "k", Value: []byte("data")},
@@ -411,7 +418,7 @@ func TestMetaOnFollower(t *testing.T) {
 	for _, kv := range list {
 		keys = append(keys, kv.Key)
 	}
-	if strings.Join(keys, ",") != metaFormatKey+",t" {
+	if strings.Join(keys, ",") != "t" {
 		t.Fatalf("follower LinearizableMetaList keys = %q", keys)
 	}
 	if got := leader.CurrentRevision(); got != rev {
