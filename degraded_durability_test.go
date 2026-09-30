@@ -2,6 +2,10 @@ package t4
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,14 +171,27 @@ func TestLeaderWithoutFollowersUploadsDespiteOptOut(t *testing.T) {
 	}
 }
 
+// walRejectingStore fails every WAL segment upload.
+type walRejectingStore struct{ object.Store }
+
+var errWALUploadRejected = errors.New("wal upload rejected")
+
+func (s walRejectingStore) Put(ctx context.Context, key string, r io.Reader) error {
+	if strings.HasPrefix(key, "wal/") {
+		return errWALUploadRejected
+	}
+	return s.Store.Put(ctx, key, r)
+}
+
 // WALSyncUpload=false is the operator asserting local storage is durable. A
-// single node has no failover, so it keeps uploading asynchronously.
+// single node has no failover, so it keeps uploading asynchronously: writes
+// succeed while WAL uploads fail, which they could not if a write waited for
+// its upload.
 func TestSingleNodeRespectsSyncUploadOptOut(t *testing.T) {
-	store := object.NewMem()
 	off := false
 	n, err := Open(Config{
 		DataDir:       t.TempDir(),
-		ObjectStore:   store,
+		ObjectStore:   walRejectingStore{object.NewMem()},
 		WALSyncUpload: &off,
 		SegmentMaxAge: time.Hour,
 	})
@@ -185,12 +202,10 @@ func TestSingleNodeRespectsSyncUploadOptOut(t *testing.T) {
 		_ = n.Close()
 	}()
 
-	before := len(walObjects(t, store))
-	if _, err := n.Put(context.Background(), "/optout/key", []byte("v"), 0); err != nil {
-		t.Fatalf("put: %v", err)
-	}
-	if got := len(walObjects(t, store)); got != before {
-		t.Fatalf("single node with the opt-out uploaded synchronously (before=%d after=%d)", before, got)
+	for i := range 3 {
+		if _, err := n.Put(context.Background(), fmt.Sprintf("/optout/%d", i), []byte("v"), 0); err != nil {
+			t.Fatalf("put with WAL uploads failing: %v", err)
+		}
 	}
 }
 
