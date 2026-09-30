@@ -478,11 +478,12 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			}
 			continue
 		}
-		if err := s.applyEntry(b, &la, e); err != nil {
+		consumesRev, err := s.applyEntryRev(b, &la, e)
+		if err != nil {
 			_ = b.Close()
 			return err
 		}
-		if ring != nil {
+		if ring != nil && consumesRev {
 			cs, err := histChangesOf(e)
 			if err != nil {
 				_ = b.Close()
@@ -497,7 +498,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			}
 			curChanges = append(curChanges, cs...)
 		}
-		if e.ConsumesRevision() && e.Revision > maxRev {
+		if consumesRev && e.Revision > maxRev {
 			maxRev = e.Revision
 		}
 		if seq := e.Sequence(); seq > maxSeq {
@@ -696,17 +697,25 @@ func (s *Store) Recover(entries []wal.Entry) error {
 	return s.commitBatch(b, maxRev, maxSeq, tip, false, true, nil)
 }
 
+// applyEntry writes e into b.
 func (s *Store) applyEntry(b *pebble.Batch, la *leaseApply, e *wal.Entry) error {
+	_, err := s.applyEntryRev(b, la, e)
+	return err
+}
+
+// applyEntryRev writes e into b and reports whether e consumes a revision,
+// from the transaction payload it decodes anyway rather than a separate scan.
+func (s *Store) applyEntryRev(b *pebble.Batch, la *leaseApply, e *wal.Entry) (consumesRev bool, err error) {
 	switch e.Op {
 	case wal.OpTxn:
 		return s.applyTxnEntry(b, la, e)
 	case wal.OpMetaPut, wal.OpMetaDelete:
-		return applyMetaOp(b, e.Op, e.Key, e.Value)
+		return false, applyMetaOp(b, e.Op, e.Key, e.Value)
 	case wal.OpCreate, wal.OpUpdate, wal.OpDelete:
 	default:
 		// Never guess: writing an unknown op as a data record would overwrite
 		// the log entry at e.Revision and corrupt history.
-		return fmt.Errorf("store: apply seq=%d rev=%d: %w: op=%d", e.Sequence(), e.Revision, wal.ErrUnknownOp, e.Op)
+		return false, fmt.Errorf("store: apply seq=%d rev=%d: %w: op=%d", e.Sequence(), e.Revision, wal.ErrUnknownOp, e.Op)
 	}
 	lk := logKey(e.Revision)
 
@@ -721,39 +730,40 @@ func (s *Store) applyEntry(b *pebble.Batch, la *leaseApply, e *wal.Entry) error 
 		delete:         e.Op == wal.OpDelete,
 	}
 	if err := b.Set(lk, marshalRecord(r), pebble.NoSync); err != nil {
-		return fmt.Errorf("store: set log key rev=%d: %w", e.Revision, err)
+		return false, fmt.Errorf("store: set log key rev=%d: %w", e.Revision, err)
 	}
 	if err := la.attach(b, e.Key, liveLease(r)); err != nil {
-		return err
+		return false, err
 	}
 	ik := idxKey(e.Key)
 	if e.Op == wal.OpDelete {
 		if err := b.Delete(ik, pebble.NoSync); err != nil {
-			return fmt.Errorf("store: delete idx key %q: %w", e.Key, err)
+			return false, fmt.Errorf("store: delete idx key %q: %w", e.Key, err)
 		}
 	} else {
 		if err := b.Set(ik, encodeIdx(e.Revision, r.createRevision, r.version, idxSubNone), pebble.NoSync); err != nil {
-			return fmt.Errorf("store: set idx key %q rev=%d: %w", e.Key, e.Revision, err)
+			return false, fmt.Errorf("store: set idx key %q rev=%d: %w", e.Key, e.Revision, err)
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // applyTxnEntry decodes and atomically applies all sub-operations from an
 // OpTxn WAL entry. Each sub-op is stored at logKeyWithSub(rev, i) so that
 // the log scan in Watch returns one event per key at the transaction revision.
-func (s *Store) applyTxnEntry(b *pebble.Batch, la *leaseApply, e *wal.Entry) error {
+func (s *Store) applyTxnEntry(b *pebble.Batch, la *leaseApply, e *wal.Entry) (consumesRev bool, err error) {
 	ops, err := wal.DecodeTxnOps(e.Value)
 	if err != nil {
-		return fmt.Errorf("store: decode txn ops rev=%d: %w", e.Revision, err)
+		return false, fmt.Errorf("store: decode txn ops rev=%d: %w", e.Revision, err)
 	}
 	for i, op := range ops {
 		if op.Op.IsMeta() {
 			if err := applyMetaOp(b, op.Op, op.Key, op.Value); err != nil {
-				return err
+				return false, err
 			}
 			continue
 		}
+		consumesRev = true
 		// Data sub-ops keep their position in the txn as the sub index, so
 		// indexes may have gaps where meta sub-ops were; readers scan the
 		// whole [logKey(rev), logKey(rev+1)) range and do not rely on them
@@ -770,23 +780,23 @@ func (s *Store) applyTxnEntry(b *pebble.Batch, la *leaseApply, e *wal.Entry) err
 			delete:         op.Op == wal.OpDelete,
 		}
 		if err := b.Set(lk, marshalRecord(r), pebble.NoSync); err != nil {
-			return fmt.Errorf("store: set txn log key rev=%d sub=%d: %w", e.Revision, i, err)
+			return false, fmt.Errorf("store: set txn log key rev=%d sub=%d: %w", e.Revision, i, err)
 		}
 		if err := la.attach(b, op.Key, liveLease(r)); err != nil {
-			return err
+			return false, err
 		}
 		ik := idxKey(op.Key)
 		if op.Op == wal.OpDelete {
 			if err := b.Delete(ik, pebble.NoSync); err != nil {
-				return fmt.Errorf("store: delete txn idx key %q: %w", op.Key, err)
+				return false, fmt.Errorf("store: delete txn idx key %q: %w", op.Key, err)
 			}
 		} else {
 			if err := b.Set(ik, encodeIdx(e.Revision, r.createRevision, r.version, uint16(i)), pebble.NoSync); err != nil {
-				return fmt.Errorf("store: set txn idx key %q rev=%d: %w", op.Key, e.Revision, err)
+				return false, fmt.Errorf("store: set txn idx key %q rev=%d: %w", op.Key, e.Revision, err)
 			}
 		}
 	}
-	return nil
+	return consumesRev, nil
 }
 
 // applyMetaOp writes one meta keyspace operation into b.

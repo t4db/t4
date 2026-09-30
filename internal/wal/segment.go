@@ -117,6 +117,9 @@ func (sw *SegmentWriter) writeHeader() error {
 // newer format than the segment currently declares. The header write is made
 // durable by the fsync that follows the entry append.
 func (sw *SegmentWriter) ensureFormat(e *Entry) error {
+	if sw.version >= WALFormatVersion {
+		return nil // already the newest format: nothing can raise it
+	}
 	v := RequiredFormat(e)
 	if v <= sw.version {
 		return nil

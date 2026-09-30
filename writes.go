@@ -572,6 +572,9 @@ type txnStats struct {
 	creates int
 	updates int
 	deletes int
+	// metaOps counts meta sub-ops. kind() ignores them: it labels the data
+	// write a transaction makes.
+	metaOps int
 }
 
 func (s txnStats) kind() string {
@@ -719,7 +722,8 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 // meta keyspace is enabled and writes to the reserved format key.
 func (n *Node) prepareTxn(req TxnRequest, internal bool) (wal.Entry, bool, map[string]struct{}, txnObserved, txnStats, uint64, error) {
 	e, succeeded, deletedKeys, observed, stats, err := n.prepareTxnEntry(req, internal)
-	if err != nil || e.Op == 0 {
+	if err != nil || e.Op == 0 || stats.metaOps == 0 {
+		// Most transactions hold only data ops: nothing to track.
 		return e, succeeded, deletedKeys, observed, stats, 0, err
 	}
 	token, err := n.trackPendingMetaLocked(&e)
@@ -919,6 +923,7 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, 
 			CreateRevision: cr, PrevRevision: r.prevRevision, Version: r.version,
 		}
 		if r.walOp.IsMeta() {
+			stats.metaOps++
 			continue
 		}
 		if r.walOp == wal.OpDelete {
