@@ -396,8 +396,11 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 			return nil, err
 		}
 		// Every acknowledged write has been applied before its caller is
-		// released, so the applied sequence covers all of them. Meta writes
-		// have no optimistic pending state, unlike ForwardGetRevision.
+		// released, so the applied sequence covers all of them; writes still
+		// pending (pendingMeta) are not acknowledged yet and need not be
+		// seen. A bare sequence suffices: followers apply only committed
+		// entries, which every later leader holds, so a follower's applied
+		// sequence never covers entries the leader lacks.
 		return &peer.ForwardResponse{Revision: n.db.Load().LastSequence(), Succeeded: true}, nil
 
 	case peer.ForwardTxn:
