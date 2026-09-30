@@ -1420,6 +1420,12 @@ func (n *Node) Config() Config         { return n.cfg }
 func (n *Node) IsLeader() bool         { return n.loadRole() != roleFollower }
 
 func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
+	return n.waitForStore(ctx, func(db *istore.Store) error { return db.WaitForRevision(ctx, rev) })
+}
+
+// waitForStore runs wait on the current store as an in-flight read, which
+// Close drains, and maps the store closing to ErrClosed.
+func (n *Node) waitForStore(ctx context.Context, wait func(*istore.Store) error) error {
 	if n.closed.Load() {
 		return ErrClosed
 	}
@@ -1428,7 +1434,7 @@ func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
 	if n.closed.Load() {
 		return ErrClosed
 	}
-	if err := n.db.Load().WaitForRevision(ctx, rev); err != nil {
+	if err := wait(n.db.Load()); err != nil {
 		if errors.Is(err, istore.ErrClosed) {
 			return ErrClosed
 		}
