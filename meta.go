@@ -191,10 +191,19 @@ func (n *Node) requireMetaLocked() error {
 // metaExistsLocked reports whether key exists in the meta keyspace, including
 // in-flight writes not yet applied. Must be called under n.mu on the leader.
 func (n *Node) metaExistsLocked(key string) (bool, error) {
+	exists, _, err := n.metaExistsObservedLocked(key)
+	return exists, err
+}
+
+// metaExistsObservedLocked is metaExistsLocked that also returns the token of
+// the in-flight write it answered from, or 0 if it answered from committed
+// state. An answer from an in-flight write holds only if that write commits.
+func (n *Node) metaExistsObservedLocked(key string) (exists bool, token uint64, err error) {
 	if p, ok := n.pendingMeta[key]; ok {
-		return !p.deleted, nil
+		return !p.deleted, p.token, nil
 	}
-	return n.db.Load().MetaHas(key)
+	exists, err = n.db.Load().MetaHas(key)
+	return exists, 0, err
 }
 
 // trackPendingMetaLocked records e's meta ops in pendingMeta under a fresh

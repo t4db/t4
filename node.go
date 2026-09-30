@@ -226,6 +226,11 @@ type Node struct {
 	// them for that write's outcome (see awaitObservedWrites).
 	batchDone      chan struct{}
 	abortedBatches uint64
+	// resolvedMetaToken is the highest meta write token whose batch has
+	// committed or failed. Tokens are issued in the order writes are queued
+	// and batches resolve in that order, so every token up to it is resolved.
+	// Guarded by mu.
+	resolvedMetaToken uint64
 	// pendingMeta holds in-flight meta keyspace writes; metaTokenSeq issues
 	// their tokens. Protected by mu.
 	pendingMeta  map[string]pendingMeta
