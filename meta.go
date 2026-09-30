@@ -396,19 +396,5 @@ func (n *Node) syncMetaWithLeader(ctx context.Context) error {
 }
 
 func (n *Node) waitForSequence(ctx context.Context, seq int64) error {
-	if n.closed.Load() {
-		return ErrClosed
-	}
-	n.readMu.RLock()
-	defer n.readMu.RUnlock()
-	if n.closed.Load() {
-		return ErrClosed
-	}
-	if err := n.db.Load().WaitForSequence(ctx, seq); err != nil {
-		if errors.Is(err, istore.ErrClosed) {
-			return ErrClosed
-		}
-		return err
-	}
-	return nil
+	return n.waitForStore(ctx, func(db *istore.Store) error { return db.WaitForSequence(ctx, seq) })
 }

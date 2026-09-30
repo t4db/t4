@@ -771,41 +771,30 @@ func (s *Store) waitChan() <-chan struct{} {
 // WaitForRevision blocks until currentRev >= rev, ctx is cancelled, or the
 // store is closed.
 func (s *Store) WaitForRevision(ctx context.Context, rev int64) error {
-	for {
-		select {
-		case <-s.closed:
-			return ErrClosed
-		default:
-		}
-		// Snapshot the notify channel before re-checking currentRev. If a
-		// broadcast races between the load and the select, ch is already
-		// closed and the select returns immediately — no lost wakeup.
-		ch := s.waitChan()
-		if atomic.LoadInt64(&s.currentRev) >= rev {
-			return nil
-		}
-		select {
-		case <-ch:
-		case <-s.closed:
-			return ErrClosed
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
+	return s.waitFor(ctx, func() bool { return atomic.LoadInt64(&s.currentRev) >= rev })
 }
 
 // WaitForSequence blocks until the last applied WAL sequence is >= seq, ctx
 // is cancelled, or the store is closed. Meta ops advance the sequence but not
 // the revision, so reads of the meta keyspace sync on sequence.
 func (s *Store) WaitForSequence(ctx context.Context, seq int64) error {
+	return s.waitFor(ctx, func() bool { return atomic.LoadInt64(&s.lastSeq) >= seq })
+}
+
+// waitFor blocks until done reports true, ctx is cancelled, or the store is
+// closed. done is re-checked after every broadcast.
+func (s *Store) waitFor(ctx context.Context, done func() bool) error {
 	for {
 		select {
 		case <-s.closed:
 			return ErrClosed
 		default:
 		}
+		// Snapshot the notify channel before re-checking the condition. If a
+		// broadcast races between the check and the select, ch is already
+		// closed and the select returns immediately — no lost wakeup.
 		ch := s.waitChan()
-		if atomic.LoadInt64(&s.lastSeq) >= seq {
+		if done() {
 			return nil
 		}
 		select {
