@@ -13,11 +13,16 @@ import (
 // panic through the nil embedded interface, so an unexpected call fails.
 type recorder struct {
 	Node
-	meta  bool
-	calls []string
+	meta bool
+	// unsynced makes the local answer "not meta" until the node has
+	// synced with its leader, as for a node that has applied no entry.
+	unsynced bool
+	calls    []string
 }
 
-func (r *recorder) MetaEnabled() (bool, error) { return r.meta, nil }
+func (r *recorder) MetaEnabled() (bool, error) { return r.meta && !r.unsynced, nil }
+
+func (r *recorder) MetaEnabledSync(context.Context) (bool, error) { return r.meta, nil }
 
 func (r *recorder) Put(_ context.Context, key string, _ []byte, _ int64) (int64, error) {
 	r.calls = append(r.calls, "Put "+key)
@@ -96,5 +101,28 @@ func TestMetaModeUsesMetaOps(t *testing.T) {
 	}
 	if strings.Join(r.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(r.calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A node that has applied no entry yet cannot tell a meta database from a
+// legacy one locally. Writes must use the mode the leader's database has, or a
+// follower that just started forwards lease and auth state as data keys into
+// a meta database, where reads never find it.
+func TestWritesUseTheLeadersMode(t *testing.T) {
+	r := &recorder{meta: true, unsynced: true}
+	ctx := context.Background()
+	if err := Put(ctx, r, "k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(ctx, r, "k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete(ctx, r, "k"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range r.calls {
+		if !strings.HasPrefix(c, "Txn ") {
+			t.Fatalf("a write used the legacy mode on a meta database: %v", r.calls)
+		}
 	}
 }

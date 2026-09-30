@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/t4db/t4/internal/peer"
@@ -55,10 +56,76 @@ func (n *Node) MetaDelete(ctx context.Context, key string) error {
 
 // MetaEnabled reports whether this database accepts meta keyspace writes.
 func (n *Node) MetaEnabled() (bool, error) {
-	if n.closed.Load() {
-		return false, ErrClosed
+	on, _, err := n.metaMode()
+	return on, err
+}
+
+// MetaEnabledSync is MetaEnabled for a node about to write, or to read with
+// linearizability. A node that has applied no entry cannot tell the mode
+// locally, since the format marker is a meta database's first entry: a
+// follower then catches up with its leader first. Otherwise it would take the
+// database for a legacy one and forward lease and auth state as data keys.
+func (n *Node) MetaEnabledSync(ctx context.Context) (bool, error) {
+	on, known, err := n.metaMode()
+	if err != nil || known {
+		return on, err
 	}
-	return n.db.Load().MetaHas(metaFormatKey)
+	if err := n.syncMetaWithLeader(ctx); err != nil {
+		if isUnknownForwardOp(err) {
+			// The leader predates the meta keyspace (a rolling upgrade
+			// from v1.1), and such a leader only runs legacy databases.
+			n.metaModeCache.Store(metaModeOff)
+			return false, nil
+		}
+		return false, err
+	}
+	on, _, err = n.metaMode()
+	return on, err
+}
+
+// isUnknownForwardOp reports whether err is a leader rejecting a forward op it
+// does not know, as leaders before the meta keyspace reject its ops.
+func isUnknownForwardOp(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unknown forward op")
+}
+
+// Values of Node.metaModeCache.
+const (
+	metaModeUnknown int32 = iota
+	metaModeOn
+	metaModeOff
+)
+
+// metaMode reports whether the meta keyspace is enabled, and whether that is
+// known. The format marker is a meta database's first entry and the mode never
+// changes, so a node that has applied any entry knows it for good; one that
+// has applied none does not, and answers off.
+func (n *Node) metaMode() (on, known bool, err error) {
+	if n.closed.Load() {
+		return false, false, ErrClosed
+	}
+	switch n.metaModeCache.Load() {
+	case metaModeOn:
+		return true, true, nil
+	case metaModeOff:
+		return false, true, nil
+	}
+	db := n.db.Load()
+	// Sequence first: if an entry was applied by then, the marker check below
+	// sees the first entry.
+	seq := db.LastSequence()
+	on, err = db.MetaHas(metaFormatKey)
+	switch {
+	case err != nil:
+		return false, false, err
+	case on:
+		n.metaModeCache.Store(metaModeOn)
+		return true, true, nil
+	case seq > 0:
+		n.metaModeCache.Store(metaModeOff)
+		return false, true, nil
+	}
+	return false, false, nil
 }
 
 // initMetaAtGenesis enables the meta keyspace in a database that has no WAL

@@ -18,6 +18,9 @@ import (
 	"github.com/t4db/t4/internal/peer"
 	"github.com/t4db/t4/internal/testhook"
 	"github.com/t4db/t4/pkg/object"
+
+	istore "github.com/t4db/t4/internal/store"
+	"github.com/t4db/t4/internal/wal"
 )
 
 // openMetaNode opens a single node. Checkpoints are left to the test (see
@@ -560,4 +563,39 @@ func TestOldFollowersRefusedByNewDatabases(t *testing.T) {
 			t.Fatalf("old follower of a legacy database: want an open stream, got %v", err)
 		}
 	})
+}
+
+// The meta mode is known once a node has applied any entry: the format marker
+// is a meta database's first entry. Before that it is unknown, and reported
+// off, so writers must ask the leader (MetaEnabledSync).
+func TestMetaModeKnownOnceAnEntryIsApplied(t *testing.T) {
+	mode := func(entries ...wal.Entry) (on, known bool) {
+		t.Helper()
+		db, err := istore.OpenMem()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		if err := db.Apply(entries); err != nil {
+			t.Fatal(err)
+		}
+		n := &Node{}
+		n.db.Store(db)
+		on, known, err = n.metaMode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return on, known
+	}
+	if on, known := mode(); on || known {
+		t.Fatalf("no entry applied: on=%v known=%v, want unknown", on, known)
+	}
+	marker := wal.Entry{ID: 1, Term: 1, Op: wal.OpMetaPut, Key: metaFormatKey, Value: []byte("3")}
+	if on, known := mode(marker); !on || !known {
+		t.Fatalf("marker applied: on=%v known=%v, want known on", on, known)
+	}
+	data := wal.Entry{ID: 1, Revision: 1, Term: 1, Op: wal.OpCreate, Key: "/k", Value: []byte("v")}
+	if on, known := mode(data); on || !known {
+		t.Fatalf("a first entry that is not the marker: on=%v known=%v, want known off", on, known)
+	}
 }
