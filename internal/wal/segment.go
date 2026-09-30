@@ -168,18 +168,39 @@ func (sw *SegmentWriter) Sync() error {
 	return sw.f.Sync()
 }
 
-func (sw *SegmentWriter) rollback(size int64, entryCount int) error {
-	if err := sw.f.Truncate(size); err != nil {
+// segMark is a point in a segment that rollback returns it to.
+type segMark struct {
+	size       int64
+	entryCount int
+	version    int
+}
+
+// mark returns the segment's current end, for a later rollback.
+func (sw *SegmentWriter) mark() segMark {
+	return segMark{size: sw.size, entryCount: sw.entryCount, version: sw.version}
+}
+
+// rollback truncates the segment back to m, including a header format the
+// truncated entries raised, so the segment does not claim a format none of
+// its remaining entries need.
+func (sw *SegmentWriter) rollback(m segMark) error {
+	if sw.version != m.version {
+		if _, err := sw.f.WriteAt([]byte(segMagic(m.version)), 0); err != nil {
+			return fmt.Errorf("wal: restore segment format rollback: %w", err)
+		}
+	}
+	if err := sw.f.Truncate(m.size); err != nil {
 		return fmt.Errorf("wal: truncate segment rollback: %w", err)
 	}
-	if _, err := sw.f.Seek(size, io.SeekStart); err != nil {
+	if _, err := sw.f.Seek(m.size, io.SeekStart); err != nil {
 		return fmt.Errorf("wal: seek segment rollback: %w", err)
 	}
 	if err := sw.f.Sync(); err != nil {
 		return fmt.Errorf("wal: fsync segment rollback: %w", err)
 	}
-	sw.size = size
-	sw.entryCount = entryCount
+	sw.size = m.size
+	sw.entryCount = m.entryCount
+	sw.version = m.version
 	return nil
 }
 
