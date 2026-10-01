@@ -281,7 +281,11 @@ func (s *landingStore) Put(ctx context.Context, key string, r io.Reader) error {
 	}
 	if key == checkpoint.ManifestKey || strings.HasPrefix(key, "checkpoint/") {
 		s.once.Do(func() { close(s.firstPut) })
-		time.Sleep(s.delay) // already on the wire: not cancellable
+		// Already on the wire: a cancelled PUT still lands.
+		select {
+		case <-time.After(s.delay):
+		case <-ctx.Done():
+		}
 	}
 	if err := s.Mem.Put(context.Background(), key, bytes.NewReader(b)); err != nil {
 		return err
@@ -372,5 +376,70 @@ func TestGracefulShutdownStopsCheckpointUpload(t *testing.T) {
 		if k == checkpoint.ManifestKey || strings.HasPrefix(k, "checkpoint/") {
 			t.Fatalf("checkpoint PUT %q landed after the election lock was released; landed: %v", k, landed)
 		}
+	}
+}
+
+// TestGracefulShutdownSkipsHandoffOnStalledCheckpoint pins that a checkpoint
+// upload stuck on a stalled object store does not hang graceful shutdown.
+// Shutdown gives up after checkpointShutdownWait and, with the upload still
+// running, must not hand off: the lock is left held (not relinquished), so
+// followers wait for its lease to expire instead of taking over at once.
+func TestGracefulShutdownSkipsHandoffOnStalledCheckpoint(t *testing.T) {
+	store := &landingStore{
+		Mem:      object.NewMem(),
+		delay:    time.Hour, // stalled
+		firstPut: make(chan struct{}),
+	}
+	walSyncUpload := false
+	addr := freeAddrLocal(t)
+	n, err := Open(Config{
+		NodeID:             "n1",
+		DataDir:            filepath.Join(t.TempDir(), "db"),
+		ObjectStore:        store,
+		PeerListenAddr:     addr,
+		AdvertisePeerAddr:  addr,
+		WALSyncUpload:      &walSyncUpload,
+		CheckpointInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !n.IsLeader() {
+		t.Fatal("node did not become leader")
+	}
+	n.checkpointShutdownWait = 200 * time.Millisecond
+
+	if _, err := n.Put(context.Background(), "k", []byte("v"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	go n.maybeCheckpoint(n.bgCtx)
+	select {
+	case <-store.firstPut:
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkpoint did not start uploading within 5s")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- n.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close hung on a stalled checkpoint upload")
+	}
+
+	rc, err := store.Get(context.Background(), election.LockKey)
+	if err != nil {
+		t.Fatalf("read lock: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	var rec election.LockRecord
+	if err := json.NewDecoder(rc).Decode(&rec); err != nil {
+		t.Fatalf("decode lock: %v", err)
+	}
+	if rec.LastSeenNano == 0 {
+		t.Fatal("lock was relinquished although a checkpoint upload was still running")
 	}
 }

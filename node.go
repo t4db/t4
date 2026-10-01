@@ -248,6 +248,7 @@ type Node struct {
 	entriesSinceCheckpoint int64
 	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
 	checkpointMu           sync.Mutex          // serializes checkpoints and checkpoint GC; taken before fenceMu
+	checkpointShutdownWait time.Duration       // how long graceful shutdown waits for an in-flight checkpoint
 	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
 	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample
 	tracer                 trace.Tracer
@@ -715,6 +716,7 @@ func Open(cfg Config) (*Node, error) {
 	if cfg.CheckpointEntries > 0 {
 		n.checkpointTriggerC = make(chan struct{}, 1)
 	}
+	n.checkpointShutdownWait = checkpointShutdownWait
 
 	if starter, ok := w.(interface{ Start(context.Context) }); ok {
 		starter.Start(bgCtx)
@@ -830,8 +832,16 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 	//    over and checkpointed term N+1, moving the manifest back to an older
 	//    term-N checkpoint. Waiting rather than cancelling: a cancelled PUT
 	//    may still land. n.closed is already set, so no new checkpoint starts.
-	n.checkpointMu.Lock()
-	defer n.checkpointMu.Unlock()
+	//
+	//    The wait is bounded so a stalled object store cannot hang shutdown.
+	//    On timeout there is no handoff (steps 3 and 4): the upload is still
+	//    running, so followers must not be told to take over. They take over
+	//    once the lock's lease expires, as after a crash, and Close cancels
+	//    the upload right after we return.
+	handoff := n.checkpointIdle(n.checkpointShutdownWait)
+	if !handoff {
+		n.log.Warnf("t4: graceful shutdown: checkpoint still uploading after %v; skipping leader handoff", n.checkpointShutdownWait)
+	}
 
 	// 1. Fence in-flight writes. Put holds fenceMu.RLock for its entire
 	//    duration (writes.go), so this Lock waits until commitLoop has
@@ -847,6 +857,10 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 	//    fresh 2-minute context so a cancelled bgCtx cannot cut it short.
 	if werr := n.wal.Close(); werr != nil {
 		n.log.Errorf("t4: graceful shutdown: wal close: %v", werr)
+	}
+
+	if !handoff {
+		return
 	}
 
 	// 3. Release the election lock, recording our true CurrentRevision so
@@ -875,6 +889,26 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 	//    msg and returns, then the follower runs attemptPromotion.
 	if peerSrv != nil {
 		peerSrv.BroadcastShutdown()
+	}
+}
+
+// checkpointIdle waits up to d for an in-flight checkpoint to finish and
+// reports whether it did. Only called once n.closed is set, so no new
+// checkpoint can start meanwhile.
+func (n *Node) checkpointIdle(d time.Duration) bool {
+	idle := make(chan struct{})
+	go func() {
+		n.checkpointMu.Lock()
+		n.checkpointMu.Unlock() //nolint:staticcheck // empty critical section: only waits for the holder
+		close(idle)
+	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-t.C:
+		return false
 	}
 }
 

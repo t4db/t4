@@ -740,6 +740,10 @@ func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Sto
 
 // ── Background checkpoint loop ────────────────────────────────────────────────
 
+// checkpointShutdownWait bounds how long graceful leader shutdown waits for an
+// in-flight checkpoint upload before giving up on a clean handoff.
+const checkpointShutdownWait = 30 * time.Second
+
 func (n *Node) checkpointLoop(ctx context.Context) {
 	// Write an immediate checkpoint before entering the ticker so that any
 	// entries recovered from local WAL segments (but not yet in S3) are
@@ -782,8 +786,8 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 //
 // The caller must hold checkpointMu. The fence no longer serializes
 // checkpoints, so checkpointMu does: pin order == upload order keeps
-// manifest/latest monotonic. Once the node is closed no checkpoint starts:
-// gracefulLeaderShutdown takes checkpointMu after setting n.closed.
+// manifest/latest monotonic. Once the node is closed no checkpoint starts, so
+// gracefulLeaderShutdown only has to wait out the one in flight.
 func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 	if n.closed.Load() {
 		return 0, false
