@@ -844,7 +844,7 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 	// is exactly the number of entries the pinned copy covers.
 	covered := atomic.LoadInt64(&n.entriesSinceCheckpoint)
 	n.fenceMu.Unlock()
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
