@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -65,23 +67,30 @@ func TestCheckpointUploadDoesNotBlockWrites(t *testing.T) {
 	// would make every write pay an object-store PUT and swamp the signal).
 	walSyncUpload := false
 	n, err := Open(Config{
-		DataDir:       filepath.Join(t.TempDir(), "db"),
-		ObjectStore:   store,
-		WALSyncUpload: &walSyncUpload,
+		DataDir:            filepath.Join(t.TempDir(), "db"),
+		ObjectStore:        store,
+		WALSyncUpload:      &walSyncUpload,
+		CheckpointInterval: time.Hour, // keep the ticker out of the way
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer func() { _ = n.Close() }()
 
+	// checkpointLoop handles requests only after its startup checkpoint, so
+	// this no-op request (nothing written yet) waits that checkpoint out. It
+	// must not run after Put k1 and upload alongside the checkpoint below.
+	n.requestCheckpoint(n.bgCtx, false)
+
 	ctx := context.Background()
 	if _, err := n.Put(ctx, "k1", []byte("v1"), 0); err != nil {
 		t.Fatalf("Put k1: %v", err)
 	}
 
+	// Go through checkpointLoop, the only checkpoint writer.
 	cpDone := make(chan struct{})
 	go func() {
-		n.maybeCheckpoint(ctx)
+		n.requestCheckpoint(n.bgCtx, false)
 		close(cpDone)
 	}()
 
@@ -251,5 +260,123 @@ func TestFailedCheckpointIsRetried(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&n.entriesSinceCheckpoint); got != 0 {
 		t.Errorf("entriesSinceCheckpoint=%d after successful checkpoint, want 0", got)
+	}
+}
+
+// landingStore models a slow object store whose in-flight PUTs land even if
+// the caller gives up on them, and records the order in which PUTs land.
+// Checkpoint PUTs are slow; everything else is immediate.
+type landingStore struct {
+	*object.Mem
+	delay    time.Duration
+	firstPut chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	landed   []string
+}
+
+func (s *landingStore) Put(ctx context.Context, key string, r io.Reader) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	if key == checkpoint.ManifestKey || strings.HasPrefix(key, "checkpoint/") {
+		s.once.Do(func() { close(s.firstPut) })
+		time.Sleep(s.delay) // already on the wire: not cancellable
+	}
+	if err := s.Mem.Put(context.Background(), key, bytes.NewReader(b)); err != nil {
+		return err
+	}
+	s.land(key)
+	return nil
+}
+
+// The election lock is written with conditional PUTs; record those too.
+func (s *landingStore) PutIfAbsent(ctx context.Context, key string, r io.Reader) error {
+	if err := s.Mem.PutIfAbsent(ctx, key, r); err != nil {
+		return err
+	}
+	s.land(key)
+	return nil
+}
+
+func (s *landingStore) PutIfMatch(ctx context.Context, key string, r io.Reader, matchETag string) error {
+	if err := s.Mem.PutIfMatch(ctx, key, r, matchETag); err != nil {
+		return err
+	}
+	s.land(key)
+	return nil
+}
+
+func (s *landingStore) land(key string) {
+	s.mu.Lock()
+	s.landed = append(s.landed, key)
+	s.mu.Unlock()
+}
+
+// TestGracefulShutdownStopsCheckpointUpload pins that a graceful leader
+// shutdown does not leave a checkpoint upload running past the election lock
+// release. The write fence no longer covers the upload, so without an explicit
+// stop a late manifest/latest write could land after a follower took over and
+// checkpointed the next term, moving the manifest back to an older checkpoint.
+func TestGracefulShutdownStopsCheckpointUpload(t *testing.T) {
+	store := &landingStore{
+		Mem:      object.NewMem(),
+		delay:    300 * time.Millisecond,
+		firstPut: make(chan struct{}),
+	}
+	walSyncUpload := false
+	addr := freeAddrLocal(t)
+	n, err := Open(Config{
+		NodeID:             "n1",
+		DataDir:            filepath.Join(t.TempDir(), "db"),
+		ObjectStore:        store,
+		PeerListenAddr:     addr,
+		AdvertisePeerAddr:  addr,
+		WALSyncUpload:      &walSyncUpload,
+		CheckpointInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !n.IsLeader() {
+		t.Fatal("node did not become leader")
+	}
+	n.requestCheckpoint(n.bgCtx, false) // wait out the startup checkpoint
+
+	if _, err := n.Put(context.Background(), "k", []byte("v"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	go n.requestCheckpoint(n.bgCtx, false)
+	select {
+	case <-store.firstPut:
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkpoint did not start uploading within 5s")
+	}
+	if err := n.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	time.Sleep(2 * store.delay) // let any leaked upload land
+
+	store.mu.Lock()
+	landed := append([]string(nil), store.landed...)
+	store.mu.Unlock()
+	// The last lock write is Relinquish in gracefulLeaderShutdown.
+	lockAt := -1
+	for i, k := range landed {
+		if k == election.LockKey {
+			lockAt = i
+		}
+	}
+	if lockAt < 0 {
+		t.Fatalf("election lock never released; landed: %v", landed)
+	}
+	for _, k := range landed[lockAt+1:] {
+		if k == checkpoint.ManifestKey || strings.HasPrefix(k, "checkpoint/") {
+			t.Fatalf("checkpoint PUT %q landed after the election lock was released; landed: %v", k, landed)
+		}
 	}
 }
