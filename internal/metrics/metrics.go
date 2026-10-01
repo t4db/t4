@@ -20,6 +20,17 @@ var (
 	// WriteDuration measures the latency of local write operations (WAL + apply).
 	WriteDuration *prometheus.HistogramVec
 
+	// ReadsTotal counts completed local read operations by op type
+	// (get/exists/list/count). A follower's linearizable-read sync happens
+	// before the local read and is not covered here.
+	ReadsTotal *prometheus.CounterVec
+
+	// ReadErrors counts read operations that returned an error.
+	ReadErrors *prometheus.CounterVec
+
+	// ReadDuration measures the latency of local read operations.
+	ReadDuration *prometheus.HistogramVec
+
 	// TxnRequestsTotal counts transactions by resolved write shape, compare
 	// outcome, and final result. This separates Kubernetes create/update/delete
 	// traffic that otherwise all appears as op="txn" in WritesTotal.
@@ -147,6 +158,22 @@ func Register(reg prometheus.Registerer) {
 		WriteDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "t4_write_duration_seconds",
 			Help:    "Write operation duration (local execution, excluding forwarding).",
+			Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .5},
+		}, []string{"op"})
+
+		ReadsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "t4_reads_total",
+			Help: "Total read operations (get/exists/list/count).",
+		}, []string{"op"})
+
+		ReadErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "t4_read_errors_total",
+			Help: "Total read errors by op type.",
+		}, []string{"op"})
+
+		ReadDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "t4_read_duration_seconds",
+			Help:    "Read operation duration (local execution, excluding follower sync).",
 			Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .5},
 		}, []string{"op"})
 
@@ -296,6 +323,9 @@ func Register(reg prometheus.Registerer) {
 			WritesTotal,
 			WriteErrors,
 			WriteDuration,
+			ReadsTotal,
+			ReadErrors,
+			ReadDuration,
 			TxnRequestsTotal,
 			TxnSubOpsTotal,
 			TxnLockWaitDuration,
