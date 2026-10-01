@@ -310,11 +310,9 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		// uploaded SSTs are referenced by a live checkpoint. Without this,
 		// the old leader's GCOrphanSSTs could delete the just-uploaded SSTs
 		// before the checkpointLoop gets a chance to write its startup
-		// checkpoint, which may have run before Reconcile finished. The request
-		// goes through checkpointLoop so it never overlaps another checkpoint;
-		// wait for it so promotion still returns with the checkpoint written.
+		// checkpoint, which may have run before Reconcile finished.
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
-			n.requestCheckpoint(bgCtx, true)
+			n.forceCheckpoint(bgCtx)
 		}
 		return nil, true
 	}

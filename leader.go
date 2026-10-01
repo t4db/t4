@@ -740,26 +740,13 @@ func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Sto
 
 // ── Background checkpoint loop ────────────────────────────────────────────────
 
-// checkpointReq asks checkpointLoop for a checkpoint. A zero value is the
-// entry-count trigger: checkpoint only if writes arrived since the last one.
-type checkpointReq struct {
-	force bool          // bypass the entriesSinceCheckpoint guard
-	done  chan struct{} // optional; closed once the request has been handled
-}
-
-// checkpointLoop is the only goroutine that writes checkpoints and runs
-// checkpoint GC. runCheckpoint releases the write fence before uploading, so
-// the fence no longer serializes checkpoints; running them all here keeps
-// manifest/latest monotonic (pin order == upload order) and keeps GC from
-// deleting SSTs an in-flight checkpoint is about to reference. Other callers
-// go through requestCheckpoint.
 func (n *Node) checkpointLoop(ctx context.Context) {
 	// Write an immediate checkpoint before entering the ticker so that any
 	// entries recovered from local WAL segments (but not yet in S3) are
 	// captured in the checkpoint. Without this, a crash after becoming leader
 	// but before the first periodic checkpoint could leave new followers unable
 	// to see those entries.
-	n.runCheckpoint(ctx)
+	n.forceCheckpoint(ctx)
 
 	ticker := time.NewTicker(n.cfg.CheckpointInterval)
 	defer ticker.Stop()
@@ -767,36 +754,20 @@ func (n *Node) checkpointLoop(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			n.maybeCheckpoint(ctx)
-		case req := <-n.checkpointReqC:
-			if req.force {
-				n.runCheckpoint(ctx)
-			} else {
-				n.maybeCheckpoint(ctx)
-			}
-			if req.done != nil {
-				close(req.done)
-			}
+		case <-n.checkpointTriggerC:
+			n.maybeCheckpoint(ctx)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-// requestCheckpoint asks checkpointLoop for a checkpoint and waits until it
-// has been handled or ctx is done. ctx must be the context checkpointLoop runs
-// under (or a child of it): the loop exits on cancellation without draining
-// queued requests. force bypasses the entriesSinceCheckpoint guard.
-func (n *Node) requestCheckpoint(ctx context.Context, force bool) {
-	done := make(chan struct{})
-	select {
-	case n.checkpointReqC <- checkpointReq{force: force, done: done}:
-	case <-ctx.Done():
-		return
-	}
-	select {
-	case <-done:
-	case <-ctx.Done():
-	}
+// forceCheckpoint writes a checkpoint unconditionally (bypassing the
+// entriesSinceCheckpoint guard). Used on startup to capture local state.
+func (n *Node) forceCheckpoint(ctx context.Context) {
+	n.checkpointMu.Lock()
+	defer n.checkpointMu.Unlock()
+	n.runCheckpoint(ctx)
 }
 
 // runCheckpoint pins the store content point-in-time under the write fence —
@@ -809,18 +780,14 @@ func (n *Node) requestCheckpoint(ctx context.Context, force bool) {
 // Returns the pinned WAL sequence and true only when a checkpoint was fully
 // written; the caller may then GC object-store state covered by that sequence.
 //
-// Holds checkpointMu throughout and aborts once checkpointCtx is cancelled, so
-// gracefulLeaderShutdown can stop an in-flight upload and wait for it.
+// The caller must hold checkpointMu. The fence no longer serializes
+// checkpoints, so checkpointMu does: pin order == upload order keeps
+// manifest/latest monotonic. Once the node is closed no checkpoint starts:
+// gracefulLeaderShutdown takes checkpointMu after setting n.closed.
 func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
-	n.checkpointMu.Lock()
-	defer n.checkpointMu.Unlock()
-	if n.checkpointCtx.Err() != nil {
+	if n.closed.Load() {
 		return 0, false
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer context.AfterFunc(n.checkpointCtx, cancel)()
-
 	n.fenceMu.Lock()
 	db := n.db.Load()
 	rev := db.CurrentRevision()
@@ -878,6 +845,10 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {
+	// Held through GC too, so GC cannot delete SSTs a concurrent checkpoint
+	// is about to reference.
+	n.checkpointMu.Lock()
+	defer n.checkpointMu.Unlock()
 	if atomic.LoadInt64(&n.entriesSinceCheckpoint) == 0 {
 		return
 	}

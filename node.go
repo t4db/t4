@@ -246,13 +246,8 @@ type Node struct {
 	lockObjectStoreComplete atomic.Bool
 
 	entriesSinceCheckpoint int64
-	checkpointReqC         chan checkpointReq // requests for checkpointLoop, the only goroutine that writes checkpoints
-	// checkpointMu is held by runCheckpoint for its whole run, upload included.
-	// Taken before fenceMu. gracefulLeaderShutdown cancels checkpointCtx and
-	// then takes it, so no upload can land after the election lock is released.
-	checkpointMu           sync.Mutex
-	checkpointCtx          context.Context
-	cancelCheckpoints      context.CancelFunc
+	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
+	checkpointMu           sync.Mutex          // serializes checkpoints and checkpoint GC; taken before fenceMu
 	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
 	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample
 	tracer                 trace.Tracer
@@ -717,8 +712,9 @@ func Open(cfg Config) (*Node, error) {
 		tp = noop.NewTracerProvider()
 	}
 	n.tracer = tp.Tracer("github.com/t4db/t4")
-	n.checkpointReqC = make(chan checkpointReq, 1)
-	n.checkpointCtx, n.cancelCheckpoints = context.WithCancel(bgCtx)
+	if cfg.CheckpointEntries > 0 {
+		n.checkpointTriggerC = make(chan struct{}, 1)
+	}
 
 	if starter, ok := w.(interface{ Start(context.Context) }); ok {
 		starter.Start(bgCtx)
@@ -828,13 +824,12 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 // Best-effort: errors are logged, not propagated. The leader is going down
 // regardless; the goal is to maximise durability before that happens.
 func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
-	// 0. Stop checkpoints. runCheckpoint uploads with the write fence
-	//    released, so the fence below does not wait for an in-flight upload.
-	//    Left running, it could write manifest/latest after a follower has
-	//    taken over and checkpointed term N+1, moving the manifest back to an
-	//    older term-N checkpoint. Cancel the upload and wait for it to return;
-	//    checkpointMu is taken before fenceMu, as in runCheckpoint.
-	n.cancelCheckpoints()
+	// 0. Wait out an in-flight checkpoint. The upload runs with the write
+	//    fence released, so the fence below does not wait for it. Left
+	//    running, it could write manifest/latest after a follower has taken
+	//    over and checkpointed term N+1, moving the manifest back to an older
+	//    term-N checkpoint. Waiting rather than cancelling: a cancelled PUT
+	//    may still land. n.closed is already set, so no new checkpoint starts.
 	n.checkpointMu.Lock()
 	defer n.checkpointMu.Unlock()
 

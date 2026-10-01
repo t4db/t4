@@ -77,20 +77,16 @@ func TestCheckpointUploadDoesNotBlockWrites(t *testing.T) {
 	}
 	defer func() { _ = n.Close() }()
 
-	// checkpointLoop handles requests only after its startup checkpoint, so
-	// this no-op request (nothing written yet) waits that checkpoint out. It
-	// must not run after Put k1 and upload alongside the checkpoint below.
-	n.requestCheckpoint(n.bgCtx, false)
-
 	ctx := context.Background()
 	if _, err := n.Put(ctx, "k1", []byte("v1"), 0); err != nil {
 		t.Fatalf("Put k1: %v", err)
 	}
 
-	// Go through checkpointLoop, the only checkpoint writer.
+	// Whichever of this and checkpointLoop's startup checkpoint sees k1 does
+	// the upload; checkpointMu keeps them from overlapping.
 	cpDone := make(chan struct{})
 	go func() {
-		n.requestCheckpoint(n.bgCtx, false)
+		n.maybeCheckpoint(ctx)
 		close(cpDone)
 	}()
 
@@ -197,7 +193,7 @@ func openCheckpointTestNode(t *testing.T, store object.Store) *Node {
 }
 
 // TestCheckpointRequestsKeepManifestMonotonic pins that checkpoints are
-// serialized through checkpointLoop now that the write fence no longer covers
+// serialized by checkpointMu now that the write fence no longer covers
 // the upload: concurrent forced checkpoints interleaved with writes must never
 // move manifest/latest backwards.
 func TestCheckpointRequestsKeepManifestMonotonic(t *testing.T) {
@@ -214,7 +210,7 @@ func TestCheckpointRequestsKeepManifestMonotonic(t *testing.T) {
 				t.Errorf("Put: %v", err)
 				return
 			}
-			n.requestCheckpoint(ctx, true)
+			n.forceCheckpoint(ctx)
 		}()
 	}
 	wg.Wait()
@@ -318,8 +314,8 @@ func (s *landingStore) land(key string) {
 }
 
 // TestGracefulShutdownStopsCheckpointUpload pins that a graceful leader
-// shutdown does not leave a checkpoint upload running past the election lock
-// release. The write fence no longer covers the upload, so without an explicit
+// shutdown waits out an in-flight checkpoint upload before releasing the
+// election lock. The write fence no longer covers the upload, so without an explicit
 // stop a late manifest/latest write could land after a follower took over and
 // checkpointed the next term, moving the manifest back to an older checkpoint.
 func TestGracefulShutdownStopsCheckpointUpload(t *testing.T) {
@@ -345,12 +341,10 @@ func TestGracefulShutdownStopsCheckpointUpload(t *testing.T) {
 	if !n.IsLeader() {
 		t.Fatal("node did not become leader")
 	}
-	n.requestCheckpoint(n.bgCtx, false) // wait out the startup checkpoint
-
 	if _, err := n.Put(context.Background(), "k", []byte("v"), 0); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	go n.requestCheckpoint(n.bgCtx, false)
+	go n.maybeCheckpoint(n.bgCtx)
 	select {
 	case <-store.firstPut:
 	case <-time.After(5 * time.Second):

@@ -926,9 +926,9 @@ func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.T
 	metrics.WriteDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
 	metrics.CurrentRevision.Set(float64(rev))
 	count := atomic.AddInt64(&n.entriesSinceCheckpoint, 1)
-	if n.cfg.CheckpointEntries > 0 && count >= n.cfg.CheckpointEntries {
+	if n.checkpointTriggerC != nil && count >= n.cfg.CheckpointEntries {
 		select {
-		case n.checkpointReqC <- checkpointReq{}:
+		case n.checkpointTriggerC <- struct{}{}:
 		default: // already a pending trigger; don't block
 		}
 	}
