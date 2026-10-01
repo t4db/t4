@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -764,78 +765,77 @@ func (n *Node) checkpointLoop(ctx context.Context) {
 // forceCheckpoint writes a checkpoint unconditionally (bypassing the
 // entriesSinceCheckpoint guard). Used on startup to capture local state.
 func (n *Node) forceCheckpoint(ctx context.Context) {
+	n.runCheckpoint(ctx)
+}
+
+// runCheckpoint pins the store content point-in-time under the write fence —
+// WAL seal + Pebble flush + Pebble checkpoint copy to a local temp dir — then
+// releases the fence and runs the entire object-store upload off that copy.
+// The fence window is limited to local I/O: writes admitted after the copy is
+// made only extend the WAL beyond the pinned sequence and cannot enter this
+// checkpoint, so their latency is unaffected by object-store round trips.
+//
+// Returns the pinned WAL sequence and true only when a checkpoint was fully
+// written; the caller may then GC object-store state covered by that sequence.
+func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 	n.fenceMu.Lock()
-	rev := n.db.Load().CurrentRevision()
+	db := n.db.Load()
+	rev := db.CurrentRevision()
 	if rev == 0 {
 		n.fenceMu.Unlock()
-		return
+		return 0, false
 	}
-	seq := n.db.Load().LastSequence()
+	seq := db.LastSequence()
 	if err := n.wal.SealAndFlush(seq + 1); err != nil {
 		n.fenceMu.Unlock()
-		n.log.Errorf("t4: startup checkpoint seal WAL: %v", err)
-		return
+		n.log.Errorf("t4: checkpoint seal WAL: %v", err)
+		return 0, false
 	}
-	if err := n.db.Load().Flush(); err != nil {
+	if err := db.Flush(); err != nil {
 		n.fenceMu.Unlock()
-		n.log.Errorf("t4: startup checkpoint flush pebble: %v", err)
-		return
+		n.log.Errorf("t4: checkpoint flush pebble: %v", err)
+		return 0, false
 	}
-	if n.sstUploader != nil {
-		n.sstUploader.Wait()
-		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
-			n.fenceMu.Unlock()
-			n.log.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
-			return
-		}
-	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
+	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
+	if err != nil {
 		n.fenceMu.Unlock()
-		n.log.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
-		return
+		n.log.Errorf("t4: checkpoint mktemp: %v", err)
+		return 0, false
+	}
+	cpDir := filepath.Join(tmpDir, "cp")
+	if err := db.Pebble().Checkpoint(cpDir); err != nil {
+		n.fenceMu.Unlock()
+		_ = os.RemoveAll(tmpDir)
+		n.log.Errorf("t4: checkpoint pebble copy: %v", err)
+		return 0, false
 	}
 	n.fenceMu.Unlock()
+	defer os.RemoveAll(tmpDir)
 	atomic.StoreInt64(&n.entriesSinceCheckpoint, 0)
+
+	if n.sstUploader != nil {
+		n.sstUploader.Wait()
+		if err := n.cp.WriteDirWithRegistry(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+			n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
+			return 0, false
+		}
+	} else if err := n.cp.WriteDir(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
+		n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
+		return 0, false
+	}
 	metrics.CheckpointsTotal.Inc()
-	n.log.Infof("t4: startup checkpoint written (rev=%d)", rev)
+	n.log.Infof("t4: checkpoint written (rev=%d)", rev)
+	return seq, true
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {
 	if atomic.LoadInt64(&n.entriesSinceCheckpoint) == 0 {
 		return
 	}
-	n.fenceMu.Lock()
-	rev := n.db.Load().CurrentRevision()
-	if rev == 0 {
-		n.fenceMu.Unlock()
+	seq, ok := n.runCheckpoint(ctx)
+	if !ok {
 		return
 	}
-	seq := n.db.Load().LastSequence()
-	if err := n.wal.SealAndFlush(seq + 1); err != nil {
-		n.fenceMu.Unlock()
-		n.log.Errorf("t4: checkpoint seal WAL: %v", err)
-		return
-	}
-	if err := n.db.Load().Flush(); err != nil {
-		n.fenceMu.Unlock()
-		n.log.Errorf("t4: checkpoint flush pebble: %v", err)
-		return
-	}
-	if n.sstUploader != nil {
-		n.sstUploader.Wait()
-		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
-			n.fenceMu.Unlock()
-			n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
-			return
-		}
-	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
-		n.fenceMu.Unlock()
-		n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
-		return
-	}
-	n.fenceMu.Unlock()
-	atomic.StoreInt64(&n.entriesSinceCheckpoint, 0)
-	metrics.CheckpointsTotal.Inc()
-	n.log.Infof("t4: checkpoint written (rev=%d)", rev)
 
 	// GC WAL segments from S3 that are fully covered by this checkpoint AND
 	// that all connected followers have applied. WAL segment boundaries and

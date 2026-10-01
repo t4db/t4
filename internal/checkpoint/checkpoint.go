@@ -203,7 +203,16 @@ func (mgr *Manager) WriteAtSequence(ctx context.Context, db *pebble.DB, store ob
 	if err := db.Checkpoint(cpDir); err != nil {
 		return fmt.Errorf("checkpoint: pebble checkpoint: %w", err)
 	}
+	return mgr.WriteDir(ctx, cpDir, store, term, revision, sequence, lastWALKey, ancestorStore)
+}
 
+// WriteDir is WriteAtSequence with the point-in-time copy already prepared:
+// it walks the given Pebble checkpoint directory, uploads missing SSTs and
+// meta files, and writes the index + manifest. Because the local copy pins the
+// checkpoint content, callers that hold a write fence (Node.maybeCheckpoint)
+// can release it before this function runs; writes admitted afterwards cannot
+// leak into the checkpoint.
+func (mgr *Manager) WriteDir(ctx context.Context, cpDir string, store object.Store, term uint64, revision, sequence int64, lastWALKey string, ancestorStore object.Store) error {
 	// Build known-SST sets from the previous checkpoint index (2 GETs) instead
 	// of issuing a LIST sst/ (which grows with bucket size). On a brand-new
 	// store there is no previous index, so both sets start empty and every SST
@@ -287,9 +296,15 @@ func (mgr *Manager) WriteWithRegistryAtSequence(ctx context.Context, db *pebble.
 	if err := db.Checkpoint(cpDir); err != nil {
 		return fmt.Errorf("checkpoint: pebble checkpoint: %w", err)
 	}
+	return mgr.WriteDirWithRegistry(ctx, cpDir, store, term, revision, sequence, lastWALKey, localRegistry, inheritedRegistry)
+}
 
+// WriteDirWithRegistry is WriteWithRegistryAtSequence with the point-in-time
+// copy already prepared; see WriteDir for when a caller would pass its own
+// checkpoint directory.
+func (mgr *Manager) WriteDirWithRegistry(ctx context.Context, cpDir string, store object.Store, term uint64, revision, sequence int64, lastWALKey string, localRegistry, inheritedRegistry map[string]string) error {
 	var sstFiles, ancestorSSTFiles, metaFiles []string
-	err = filepath.Walk(cpDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(cpDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
 		}
