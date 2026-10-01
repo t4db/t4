@@ -808,7 +808,19 @@ func (n *Node) requestCheckpoint(ctx context.Context, force bool) {
 //
 // Returns the pinned WAL sequence and true only when a checkpoint was fully
 // written; the caller may then GC object-store state covered by that sequence.
+//
+// Holds checkpointMu throughout and aborts once checkpointCtx is cancelled, so
+// gracefulLeaderShutdown can stop an in-flight upload and wait for it.
 func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
+	n.checkpointMu.Lock()
+	defer n.checkpointMu.Unlock()
+	if n.checkpointCtx.Err() != nil {
+		return 0, false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(n.checkpointCtx, cancel)()
+
 	n.fenceMu.Lock()
 	db := n.db.Load()
 	rev := db.CurrentRevision()
