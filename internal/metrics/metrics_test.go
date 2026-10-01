@@ -18,6 +18,9 @@ func TestRegisterSetsGatherer(t *testing.T) {
 	TxnRequestsTotal.WithLabelValues("delete", "success", "committed").Inc()
 	TxnSubOpsTotal.WithLabelValues("delete").Inc()
 	TxnPrepareDuration.WithLabelValues("delete").Observe(0.001)
+	ReadsTotal.WithLabelValues("get").Inc()
+	ReadErrors.WithLabelValues("get").Inc()
+	ReadDuration.WithLabelValues("get").Observe(0.0005)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -28,6 +31,9 @@ func TestRegisterSetsGatherer(t *testing.T) {
 		"t4_txn_suboperations_total":        false,
 		"t4_txn_lock_wait_duration_seconds": false,
 		"t4_txn_prepare_duration_seconds":   false,
+		"t4_reads_total":                    false,
+		"t4_read_errors_total":              false,
+		"t4_read_duration_seconds":          false,
 	}
 	for _, family := range families {
 		if _, ok := want[family.GetName()]; ok {

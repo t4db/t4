@@ -2002,6 +2002,102 @@
           }
         ]
       }
+    },
+    {
+      "type": "row",
+      "id": 70,
+      "title": "Read Performance",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 71,
+      "title": "Read Throughput",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 90
+      },
+      "targets": [
+        {
+          "expr": "sum by (op) (rate(t4_reads_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 72,
+      "title": "Read Error Rate",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 90
+      },
+      "targets": [
+        {
+          "expr": "sum by (op) (rate(t4_read_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 73,
+      "title": "Read Latency (p50 / p95 / p99)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 90
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
     }
   ]
 }

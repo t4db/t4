@@ -1118,7 +1118,21 @@ func (n *Node) LinearizableCount(ctx context.Context, prefix string, opts ...Rea
 	return n.Count(prefix, opts...)
 }
 
-func (n *Node) Get(key string, opts ...ReadOption) (*KeyValue, error) {
+// observeRead records one local read operation, mirroring the write-side
+// instrumentation in await: errors increment only the error counter; a
+// successful read increments the op counter and observes latency.
+func observeRead(op string, start time.Time, err error) {
+	if err != nil {
+		metrics.ReadErrors.WithLabelValues(op).Inc()
+		return
+	}
+	metrics.ReadsTotal.WithLabelValues(op).Inc()
+	metrics.ReadDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+}
+
+func (n *Node) Get(key string, opts ...ReadOption) (kv *KeyValue, err error) {
+	start := time.Now()
+	defer func() { observeRead("get", start, err) }()
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -1129,7 +1143,6 @@ func (n *Node) Get(key string, opts ...ReadOption) (*KeyValue, error) {
 	}
 	o := applyReadOpts(opts)
 	var sv *istore.KeyValue
-	var err error
 	if o.hasRevision() {
 		sv, err = n.db.Load().GetAt(key, o.revision)
 	} else {
@@ -1141,7 +1154,9 @@ func (n *Node) Get(key string, opts ...ReadOption) (*KeyValue, error) {
 	return toKV(sv), nil
 }
 
-func (n *Node) Exists(key string, opts ...ReadOption) (bool, error) {
+func (n *Node) Exists(key string, opts ...ReadOption) (exists bool, err error) {
+	start := time.Now()
+	defer func() { observeRead("exists", start, err) }()
 	if n.closed.Load() {
 		return false, ErrClosed
 	}
@@ -1157,7 +1172,9 @@ func (n *Node) Exists(key string, opts ...ReadOption) (bool, error) {
 	return n.db.Load().Exists(key)
 }
 
-func (n *Node) List(prefix string, opts ...ReadOption) ([]*KeyValue, error) {
+func (n *Node) List(prefix string, opts ...ReadOption) (list []*KeyValue, err error) {
+	start := time.Now()
+	defer func() { observeRead("list", start, err) }()
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -1178,7 +1195,9 @@ func (n *Node) List(prefix string, opts ...ReadOption) ([]*KeyValue, error) {
 	return out, nil
 }
 
-func (n *Node) Count(prefix string, opts ...ReadOption) (int64, error) {
+func (n *Node) Count(prefix string, opts ...ReadOption) (count int64, err error) {
+	start := time.Now()
+	defer func() { observeRead("count", start, err) }()
 	if n.closed.Load() {
 		return 0, ErrClosed
 	}

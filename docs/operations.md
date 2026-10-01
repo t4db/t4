@@ -484,6 +484,9 @@ The dashboard contains six sections:
 | `t4_writes_total`                | counter   | `op`          | Completed write operations                                                                            |
 | `t4_write_errors_total`          | counter   | `op`          | Write operations that returned an error                                                               |
 | `t4_write_duration_seconds`      | histogram | `op`          | Write latency (WAL + apply)                                                                           |
+| `t4_reads_total`                 | counter   | `op`          | Completed read operations                                                                             |
+| `t4_read_errors_total`           | counter   | `op`          | Read operations that returned an error                                                                |
+| `t4_read_duration_seconds`       | histogram | `op`          | Read latency (local store execution, excluding follower sync)                                         |
 | `t4_forwarded_writes_total`      | counter   | `op`          | Writes forwarded from follower to leader                                                              |
 | `t4_forward_duration_seconds`    | histogram | `op`          | Forwarded write round-trip latency                                                                    |
 | `t4_current_revision`            | gauge     | —             | Latest applied revision                                                                               |
@@ -506,7 +509,7 @@ The dashboard contains six sections:
 | `t4_watch_scan_revision_span`    | histogram | —             | Revision span covered by each watch scan                                                              |
 | `t4_watch_scan_entries_total`    | counter   | `result`      | Watch scan entries by result (`scanned` / `matched`)                                                  |
 
-`op` label values: `put`, `create`, `update`, `delete`, `compact`.
+`op` label values: `put`, `create`, `update`, `delete`, `compact` for write metrics; `get`, `exists`, `list`, `count` for read metrics.
 
 The two object-store metrics cover all S3 operations (WAL upload, checkpoint write, manifest read, SST download,
 leader-lock conditional PUT, etc.):
