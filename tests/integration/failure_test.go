@@ -780,7 +780,7 @@ func TestWALReplayAfterPartialUpload(t *testing.T) {
 // the startup checkpoint written by checkpointLoop makes that data visible to
 // fresh nodes that bootstrap entirely from object storage.
 //
-// This exercises the forceCheckpoint call added to checkpointLoop.
+// This exercises the startup checkpoint at the top of checkpointLoop.
 func TestStartupCheckpointCoversLocalWAL(t *testing.T) {
 	store := object.NewMem()
 	dir := t.TempDir()
