@@ -209,7 +209,7 @@ func (mgr *Manager) WriteAtSequence(ctx context.Context, db *pebble.DB, store ob
 // WriteDir is WriteAtSequence with the point-in-time copy already prepared:
 // it walks the given Pebble checkpoint directory, uploads missing SSTs and
 // meta files, and writes the index + manifest. Because the local copy pins the
-// checkpoint content, callers that hold a write fence (Node.maybeCheckpoint)
+// checkpoint content, callers that hold a write fence (Node.runCheckpoint)
 // can release it before this function runs; writes admitted afterwards cannot
 // leak into the checkpoint.
 func (mgr *Manager) WriteDir(ctx context.Context, cpDir string, store object.Store, term uint64, revision, sequence int64, lastWALKey string, ancestorStore object.Store) error {

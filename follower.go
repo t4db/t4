@@ -281,9 +281,8 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		}
 		// Start write-processing loops immediately so that client writes are
 		// not blocked while we run Reconcile and the startup checkpoint below.
-		// forceCheckpoint (and periodic maybeCheckpoint) already hold
-		// fenceMu.Lock() during I/O, which briefly pauses new writes — that
-		// is the same behaviour as during a normal checkpoint interval.
+		// Checkpoints hold fenceMu.Lock() only for local I/O (WAL seal, Pebble
+		// flush and checkpoint copy); the object-store upload runs unfenced.
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
@@ -311,10 +310,11 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		// uploaded SSTs are referenced by a live checkpoint. Without this,
 		// the old leader's GCOrphanSSTs could delete the just-uploaded SSTs
 		// before the checkpointLoop gets a chance to write its startup
-		// checkpoint. The checkpointLoop's own forceCheckpoint is redundant
-		// but harmless (same rev → same checkpoint key → idempotent overwrite).
+		// checkpoint, which may have run before Reconcile finished. The request
+		// goes through checkpointLoop so it never overlaps another checkpoint;
+		// wait for it so promotion still returns with the checkpoint written.
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
-			n.forceCheckpoint(bgCtx)
+			n.requestCheckpoint(bgCtx, true)
 		}
 		return nil, true
 	}

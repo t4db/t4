@@ -246,7 +246,7 @@ type Node struct {
 	lockObjectStoreComplete atomic.Bool
 
 	entriesSinceCheckpoint int64
-	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
+	checkpointReqC         chan checkpointReq  // requests for checkpointLoop, the only goroutine that writes checkpoints
 	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
 	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample
 	tracer                 trace.Tracer
@@ -711,9 +711,7 @@ func Open(cfg Config) (*Node, error) {
 		tp = noop.NewTracerProvider()
 	}
 	n.tracer = tp.Tracer("github.com/t4db/t4")
-	if cfg.CheckpointEntries > 0 {
-		n.checkpointTriggerC = make(chan struct{}, 1)
-	}
+	n.checkpointReqC = make(chan checkpointReq, 1)
 
 	if starter, ok := w.(interface{ Start(context.Context) }); ok {
 		starter.Start(bgCtx)
