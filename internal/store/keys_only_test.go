@@ -195,3 +195,40 @@ func TestIdxV2ReadableByRevisionOnlyDecoder(t *testing.T) {
 		t.Fatalf("decodeIdx(v2) = %+v, want %+v", got, want)
 	}
 }
+
+// TestIdxSubPointerSkipsMetaOps pins that a data sub-op placed after a meta
+// sub-op in the same txn is found through its index value: meta sub-ops are
+// not written to the log, so data sub-op indexes have gaps.
+func TestIdxSubPointerSkipsMetaOps(t *testing.T) {
+	s := openMem(t)
+	apply(t, s, wal.Entry{Revision: 1, Term: 1, Op: wal.OpTxn, Value: wal.EncodeTxnOps([]wal.TxnSubOp{
+		{Op: wal.OpCreate, Key: "/a/0", Value: []byte("v0"), CreateRevision: 1, Version: 1},
+		{Op: wal.OpMetaPut, Key: "meta", Value: []byte("m")},
+		{Op: wal.OpCreate, Key: "/a/2", Value: []byte("v2"), CreateRevision: 1, Version: 1},
+	})})
+	iv, closer, err := s.db.Get(idxKey("/a/2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ie := decodeIdx(iv)
+	_ = closer.Close()
+	if !ie.v2 || ie.sub != 2 {
+		t.Fatalf("idx(/a/2) = %+v, want v2 with sub=2", ie)
+	}
+	kv, err := s.Get("/a/2")
+	if err != nil || kv == nil || string(kv.Value) != "v2" {
+		t.Fatalf("Get(/a/2) = %+v, %v; want value v2", kv, err)
+	}
+	full, err := s.ListRange("/a/", ReadOptions{})
+	if err != nil || len(full) != 2 || string(full[1].Value) != "v2" {
+		t.Fatalf("ListRange = %+v, %v", kvsString(full), err)
+	}
+	keys, err := s.ListRange("/a/", ReadOptions{KeysOnly: true})
+	want := []*KeyValue{
+		{Key: "/a/0", Revision: 1, CreateRevision: 1, Version: 1},
+		{Key: "/a/2", Revision: 1, CreateRevision: 1, Version: 1},
+	}
+	if err != nil || !reflect.DeepEqual(keys, want) {
+		t.Fatalf("keys-only ListRange = %+v, %v; want %+v", kvsString(keys), err, kvsString(want))
+	}
+}
