@@ -102,7 +102,12 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			total = count
 		}
 
-		all, err := s.rangeList(ctx, linearizable, scanPrefix, append(seek, t4.WithLimit(r.Limit))...)
+		listOpts := append(seek, t4.WithLimit(r.Limit))
+		if r.KeysOnly {
+			// Served from the key index without loading values.
+			listOpts = append(listOpts, t4.WithKeysOnly())
+		}
+		all, err := s.rangeList(ctx, linearizable, scanPrefix, listOpts...)
 		if err != nil {
 			return nil, kvError(err)
 		}
@@ -121,7 +126,12 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		}, nil
 	}
 
-	all, err := s.rangeList(ctx, linearizable, "", readAt(readRev)...)
+	fullOpts := readAt(readRev)
+	if r.CountOnly || r.KeysOnly {
+		// No values are returned, so skip loading them.
+		fullOpts = append(fullOpts, t4.WithKeysOnly())
+	}
+	all, err := s.rangeList(ctx, linearizable, "", fullOpts...)
 	if err != nil {
 		return nil, kvError(err)
 	}

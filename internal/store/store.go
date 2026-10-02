@@ -606,7 +606,7 @@ func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
 			return fmt.Errorf("store: delete idx key %q: %w", e.Key, err)
 		}
 	} else {
-		if err := b.Set(ik, encodeRev(e.Revision), pebble.NoSync); err != nil {
+		if err := b.Set(ik, encodeIdx(e.Revision, r.createRevision, r.version, idxSubNone), pebble.NoSync); err != nil {
 			return fmt.Errorf("store: set idx key %q rev=%d: %w", e.Key, e.Revision, err)
 		}
 	}
@@ -642,7 +642,7 @@ func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) error {
 				return fmt.Errorf("store: delete txn idx key %q: %w", op.Key, err)
 			}
 		} else {
-			if err := b.Set(ik, encodeRev(e.Revision), pebble.NoSync); err != nil {
+			if err := b.Set(ik, encodeIdx(e.Revision, r.createRevision, r.version, uint16(i)), pebble.NoSync); err != nil {
 				return fmt.Errorf("store: set txn idx key %q rev=%d: %w", op.Key, e.Revision, err)
 			}
 		}
@@ -758,20 +758,24 @@ type KeyValue struct {
 }
 
 // ReadOptions refines store reads. Zero values mean HEAD, no lower key bound,
-// and no limit.
+// no limit, and full results.
 type ReadOptions struct {
 	Revision int64
 	FromKey  string
 	Limit    int64
+	// KeysOnly returns each key with its Revision, CreateRevision and Version
+	// only: Value, Lease and PrevRevision are left unset. A listing at HEAD is
+	// then served from the index without loading log records.
+	KeysOnly bool
 }
 
 // Get returns the current value of key, or nil if not found.
 func (s *Store) Get(key string) (*KeyValue, error) {
-	rev, err := s.getIdxRev(key)
-	if err != nil || rev == 0 {
+	ie, err := idxEntryFrom(s.db, key)
+	if err != nil || ie.rev == 0 {
 		return nil, err
 	}
-	return s.getLogEntry(key, rev)
+	return logEntryForIdx(s.db, make([]byte, logKeyScratchSize), key, ie)
 }
 
 // GetAt returns the value of key as of revision. A revision of 0 means current.
@@ -833,16 +837,34 @@ func (s *Store) getIdxRev(key string) (int64, error) {
 
 // idxRevFrom returns key's current revision in r, or 0 if it is not live.
 func idxRevFrom(r pebble.Reader, key string) (int64, error) {
+	ie, err := idxEntryFrom(r, key)
+	return ie.rev, err
+}
+
+// idxEntryFrom returns key's decoded index value in r; rev is 0 if it is not
+// live.
+func idxEntryFrom(r pebble.Reader, key string) (idxEntry, error) {
 	v, closer, err := r.Get(idxKey(key))
 	if err == pebble.ErrNotFound {
-		return 0, nil
+		return idxEntry{}, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("store: get idx %q: %w", key, err)
+		return idxEntry{}, fmt.Errorf("store: get idx %q: %w", key, err)
 	}
-	rev := decodeRev(v)
+	ie := decodeIdx(v)
 	closer.Close()
-	return rev, nil
+	return ie, nil
+}
+
+// idxToKeysOnlyKV builds a keys-only KeyValue from a v2 index value.
+func idxToKeysOnlyKV(key string, ie idxEntry) *KeyValue {
+	return &KeyValue{Key: key, Revision: ie.rev, CreateRevision: ie.createRevision, Version: ie.version}
+}
+
+// stripToKeysOnly clears what a keys-only read does not return, so results
+// served from the log match those served from the index.
+func stripToKeysOnly(kv *KeyValue) {
+	kv.Value, kv.Lease, kv.PrevRevision = nil, 0, 0
 }
 
 // recordToKV builds a KeyValue from a decoded log record at the given revision.
@@ -877,14 +899,50 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 }
 
 func logEntryFrom(db pebble.Reader, key string, rev int64) (*KeyValue, error) {
-	return logEntryAt(db, make([]byte, 9), key, rev)
+	return logEntryAt(db, make([]byte, logKeyScratchSize), key, rev)
 }
 
-// logEntryAt is logEntryFrom with a caller-supplied 9-byte scratch buffer for
-// the log key, so scans can look up many entries without allocating a key
-// for each.
+// logKeyScratchSize fits both a log key and a txn sub-op log key.
+const logKeyScratchSize = 11
+
+// logEntryForIdx loads key's log record located by its index value. A v2
+// value points at the record directly; a v1 value falls back to logEntryAt's
+// search. lk is a logKeyScratchSize scratch buffer.
+func logEntryForIdx(db pebble.Reader, lk []byte, key string, ie idxEntry) (*KeyValue, error) {
+	if !ie.v2 {
+		return logEntryAt(db, lk, key, ie.rev)
+	}
+	k := lk[:9]
+	putLogKey(k, ie.rev)
+	if ie.sub != idxSubNone {
+		k = lk[:11]
+		binary.BigEndian.PutUint16(k[9:], ie.sub)
+	}
+	v, closer, err := db.Get(k)
+	if err == pebble.ErrNotFound {
+		// Not where the index points; search as for a v1 value.
+		return logEntryAt(db, lk, key, ie.rev)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get log rev=%d: %w", ie.rev, err)
+	}
+	defer func() { _ = closer.Close() }()
+	r, err := decodeRecord(v)
+	if err != nil {
+		return nil, err
+	}
+	if string(r.key) != key {
+		return logEntryAt(db, lk, key, ie.rev)
+	}
+	return viewToKV(key, ie.rev, &r), nil
+}
+
+// logEntryAt is logEntryFrom with a caller-supplied logKeyScratchSize scratch
+// buffer for the log key, so scans can look up many entries without
+// allocating a key for each.
 func logEntryAt(db pebble.Reader, lk []byte, key string, rev int64) (*KeyValue, error) {
 	// Fast path: non-txn entries are stored at logKey(rev).
+	lk = lk[:9]
 	putLogKey(lk, rev)
 	v, closer, err := db.Get(lk)
 	if err == nil {
@@ -992,13 +1050,14 @@ func (s *Store) getAtFromHead(key string, rev int64) (*KeyValue, error) {
 	snap := s.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	cur, err := idxRevFrom(snap, key)
+	ie, err := idxEntryFrom(snap, key)
 	if err != nil {
 		return nil, err
 	}
+	cur := ie.rev
 	if cur != 0 && cur <= rev {
 		// Unchanged since rev.
-		return logEntryFrom(snap, key, cur)
+		return logEntryForIdx(snap, make([]byte, logKeyScratchSize), key, ie)
 	}
 	undo, err := undoAfter(snap, key, "", rev, func(k string) bool { return k == key })
 	if err != nil {
@@ -1028,7 +1087,7 @@ func (s *Store) listAtFromHead(prefix string, opts ReadOptions, rev int64) ([]*K
 	if limit > 0 {
 		limit += int64(len(undo))
 	}
-	head, err := listCurrentFrom(snap, prefix, opts.FromKey, limit)
+	head, err := listCurrentFrom(snap, prefix, opts.FromKey, limit, opts.KeysOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -1123,15 +1182,26 @@ func (s *Store) ListRange(prefix string, opts ReadOptions) ([]*KeyValue, error) 
 		return nil, err
 	}
 	if opts.Revision == 0 {
-		return s.listCurrent(prefix, opts.FromKey, opts.Limit)
+		return s.listCurrent(prefix, opts.FromKey, opts.Limit, opts.KeysOnly)
 	}
-	if s.nearHead(targetRev) {
-		kvs, err := s.listAtFromHead(prefix, opts, targetRev)
-		if !errors.Is(err, errUndoChain) {
-			return kvs, err
+	var kvs []*KeyValue
+	fromHead := s.nearHead(targetRev)
+	if fromHead {
+		kvs, err = s.listAtFromHead(prefix, opts, targetRev)
+	}
+	if !fromHead || errors.Is(err, errUndoChain) {
+		kvs, err = s.listAtByReplay(prefix, opts, targetRev)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Past-revision listings take some or all records from the log.
+	if opts.KeysOnly {
+		for _, kv := range kvs {
+			stripToKeysOnly(kv)
 		}
 	}
-	return s.listAtByReplay(prefix, opts, targetRev)
+	return kvs, nil
 }
 
 // listAtByReplay rebuilds the state at targetRev by replaying the log from
@@ -1183,11 +1253,13 @@ func idxBounds(prefix, fromKey string) (lower, upper []byte) {
 	return lower, idxKeyUpper(prefix)
 }
 
-func (s *Store) listCurrent(prefix, fromKey string, limit int64) ([]*KeyValue, error) {
-	return listCurrentFrom(s.db, prefix, fromKey, limit)
+func (s *Store) listCurrent(prefix, fromKey string, limit int64, keysOnly bool) ([]*KeyValue, error) {
+	return listCurrentFrom(s.db, prefix, fromKey, limit, keysOnly)
 }
 
-func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64) ([]*KeyValue, error) {
+// listCurrentFrom lists live keys at HEAD in db. keysOnly results are built
+// from v2 index values alone; only keys with a v1 value load their record.
+func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keysOnly bool) ([]*KeyValue, error) {
 	lower, upper := idxBounds(prefix, fromKey)
 
 	iter, err := db.NewIter(&pebble.IterOptions{
@@ -1200,16 +1272,23 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64) ([]*
 	defer func() { _ = iter.Close() }()
 
 	var out []*KeyValue
-	lk := make([]byte, 9)
+	lk := make([]byte, logKeyScratchSize)
 	for iter.First(); iter.Valid(); iter.Next() {
 		if limit > 0 && int64(len(out)) >= limit {
 			break
 		}
 		k := string(iter.Key()[1:]) // strip 'i' prefix
-		rev := decodeRev(iter.Value())
-		kv, err := logEntryAt(db, lk, k, rev)
+		ie := decodeIdx(iter.Value())
+		if keysOnly && ie.v2 {
+			out = append(out, idxToKeysOnlyKV(k, ie))
+			continue
+		}
+		kv, err := logEntryForIdx(db, lk, k, ie)
 		if err != nil {
 			return nil, err
+		}
+		if keysOnly {
+			stripToKeysOnly(kv)
 		}
 		out = append(out, kv)
 	}
@@ -1236,7 +1315,7 @@ func (s *Store) CountRange(prefix string, opts ReadOptions) (int64, error) {
 			return n, err
 		}
 	}
-	kvs, err := s.ListRange(prefix, ReadOptions{Revision: opts.Revision, FromKey: opts.FromKey})
+	kvs, err := s.ListRange(prefix, ReadOptions{Revision: opts.Revision, FromKey: opts.FromKey, KeysOnly: true})
 	if err != nil {
 		return 0, err
 	}

@@ -1069,6 +1069,7 @@ type readOpts struct {
 	revision int64
 	fromKey  string
 	limit    int64
+	keysOnly bool
 }
 
 func (o readOpts) hasRevision() bool { return o.revision > 0 }
@@ -1077,6 +1078,7 @@ func (o readOpts) storeOptions() istore.ReadOptions {
 		Revision: o.revision,
 		FromKey:  o.fromKey,
 		Limit:    o.limit,
+		KeysOnly: o.keysOnly,
 	}
 }
 
@@ -1113,6 +1115,14 @@ func WithFromKey(k string) ReadOption {
 // returns all matching entries.
 func WithLimit(n int64) ReadOption {
 	return func(o *readOpts) { o.limit = n }
+}
+
+// WithKeysOnly makes List return each key with its Revision, CreateRevision
+// and Version only, leaving Value, Lease and PrevRevision unset. A listing at
+// the current revision is then served from the key index without reading
+// values, which is far cheaper for large prefixes.
+func WithKeysOnly() ReadOption {
+	return func(o *readOpts) { o.keysOnly = true }
 }
 
 // LinearizableGet returns the value for key with linearizability guaranteed.
