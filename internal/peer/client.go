@@ -2,6 +2,7 @@ package peer
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -176,6 +177,8 @@ func (c *Client) getConn() (*grpc.ClientConn, error) {
 //   - ErrResyncRequired when the leader's buffer no longer covers fromRev.
 //   - ErrLeaderUnreachable after maxRetries consecutive connection failures.
 //   - ErrLeaderShutdown when the leader sent a graceful shutdown signal.
+//   - an error wrapping wal.ErrUnknownOp when the leader sent an entry this
+//     binary cannot apply (the leader runs a newer, incompatible release).
 func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Entry) error, applyFn func([]wal.Entry) error) error {
 	consecutiveFailures := 0
 	for {
@@ -186,6 +189,12 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Ent
 		}
 		if IsResyncRequired(err) {
 			c.log.Errorf("peer: leader requires resync from rev=%d: %v", fromRev, err)
+			return err
+		}
+		// Not transient: retrying would eventually surface as
+		// ErrLeaderUnreachable and trigger a takeover attempt by a node that
+		// cannot understand the leader's WAL.
+		if errors.Is(err, wal.ErrUnknownOp) {
 			return err
 		}
 		// Leader is shutting down: skip retry wait and signal caller to elect now.
@@ -281,6 +290,7 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 		FromRevision: fromRev,
 		NodeID:       c.nodeID,
 		Heartbeats:   true,
+		WALFormat:    wal.WALFormatVersion,
 	})
 	if err != nil {
 		return fromRev, silenced(err)
@@ -374,7 +384,13 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 
 		for _, msg := range msgs {
 			if !msg.Commit {
-				staged = append(staged, MsgToEntry(msg))
+				e := MsgToEntry(msg)
+				// Reject before staging so an op this binary cannot apply never
+				// reaches the local WAL.
+				if err := wal.ValidateEntry(&e); err != nil {
+					return fromRev, err
+				}
+				staged = append(staged, e)
 				continue
 			}
 			startRev := msg.CommitStartRevision

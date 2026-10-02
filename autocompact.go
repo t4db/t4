@@ -56,7 +56,7 @@ func (n *Node) maybeRecordRevisionSample(entries []wal.Entry) {
 func maxUserRevision(entries []wal.Entry) int64 {
 	var maxRev int64
 	for i := range entries {
-		if entries[i].Op == wal.OpCompact {
+		if !entries[i].ConsumesRevision() {
 			continue
 		}
 		if entries[i].Revision > maxRev {

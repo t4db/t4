@@ -415,7 +415,11 @@ func txnCondMatches(cond TxnCondition, existing *istore.KeyValue) bool {
 	default:
 		return false
 	}
-	switch cond.Result {
+	return compareInt64(lhs, rhs, cond.Result)
+}
+
+func compareInt64(lhs, rhs int64, r TxnCondResult) bool {
+	switch r {
 	case TxnCondEqual:
 		return lhs == rhs
 	case TxnCondNotEqual:
@@ -489,7 +493,7 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		return TxnResponse{}, ErrClosed
 	}
 	prepareStart := time.Now()
-	e, succeeded, deletedKeys, observedRev, stats, err := n.prepareTxn(req)
+	e, succeeded, deletedKeys, observed, stats, metaToken, err := n.prepareTxn(req, false)
 	prepareDuration := time.Since(prepareStart)
 	kind := stats.kind()
 	compare := txnCompareLabel(succeeded)
@@ -504,7 +508,7 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		// Use the committed revision, not nextRev which may be ahead of what
 		// the commit loop has fsynced if concurrent writes are in flight.
 		curRev := n.db.Load().CurrentRevision()
-		if observedRev <= curRev {
+		if observed.rev <= curRev && observed.metaToken == 0 {
 			n.mu.Unlock()
 			observeTxnPreparation(lockWait, prepareDuration, kind)
 			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
@@ -532,7 +536,7 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		aborted := n.abortedBatches
 		n.mu.Unlock()
 		observeTxnPreparation(lockWait, prepareDuration, kind)
-		committed, err := n.awaitObservedWrites(ctx, observedRev, aborted)
+		committed, err := n.awaitObservedWrites(ctx, observed, aborted)
 		if err != nil {
 			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
 			return TxnResponse{}, err
@@ -541,9 +545,16 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 			return TxnResponse{}, errReevaluateTxn
 		}
 		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
-		return TxnResponse{Succeeded: succeeded, Revision: observedRev}, nil
+		// A meta write consumes no revision: answered from one alone, the
+		// txn is ordered at the revision current once it committed.
+		rev := observed.rev
+		if cur := n.db.Load().CurrentRevision(); cur > rev {
+			rev = cur
+		}
+		return TxnResponse{Succeeded: succeeded, Revision: rev}, nil
 	}
 	wr := newWriteReq(ctx, e)
+	wr.metaToken = metaToken
 	n.writeC <- wr
 	n.mu.Unlock()
 	observeTxnPreparation(lockWait, prepareDuration, kind)
@@ -561,6 +572,9 @@ type txnStats struct {
 	creates int
 	updates int
 	deletes int
+	// metaOps counts meta sub-ops. kind() ignores them: it labels the data
+	// write a transaction makes.
+	metaOps int
 }
 
 func (s txnStats) kind() string {
@@ -698,15 +712,37 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 // prepareTxn evaluates all conditions and prepares the WAL entry for the
 // selected branch. Must be called under n.mu.
 //
-// Returns a zero-valued Entry (Op==0) when the branch has no write ops.
+// Returns a zero-valued Entry (Op==0) when the branch has no write ops. When
+// the entry contains meta ops, the returned token owns their pendingMeta
+// entries and must be set as the write request's metaToken.
 //
-// observedRev is the highest revision of an in-flight write the evaluation
-// read, or 0 if it read only committed state.
-func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{}, int64, txnStats, error) {
-	var observedRev int64
+// observed records the in-flight writes the evaluation read, if any.
+//
+// internal is set only by initMetaAtGenesis: it allows meta ops before the
+// meta keyspace is enabled and writes to the reserved format key.
+func (n *Node) prepareTxn(req TxnRequest, internal bool) (wal.Entry, bool, map[string]struct{}, txnObserved, txnStats, uint64, error) {
+	e, succeeded, deletedKeys, observed, stats, err := n.prepareTxnEntry(req, internal)
+	if err != nil || e.Op == 0 || stats.metaOps == 0 {
+		// Most transactions hold only data ops: nothing to track.
+		return e, succeeded, deletedKeys, observed, stats, 0, err
+	}
+	token, err := n.trackPendingMetaLocked(&e)
+	return e, succeeded, deletedKeys, observed, stats, token, err
+}
+
+// txnObserved records the in-flight writes a transaction's evaluation read:
+// the highest revision of a pending data write, and the highest token of a
+// pending meta write. Zero values mean it read only committed state.
+type txnObserved struct {
+	rev       int64
+	metaToken uint64
+}
+
+func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, map[string]struct{}, txnObserved, txnStats, error) {
+	var observed txnObserved
 	readKey := func(key string) (*istore.KeyValue, error) {
-		if p, ok := n.pending[key]; ok && p.rev > observedRev {
-			observedRev = p.rev
+		if p, ok := n.pending[key]; ok && p.rev > observed.rev {
+			observed.rev = p.rev
 		}
 		return n.readKey(key)
 	}
@@ -715,12 +751,30 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 	succeeded := true
 	readCache := make(map[string]*istore.KeyValue, len(req.Conditions))
 	for _, cond := range req.Conditions {
+		if cond.Target == TxnCondMetaExists {
+			exists, token, err := n.metaExistsObservedLocked(cond.Key)
+			if token > observed.metaToken {
+				observed.metaToken = token
+			}
+			if err != nil {
+				return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+			}
+			var v int64
+			if exists {
+				v = 1
+			}
+			if !compareInt64(v, cond.Version, cond.Result) {
+				succeeded = false
+				break
+			}
+			continue
+		}
 		existing, ok := readCache[cond.Key]
 		if !ok {
 			var err error
 			existing, err = readKey(cond.Key)
 			if err != nil {
-				return wal.Entry{}, false, nil, 0, txnStats{}, err
+				return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
 			}
 			readCache[cond.Key] = existing
 		}
@@ -735,7 +789,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		ops = req.Failure
 	}
 	if len(ops) == 0 {
-		return wal.Entry{}, succeeded, nil, observedRev, txnStats{}, nil
+		return wal.Entry{}, succeeded, nil, observed, txnStats{}, nil
 	}
 
 	// Pre-resolve all ops (read current state) before incrementing nextRev,
@@ -752,12 +806,36 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 	}
 	resolved := make([]resolvedOp, 0, len(ops))
 	for _, op := range ops {
+		switch op.Type {
+		case TxnPut, TxnDelete:
+		case TxnMetaPut, TxnMetaDelete:
+			if !internal {
+				if err := validateMetaKey(op.Key); err != nil {
+					return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+				}
+				if err := n.requireMetaLocked(); err != nil {
+					return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+				}
+			}
+			walOp := wal.OpMetaPut
+			if op.Type == TxnMetaDelete {
+				walOp = wal.OpMetaDelete
+			}
+			// Meta ops are applied as given: no current state to resolve,
+			// and deleting a missing meta key is harmless.
+			resolved = append(resolved, resolvedOp{walOp: walOp, key: op.Key, value: op.Value})
+			continue
+		default:
+			// Never ignore an op type this binary does not know: silently
+			// dropping part of a transaction breaks its atomicity.
+			return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: unknown op type %d", op.Type)
+		}
 		existing, ok := readCache[op.Key]
 		if !ok {
 			var err error
 			existing, err = readKey(op.Key)
 			if err != nil {
-				return wal.Entry{}, false, nil, 0, txnStats{}, err
+				return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
 			}
 			readCache[op.Key] = existing
 		}
@@ -799,22 +877,37 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		}
 	}
 	if len(active) == 0 {
-		return wal.Entry{}, succeeded, nil, observedRev, txnStats{}, nil
+		return wal.Entry{}, succeeded, nil, observed, txnStats{}, nil
 	}
 
 	if len(active) > 65535 {
-		return wal.Entry{}, false, nil, 0, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
+		return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
 	}
 
-	seen := make(map[string]struct{}, len(active))
+	// Data and meta keys live in separate keyspaces, so the same name may
+	// appear once in each.
+	type branchKey struct {
+		meta bool
+		key  string
+	}
+	seen := make(map[branchKey]struct{}, len(active))
+	dataOps := 0
 	for _, r := range active {
-		if _, dup := seen[r.key]; dup {
-			return wal.Entry{}, false, nil, 0, txnStats{}, fmt.Errorf("txn: duplicate key %q in branch", r.key)
+		k := branchKey{meta: r.walOp.IsMeta(), key: r.key}
+		if _, dup := seen[k]; dup {
+			return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: duplicate key %q in branch", r.key)
 		}
-		seen[r.key] = struct{}{}
+		seen[k] = struct{}{}
+		if !k.meta {
+			dataOps++
+		}
 	}
 
-	n.nextRev++
+	// Only data ops consume a revision. A meta-only txn carries the last
+	// assigned revision, like a standalone meta write.
+	if dataOps > 0 {
+		n.nextRev++
+	}
 	newRev := n.nextRev
 
 	var deletedKeys map[string]struct{}
@@ -828,6 +921,10 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		subOps[i] = wal.TxnSubOp{
 			Op: r.walOp, Key: r.key, Value: r.value, Lease: r.lease,
 			CreateRevision: cr, PrevRevision: r.prevRevision, Version: r.version,
+		}
+		if r.walOp.IsMeta() {
+			stats.metaOps++
+			continue
 		}
 		if r.walOp == wal.OpDelete {
 			stats.deletes++
@@ -858,7 +955,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		Term:     n.term,
 		Op:       wal.OpTxn,
 		Value:    wal.EncodeTxnOps(subOps),
-	}, succeeded, deletedKeys, observedRev, stats, nil
+	}, succeeded, deletedKeys, observed, stats, nil
 }
 
 func opLabel(op wal.Op) string {
@@ -873,6 +970,10 @@ func opLabel(op wal.Op) string {
 		return "compact"
 	case wal.OpTxn:
 		return "txn"
+	case wal.OpMetaPut:
+		return "meta_put"
+	case wal.OpMetaDelete:
+		return "meta_delete"
 	default:
 		return "unknown"
 	}
@@ -980,6 +1081,11 @@ func (n *Node) evalCommittedNoop(req TxnRequest, rev int64) (noop, succeeded boo
 	}
 	succeeded = true
 	for _, cond := range req.Conditions {
+		// Meta keys have no revisions to evaluate at rev; leave the txn to
+		// wait for the writes it observed.
+		if cond.Target == TxnCondMetaExists {
+			return false, false, nil
+		}
 		kv, err := read(cond.Key)
 		if err != nil {
 			return false, false, err
@@ -994,7 +1100,9 @@ func (n *Node) evalCommittedNoop(req TxnRequest, rev int64) (noop, succeeded boo
 		ops = req.Failure
 	}
 	for _, op := range ops {
-		if op.Type == TxnPut {
+		// Only a data delete of a missing key writes nothing; every other op,
+		// meta ops included, is a write.
+		if op.Type != TxnDelete {
 			return false, succeeded, nil
 		}
 		kv, err := read(op.Key)
@@ -1009,18 +1117,19 @@ func (n *Node) evalCommittedNoop(req TxnRequest, rev int64) (noop, succeeded boo
 }
 
 // awaitObservedWrites waits until the in-flight writes a transaction read
-// have an outcome. rev is the highest of their revisions, aborted the value of
-// n.abortedBatches when they were read. It reports whether they all committed:
-// revisions are committed in order, so once rev is applied with no batch
-// having failed since, every revision up to rev is.
-func (n *Node) awaitObservedWrites(ctx context.Context, rev int64, aborted uint64) (bool, error) {
+// have an outcome. observed holds the highest of their revisions and meta
+// write tokens, aborted the value of n.abortedBatches when they were read. It
+// reports whether they all committed: revisions are committed and tokens
+// resolved in order, so once rev is applied and every token up to the
+// observed one resolved with no batch having failed since, all of them are.
+func (n *Node) awaitObservedWrites(ctx context.Context, observed txnObserved, aborted uint64) (bool, error) {
 	for {
 		n.mu.Lock()
 		if n.abortedBatches != aborted {
 			n.mu.Unlock()
 			return false, nil
 		}
-		if n.db.Load().CurrentRevision() >= rev {
+		if n.db.Load().CurrentRevision() >= observed.rev && n.resolvedMetaToken >= observed.metaToken {
 			n.mu.Unlock()
 			return true, nil
 		}
@@ -1054,11 +1163,25 @@ func (n *Node) clearPendingBatch(batch []*writeReq, err error) {
 		n.batchDone = nil
 	}
 	for _, req := range batch {
+		if req.metaToken > n.resolvedMetaToken {
+			n.resolvedMetaToken = req.metaToken
+		}
+		// Meta ops are tracked in pendingMeta by token, not in pending: they
+		// carry the revision of the preceding data write, so matching them
+		// against pending would drop an in-flight data key of the same name.
+		if req.entry.Op.IsMeta() {
+			n.clearPendingMetaLocked(req.entry.Key, req.metaToken)
+			continue
+		}
 		if req.entry.Op == wal.OpTxn {
 			// For txn entries the key field is empty; decode sub-ops to clear
 			// each affected key from the pending map.
 			if ops, err := wal.DecodeTxnOps(req.entry.Value); err == nil {
 				for _, op := range ops {
+					if op.Op.IsMeta() {
+						n.clearPendingMetaLocked(op.Key, req.metaToken)
+						continue
+					}
 					if p, ok := n.pending[op.Key]; ok && p.rev == req.entry.Revision {
 						delete(n.pending, op.Key)
 					}
@@ -1118,6 +1241,9 @@ func encodeErr(err error) (code, msg string) {
 	if errors.Is(err, ErrKeyExists) {
 		return "key_exists", ""
 	}
+	if errors.Is(err, ErrMetaDisabled) {
+		return "meta_disabled", ""
+	}
 	return "error", err.Error()
 }
 
@@ -1127,6 +1253,8 @@ func decodeErr(code, msg string) error {
 		return nil
 	case "key_exists":
 		return ErrKeyExists
+	case "meta_disabled":
+		return ErrMetaDisabled
 	default:
 		return errors.New(msg)
 	}

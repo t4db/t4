@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/t4db/t4/internal/sysstate"
 )
 
 // TokenStore manages short-lived bearer tokens backed by Pebble for persistence
@@ -50,7 +52,7 @@ func NewTokenStore(ctx context.Context, ttl time.Duration, n node) *TokenStore {
 
 // load reads persisted tokens from Pebble, skipping any that have already expired.
 func (ts *TokenStore) load() {
-	kvs, err := ts.n.List(tokensPrefix)
+	kvs, err := sysstate.List(ts.n, tokensPrefix)
 	if err != nil {
 		logrus.WithError(err).Warn("auth: failed to load persisted tokens")
 		return
@@ -65,7 +67,7 @@ func (ts *TokenStore) load() {
 		if now.After(st.Expiry) {
 			// Clean up expired token from Pebble in the background.
 			tok := strings.TrimPrefix(kv.Key, tokensPrefix)
-			go ts.n.Delete(context.Background(), tokensPrefix+tok) //nolint:errcheck
+			go sysstate.Delete(context.Background(), ts.n, tokensPrefix+tok) //nolint:errcheck
 			continue
 		}
 		tok := strings.TrimPrefix(kv.Key, tokensPrefix)
@@ -90,7 +92,7 @@ func (ts *TokenStore) Generate(username string) (string, error) {
 	if ts.n != nil {
 		data, err := json.Marshal(storedToken{Username: entry.username, Expiry: entry.expiry})
 		if err == nil {
-			if _, err := ts.n.Put(context.Background(), tokensPrefix+tok, data, 0); err != nil {
+			if err := sysstate.Put(context.Background(), ts.n, tokensPrefix+tok, data); err != nil {
 				logrus.WithError(err).Warn("auth: failed to persist token")
 			}
 		}
@@ -119,7 +121,7 @@ func (ts *TokenStore) Revoke(token string) {
 	ts.mu.Unlock()
 
 	if ts.n != nil {
-		if _, err := ts.n.Delete(context.Background(), tokensPrefix+token); err != nil {
+		if err := sysstate.Delete(context.Background(), ts.n, tokensPrefix+token); err != nil {
 			logrus.WithError(err).Warn("auth: failed to delete revoked token from store")
 		}
 	}
@@ -154,7 +156,7 @@ func (ts *TokenStore) evict() {
 		return
 	}
 	for _, tok := range expired {
-		if _, err := ts.n.Delete(context.Background(), tokensPrefix+tok); err != nil {
+		if err := sysstate.Delete(context.Background(), ts.n, tokensPrefix+tok); err != nil {
 			logrus.WithError(err).Warn("auth: failed to delete expired token from store")
 		}
 	}

@@ -443,11 +443,12 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			}
 			continue
 		}
-		if err := s.applyEntry(b, e); err != nil {
+		consumesRev, err := s.applyEntryRev(b, e)
+		if err != nil {
 			_ = b.Close()
 			return err
 		}
-		if e.Revision > maxRev {
+		if consumesRev && e.Revision > maxRev {
 			maxRev = e.Revision
 		}
 		if seq := e.Sequence(); seq > maxSeq {
@@ -529,8 +530,16 @@ func (s *Store) Recover(entries []wal.Entry) error {
 			maxSeq = seq
 			tip = Position{Term: e.Term, Seq: seq}
 		}
+		consumesRev := e.ConsumesRevision()
 		if e.Op == wal.OpCompact {
 			if err := s.applyCompact(b, e.PrevRevision); err != nil {
+				_ = b.Close()
+				return err
+			}
+		} else if !consumesRev {
+			// Meta-only entries carry the revision of the preceding data
+			// write: the term-conflict cleanup below would delete that write.
+			if err := s.applyEntry(b, e); err != nil {
 				_ = b.Close()
 				return err
 			}
@@ -574,16 +583,32 @@ func (s *Store) Recover(entries []wal.Entry) error {
 				return err
 			}
 		}
-		if e.Op != wal.OpCompact && e.Revision > maxRev {
+		if consumesRev && e.Revision > maxRev {
 			maxRev = e.Revision
 		}
 	}
 	return s.commitBatch(b, maxRev, maxSeq, tip, false, true)
 }
 
+// applyEntry writes e into b.
 func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
-	if e.Op == wal.OpTxn {
+	_, err := s.applyEntryRev(b, e)
+	return err
+}
+
+// applyEntryRev writes e into b and reports whether e consumes a revision,
+// from the transaction payload it decodes anyway rather than a separate scan.
+func (s *Store) applyEntryRev(b *pebble.Batch, e *wal.Entry) (consumesRev bool, err error) {
+	switch e.Op {
+	case wal.OpTxn:
 		return s.applyTxnEntry(b, e)
+	case wal.OpMetaPut, wal.OpMetaDelete:
+		return false, applyMetaOp(b, e.Op, e.Key, e.Value)
+	case wal.OpCreate, wal.OpUpdate, wal.OpDelete:
+	default:
+		// Never guess: writing an unknown op as a data record would overwrite
+		// the log entry at e.Revision and corrupt history.
+		return false, fmt.Errorf("store: apply seq=%d rev=%d: %w: op=%d", e.Sequence(), e.Revision, wal.ErrUnknownOp, e.Op)
 	}
 	lk := logKey(e.Revision)
 
@@ -598,30 +623,41 @@ func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
 		delete:         e.Op == wal.OpDelete,
 	}
 	if err := b.Set(lk, marshalRecord(r), pebble.NoSync); err != nil {
-		return fmt.Errorf("store: set log key rev=%d: %w", e.Revision, err)
+		return false, fmt.Errorf("store: set log key rev=%d: %w", e.Revision, err)
 	}
 	ik := idxKey(e.Key)
 	if e.Op == wal.OpDelete {
 		if err := b.Delete(ik, pebble.NoSync); err != nil {
-			return fmt.Errorf("store: delete idx key %q: %w", e.Key, err)
+			return false, fmt.Errorf("store: delete idx key %q: %w", e.Key, err)
 		}
 	} else {
 		if err := b.Set(ik, encodeIdx(e.Revision, r.createRevision, r.version, idxSubNone), pebble.NoSync); err != nil {
-			return fmt.Errorf("store: set idx key %q rev=%d: %w", e.Key, e.Revision, err)
+			return false, fmt.Errorf("store: set idx key %q rev=%d: %w", e.Key, e.Revision, err)
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // applyTxnEntry decodes and atomically applies all sub-operations from an
 // OpTxn WAL entry. Each sub-op is stored at logKeyWithSub(rev, i) so that
 // the log scan in Watch returns one event per key at the transaction revision.
-func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) error {
+func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) (consumesRev bool, err error) {
 	ops, err := wal.DecodeTxnOps(e.Value)
 	if err != nil {
-		return fmt.Errorf("store: decode txn ops rev=%d: %w", e.Revision, err)
+		return false, fmt.Errorf("store: decode txn ops rev=%d: %w", e.Revision, err)
 	}
 	for i, op := range ops {
+		if op.Op.IsMeta() {
+			if err := applyMetaOp(b, op.Op, op.Key, op.Value); err != nil {
+				return false, err
+			}
+			continue
+		}
+		consumesRev = true
+		// Data sub-ops keep their position in the txn as the sub index, so
+		// indexes may have gaps where meta sub-ops were; readers scan the
+		// whole [logKey(rev), logKey(rev+1)) range and do not rely on them
+		// being dense.
 		lk := logKeyWithSub(e.Revision, uint16(i))
 		r := &record{
 			key:            op.Key,
@@ -634,18 +670,32 @@ func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) error {
 			delete:         op.Op == wal.OpDelete,
 		}
 		if err := b.Set(lk, marshalRecord(r), pebble.NoSync); err != nil {
-			return fmt.Errorf("store: set txn log key rev=%d sub=%d: %w", e.Revision, i, err)
+			return false, fmt.Errorf("store: set txn log key rev=%d sub=%d: %w", e.Revision, i, err)
 		}
 		ik := idxKey(op.Key)
 		if op.Op == wal.OpDelete {
 			if err := b.Delete(ik, pebble.NoSync); err != nil {
-				return fmt.Errorf("store: delete txn idx key %q: %w", op.Key, err)
+				return false, fmt.Errorf("store: delete txn idx key %q: %w", op.Key, err)
 			}
 		} else {
 			if err := b.Set(ik, encodeIdx(e.Revision, r.createRevision, r.version, uint16(i)), pebble.NoSync); err != nil {
-				return fmt.Errorf("store: set txn idx key %q rev=%d: %w", op.Key, e.Revision, err)
+				return false, fmt.Errorf("store: set txn idx key %q rev=%d: %w", op.Key, e.Revision, err)
 			}
 		}
+	}
+	return consumesRev, nil
+}
+
+// applyMetaOp writes one meta keyspace operation into b.
+func applyMetaOp(b *pebble.Batch, op wal.Op, key string, value []byte) error {
+	if op == wal.OpMetaDelete {
+		if err := b.Delete(metaKVKey(key), pebble.NoSync); err != nil {
+			return fmt.Errorf("store: delete meta key %q: %w", key, err)
+		}
+		return nil
+	}
+	if err := b.Set(metaKVKey(key), value, pebble.NoSync); err != nil {
+		return fmt.Errorf("store: set meta key %q: %w", key, err)
 	}
 	return nil
 }
@@ -721,17 +771,30 @@ func (s *Store) waitChan() <-chan struct{} {
 // WaitForRevision blocks until currentRev >= rev, ctx is cancelled, or the
 // store is closed.
 func (s *Store) WaitForRevision(ctx context.Context, rev int64) error {
+	return s.waitFor(ctx, func() bool { return atomic.LoadInt64(&s.currentRev) >= rev })
+}
+
+// WaitForSequence blocks until the last applied WAL sequence is >= seq, ctx
+// is cancelled, or the store is closed. Meta ops advance the sequence but not
+// the revision, so reads of the meta keyspace sync on sequence.
+func (s *Store) WaitForSequence(ctx context.Context, seq int64) error {
+	return s.waitFor(ctx, func() bool { return atomic.LoadInt64(&s.lastSeq) >= seq })
+}
+
+// waitFor blocks until done reports true, ctx is cancelled, or the store is
+// closed. done is re-checked after every broadcast.
+func (s *Store) waitFor(ctx context.Context, done func() bool) error {
 	for {
 		select {
 		case <-s.closed:
 			return ErrClosed
 		default:
 		}
-		// Snapshot the notify channel before re-checking currentRev. If a
-		// broadcast races between the load and the select, ch is already
+		// Snapshot the notify channel before re-checking the condition. If a
+		// broadcast races between the check and the select, ch is already
 		// closed and the select returns immediately — no lost wakeup.
 		ch := s.waitChan()
-		if atomic.LoadInt64(&s.currentRev) >= rev {
+		if done() {
 			return nil
 		}
 		select {
@@ -742,6 +805,86 @@ func (s *Store) WaitForRevision(ctx context.Context, rev int64) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// --- Meta keyspace ---
+
+// MetaKV is one entry of the meta keyspace.
+type MetaKV struct {
+	Key   string
+	Value []byte
+}
+
+// MetaGet returns the value of key in the meta keyspace. ok is false when the
+// key does not exist.
+func (s *Store) MetaGet(key string) (value []byte, ok bool, err error) {
+	v, closer, err := s.db.Get(metaKVKey(key))
+	if err == pebble.ErrNotFound {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("store: get meta key %q: %w", key, err)
+	}
+	value = append([]byte(nil), v...)
+	if err := closer.Close(); err != nil {
+		return nil, false, fmt.Errorf("store: get meta key %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+// MetaHas reports whether key exists in the meta keyspace, without copying
+// its value.
+func (s *Store) MetaHas(key string) (bool, error) {
+	_, closer, err := s.db.Get(metaKVKey(key))
+	if err == pebble.ErrNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: get meta key %q: %w", key, err)
+	}
+	if err := closer.Close(); err != nil {
+		return false, fmt.Errorf("store: get meta key %q: %w", key, err)
+	}
+	return true, nil
+}
+
+// MetaList returns all meta keyspace entries whose key starts with prefix,
+// sorted by key.
+func (s *Store) MetaList(prefix string) ([]MetaKV, error) {
+	lower := metaKVKey(prefix)
+	upper := metaKVUpper
+	if prefix != "" {
+		upper = upperBound(lower)
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, fmt.Errorf("store: meta list iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+	var out []MetaKV
+	for iter.First(); iter.Valid(); iter.Next() {
+		out = append(out, MetaKV{
+			Key:   string(iter.Key()[1:]),
+			Value: append([]byte(nil), iter.Value()...),
+		})
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("store: meta list: %w", err)
+	}
+	return out, nil
+}
+
+// HasMeta reports whether the meta keyspace holds any key. A store with meta
+// keys can only be read by binaries that understand them, so checkpoints of it
+// must use the newer checkpoint format.
+func (s *Store) HasMeta() (bool, error) {
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: metaKVLower, UpperBound: metaKVUpper})
+	if err != nil {
+		return false, fmt.Errorf("store: meta iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+	ok := iter.First()
+	return ok, iter.Error()
 }
 
 // --- Read path ---
