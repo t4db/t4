@@ -509,16 +509,18 @@ To import it:
 3. Select your Prometheus datasource when prompted.
 4. Set the **job** variable to match the scrape job name for your T4 instances (default: `t4`).
 
-The dashboard contains six sections:
+The dashboard contains eight sections:
 
 | Section               | Panels                                                                                                         |
 |-----------------------|----------------------------------------------------------------------------------------------------------------|
 | **Cluster Health**    | Leader count (split-brain indicator), current revision, node roles, max follower lag, elections/hr, resyncs/hr |
 | **Write Performance** | Throughput by op type, error rate, p50/p95/p99 write latency                                                   |
+| **Read Performance**  | Throughput by op type, error rate, p50/p95/p99 read latency                                                    |
 | **Watch Performance** | Active watches/prefixes, p50/p95/p99 watch scan latency, revision span, scanned vs matched log entries         |
 | **Replication**       | Per-follower lag over time, forwarded write rate, forward round-trip latency                                   |
 | **WAL & Checkpoints** | Upload rate, upload errors, upload duration, checkpoint frequency                                              |
 | **Object Store (S3)** | Op rate by type, error rate, p50/p95/p99 latency                                                               |
+| **Transactions**      | Rate by kind and result, sub-operation rate, p50/p95/p99 lock wait and prepare duration                        |
 
 ### Prometheus metrics
 
