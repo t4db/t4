@@ -828,10 +828,11 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 	// 0. Wait out an in-flight checkpoint. The upload runs with the write
 	//    fence released, so the fence below does not wait for it. Left
-	//    running, it could write manifest/latest after a follower has taken
-	//    over and checkpointed term N+1, moving the manifest back to an older
-	//    term-N checkpoint. Waiting rather than cancelling: a cancelled PUT
-	//    may still land. n.closed is already set, so no new checkpoint starts.
+	//    running, it would keep writing term-N checkpoint objects after a
+	//    follower has taken over. WriteManifest refuses to move manifest/latest
+	//    back to such a checkpoint, but handing off only once the upload is
+	//    done keeps the new leader's object store free of a racing writer.
+	//    n.closed is already set, so no new checkpoint starts.
 	//
 	//    The wait is bounded so a stalled object store cannot hang shutdown.
 	//    On timeout there is no handoff (steps 3 and 4): the upload is still
