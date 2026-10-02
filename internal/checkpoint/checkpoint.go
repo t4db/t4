@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -144,8 +145,12 @@ func (m *Manager) ReadManifest(ctx context.Context, store object.Store) (*Manife
 		return nil, fmt.Errorf("checkpoint: read manifest: %w", err)
 	}
 	defer rc.Close()
+	return m.decodeManifest(rc)
+}
+
+func (m *Manager) decodeManifest(r io.Reader) (*Manifest, error) {
 	var manifest Manifest
-	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
+	if err := json.NewDecoder(r).Decode(&manifest); err != nil {
 		return nil, fmt.Errorf("checkpoint: decode manifest: %w", err)
 	}
 	// FormatVersion == 0 means the manifest was written by an older node that
@@ -162,16 +167,55 @@ func (m *Manager) ReadManifest(ctx context.Context, store object.Store) (*Manife
 	return &manifest, nil
 }
 
-// WriteManifest writes m to object storage.
+// ErrStaleManifest is returned by WriteManifest when manifest/latest already
+// points to a later checkpoint than the one being written.
+var ErrStaleManifest = errors.New("manifest/latest points to a newer checkpoint")
+
+// WriteManifest writes m to object storage, never moving manifest/latest
+// back to an older checkpoint: if it already points to a newer one (higher
+// term, or same term and higher sequence), m is not written and
+// ErrStaleManifest is returned. A deposed leader's checkpoint upload can
+// finish after the next leader has written its own; without this it would
+// overwrite the newer manifest.
+//
+// The write is conditional on the manifest being unchanged since it was read,
+// so a write that lands late (a PUT cancelled client side that still reached
+// the store) is rejected too. Stores without conditional writes get a plain
+// write.
 func (mgr *Manager) WriteManifest(ctx context.Context, store object.Store, m *Manifest) error {
+	if err := mgr.putManifest(ctx, store, m); err != nil {
+		return fmt.Errorf("checkpoint: write manifest: %w", err)
+	}
+	return nil
+}
+
+func (mgr *Manager) putManifest(ctx context.Context, store object.Store, m *Manifest) error {
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	if err := store.Put(ctx, ManifestKey, bytes.NewReader(b)); err != nil {
-		return fmt.Errorf("checkpoint: write manifest: %w", err)
+	cs, ok := store.(object.ConditionalStore)
+	if !ok {
+		return store.Put(ctx, ManifestKey, bytes.NewReader(b))
 	}
-	return nil
+
+	cur, err := cs.GetETag(ctx, ManifestKey)
+	if errors.Is(err, object.ErrNotFound) {
+		return cs.PutIfAbsent(ctx, ManifestKey, bytes.NewReader(b))
+	}
+	if err != nil {
+		return err
+	}
+	old, err := mgr.decodeManifest(cur.Body)
+	_ = cur.Body.Close()
+	if err != nil {
+		return err
+	}
+
+	if old.Term > m.Term || (old.Term == m.Term && old.LastSequence > m.LastSequence) {
+		return fmt.Errorf("%w: term=%d seq=%d", ErrStaleManifest, old.Term, old.LastSequence)
+	}
+	return cs.PutIfMatch(ctx, ManifestKey, bytes.NewReader(b), cur.ETag)
 }
 
 // Write creates a Pebble checkpoint and uploads it: individual SST files at

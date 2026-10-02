@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -158,10 +159,14 @@ func TestWriteManifestOverwrite(t *testing.T) {
 	store := object.NewMem()
 	ctx := context.Background()
 
-	testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 1, Term: 1,
-		CheckpointKey: checkpoint.CheckpointIndexKey(1, 1)})
-	testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 2, Term: 1,
-		CheckpointKey: checkpoint.CheckpointIndexKey(1, 2)})
+	if err := testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 1, LastSequence: 1, Term: 1,
+		CheckpointKey: checkpoint.CheckpointIndexKey(1, 1)}); err != nil {
+		t.Fatalf("WriteManifest rev=1: %v", err)
+	}
+	if err := testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 2, LastSequence: 2, Term: 1,
+		CheckpointKey: checkpoint.CheckpointIndexKey(1, 2)}); err != nil {
+		t.Fatalf("WriteManifest rev=2: %v", err)
+	}
 
 	m, _ := testCP.ReadManifest(ctx, store)
 	if m.Revision != 2 {
@@ -810,4 +815,88 @@ func TestGCOrphanSSTsBranchProtection(t *testing.T) {
 	}
 	// At minimum 0 deletions (if Pebble reused all SSTs in the second checkpoint).
 	t.Logf("GCOrphanSSTs after unregister: %d SST(s) deleted", deleted2)
+}
+
+// TestWriteManifestNeverGoesBackwards pins that manifest/latest only moves
+// forward in (term, sequence) order: a deposed leader's late checkpoint must
+// not replace a newer one.
+func TestWriteManifestNeverGoesBackwards(t *testing.T) {
+	store := object.NewMem()
+	ctx := context.Background()
+	steps := []struct {
+		term  uint64
+		seq   int64
+		stale bool
+	}{
+		{term: 1, seq: 10},
+		{term: 1, seq: 20},              // same term, later
+		{term: 1, seq: 20},              // same checkpoint again: idempotent
+		{term: 1, seq: 15, stale: true}, // same term, earlier
+		{term: 2, seq: 18},              // newer term wins even at a lower sequence
+		{term: 1, seq: 30, stale: true}, // older term, however far along
+	}
+	want := steps[0]
+	for _, st := range steps {
+		err := testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Term: st.term, Revision: st.seq, LastSequence: st.seq})
+		if st.stale {
+			if !errors.Is(err, checkpoint.ErrStaleManifest) {
+				t.Fatalf("write term=%d seq=%d: err=%v, want ErrStaleManifest", st.term, st.seq, err)
+			}
+		} else {
+			if err != nil {
+				t.Fatalf("write term=%d seq=%d: %v", st.term, st.seq, err)
+			}
+			want = st
+		}
+		got, err := testCP.ReadManifest(ctx, store)
+		if err != nil {
+			t.Fatalf("ReadManifest: %v", err)
+		}
+		if got.Term != want.term || got.LastSequence != want.seq {
+			t.Fatalf("after write term=%d seq=%d: manifest term=%d seq=%d, want term=%d seq=%d",
+				st.term, st.seq, got.Term, got.LastSequence, want.term, want.seq)
+		}
+	}
+}
+
+// racingStore lets a newer manifest land between WriteManifest's read and its
+// conditional write, as another leader's checkpoint would.
+type racingStore struct {
+	*object.Mem
+	once  sync.Once
+	newer *checkpoint.Manifest
+}
+
+func (s *racingStore) PutIfMatch(ctx context.Context, key string, r io.Reader, etag string) error {
+	s.once.Do(func() {
+		b, _ := json.Marshal(s.newer)
+		_ = s.Put(ctx, key, bytes.NewReader(b))
+	})
+	return s.Mem.PutIfMatch(ctx, key, r, etag)
+}
+
+// TestWriteManifestLosesRaceToNewer pins that the compare and the write are
+// one compare-and-swap: a newer manifest written after our read fails our
+// write instead of being overwritten.
+func TestWriteManifestLosesRaceToNewer(t *testing.T) {
+	store := &racingStore{
+		Mem:   object.NewMem(),
+		newer: &checkpoint.Manifest{Term: 2, Revision: 5, LastSequence: 5},
+	}
+	ctx := context.Background()
+	if err := testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Term: 1, Revision: 1, LastSequence: 1}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	err := testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Term: 1, Revision: 3, LastSequence: 3})
+	if !errors.Is(err, object.ErrPreconditionFailed) {
+		t.Fatalf("err=%v, want ErrPreconditionFailed", err)
+	}
+	got, err := testCP.ReadManifest(ctx, store)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if got.Term != 2 || got.LastSequence != 5 {
+		t.Fatalf("manifest term=%d seq=%d, want the newer term=2 seq=5", got.Term, got.LastSequence)
+	}
 }
