@@ -12,7 +12,7 @@ import (
 // Key space layout (single-byte prefix preserves lexicographic order):
 //
 //	'l' + rev(8B BE)  → serialised entry  (append-only change log)
-//	'i' + key bytes   → rev(8B BE)         (current modRevision per live key)
+//	'i' + key bytes   → index value        (current modRevision per live key; see encodeIdx)
 //	'm' + name bytes  → metadata value     (compact rev, current rev, etc.)
 const (
 	prefixLog  = byte('l')
@@ -128,6 +128,53 @@ func encodeRev(rev int64) []byte {
 
 func decodeRev(b []byte) int64 {
 	return int64(binary.BigEndian.Uint64(b))
+}
+
+// Index values. The first 8 bytes are always the key's modRevision, which is
+// all a legacy (v1) value holds and all older binaries read, so v2 values
+// stay readable after a rollback and the two formats can be mixed freely.
+//
+//	v1: rev(8)
+//	v2: rev(8) + createRev(8) + version(8) + sub(2)
+//
+// v2 carries what a keys-only read returns, so such reads are served from the
+// index without loading the log record, and sub locates the record directly:
+// the sub-op index of a txn record at logKeyWithSub(rev, sub), or idxSubNone
+// for a single-op record at logKey(rev).
+const (
+	idxValueSizeV2 = 26
+	// idxSubNone marks a single-op record. A txn holds at most 65535 ops, so
+	// sub-op indexes stop at 65534 and never collide with it.
+	idxSubNone = uint16(0xFFFF)
+)
+
+// idxEntry is a decoded index value. Only rev is set for a v1 value.
+type idxEntry struct {
+	rev            int64
+	createRevision int64
+	version        int64
+	sub            uint16
+	v2             bool
+}
+
+func encodeIdx(rev, createRev, version int64, sub uint16) []byte {
+	b := make([]byte, idxValueSizeV2)
+	binary.BigEndian.PutUint64(b[0:8], uint64(rev))
+	binary.BigEndian.PutUint64(b[8:16], uint64(createRev))
+	binary.BigEndian.PutUint64(b[16:24], uint64(version))
+	binary.BigEndian.PutUint16(b[24:26], sub)
+	return b
+}
+
+func decodeIdx(b []byte) idxEntry {
+	e := idxEntry{rev: decodeRev(b)}
+	if len(b) >= idxValueSizeV2 {
+		e.createRevision = int64(binary.BigEndian.Uint64(b[8:16]))
+		e.version = int64(binary.BigEndian.Uint64(b[16:24]))
+		e.sub = binary.BigEndian.Uint16(b[24:26])
+		e.v2 = true
+	}
+	return e
 }
 
 func revisionSampleKey(unixNano int64) []byte {
