@@ -159,10 +159,14 @@ func TestWriteManifestOverwrite(t *testing.T) {
 	store := object.NewMem()
 	ctx := context.Background()
 
-	testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 1, LastSequence: 1, Term: 1,
-		CheckpointKey: checkpoint.CheckpointIndexKey(1, 1)})
-	testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 2, LastSequence: 2, Term: 1,
-		CheckpointKey: checkpoint.CheckpointIndexKey(1, 2)})
+	if err := testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 1, LastSequence: 1, Term: 1,
+		CheckpointKey: checkpoint.CheckpointIndexKey(1, 1)}); err != nil {
+		t.Fatalf("WriteManifest rev=1: %v", err)
+	}
+	if err := testCP.WriteManifest(ctx, store, &checkpoint.Manifest{Revision: 2, LastSequence: 2, Term: 1,
+		CheckpointKey: checkpoint.CheckpointIndexKey(1, 2)}); err != nil {
+		t.Fatalf("WriteManifest rev=2: %v", err)
+	}
 
 	m, _ := testCP.ReadManifest(ctx, store)
 	if m.Revision != 2 {
@@ -866,7 +870,7 @@ type racingStore struct {
 func (s *racingStore) PutIfMatch(ctx context.Context, key string, r io.Reader, etag string) error {
 	s.once.Do(func() {
 		b, _ := json.Marshal(s.newer)
-		_ = s.Mem.Put(ctx, key, bytes.NewReader(b))
+		_ = s.Put(ctx, key, bytes.NewReader(b))
 	})
 	return s.Mem.PutIfMatch(ctx, key, r, etag)
 }
