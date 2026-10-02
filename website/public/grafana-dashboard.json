@@ -817,12 +817,216 @@
     },
     {
       "collapsed": false,
-      "id": 60,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 19
+      },
+      "id": 70,
+      "title": "Read Performance",
+      "type": "row"
+    },
+    {
+      "id": 71,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 20
+      },
+      "type": "timeseries",
+      "title": "Read Throughput",
+      "description": "Successful read operations per second by op type.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (op) (rate(t4_reads_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 72,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 20
+      },
+      "type": "timeseries",
+      "title": "Read Error Rate",
+      "description": "Read errors as a fraction of total read attempts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (op) (rate(t4_read_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n/ (\n  sum by (op) (rate(t4_reads_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n  + sum by (op) (rate(t4_read_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))\n)",
+          "legendFormat": "error rate ({{op}})",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 73,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 20
+      },
+      "type": "timeseries",
+      "title": "Read Latency (p50 / p95 / p99)",
+      "description": "Local read latency percentiles (all op types combined; excludes follower linearizable-read sync).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "collapsed": false,
+      "id": 60,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
       },
       "type": "row",
       "title": "Watch Performance"
@@ -833,7 +1037,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 20
+        "y": 29
       },
       "type": "stat",
       "title": "Active Watches",
@@ -883,7 +1087,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 20
+        "y": 29
       },
       "type": "timeseries",
       "title": "Watch Scan Latency (p50 / p95 / p99)",
@@ -942,7 +1146,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 20
+        "y": 29
       },
       "type": "timeseries",
       "title": "Watch Revision Span (p50 / p95 / p99)",
@@ -1001,7 +1205,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 37
       },
       "type": "timeseries",
       "title": "Watch Scan Entries",
@@ -1050,7 +1254,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 45
       },
       "id": 20,
       "title": "Replication",
@@ -1062,7 +1266,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 37
+        "y": 46
       },
       "type": "timeseries",
       "title": "Follower Lag",
@@ -1129,7 +1333,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 37
+        "y": 46
       },
       "type": "timeseries",
       "title": "Forwarded Writes",
@@ -1178,7 +1382,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 37
+        "y": 46
       },
       "type": "timeseries",
       "title": "Forward Latency (p50 / p95 / p99)",
@@ -1239,7 +1443,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 54
       },
       "datasource": {
         "type": "prometheus",
@@ -1289,7 +1493,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 54
       },
       "datasource": {
         "type": "prometheus",
@@ -1328,7 +1532,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 63
       },
       "id": 30,
       "title": "WAL & Checkpoints",
@@ -1340,7 +1544,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 55
+        "y": 64
       },
       "type": "timeseries",
       "title": "WAL Upload Rate",
@@ -1388,7 +1592,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 55
+        "y": 64
       },
       "type": "timeseries",
       "title": "WAL Upload Errors",
@@ -1437,7 +1641,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 55
+        "y": 64
       },
       "type": "timeseries",
       "title": "WAL Upload Duration (p50 / p95 / p99)",
@@ -1496,7 +1700,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 55
+        "y": 64
       },
       "type": "timeseries",
       "title": "Checkpoints Written",
@@ -1544,7 +1748,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 63
+        "y": 72
       },
       "id": 40,
       "title": "Object Store (S3)",
@@ -1556,7 +1760,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 64
+        "y": 73
       },
       "type": "timeseries",
       "title": "S3 Operation Rate",
@@ -1605,7 +1809,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 64
+        "y": 73
       },
       "type": "timeseries",
       "title": "S3 Error Rate",
@@ -1671,7 +1875,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 64
+        "y": 73
       },
       "type": "timeseries",
       "title": "S3 Latency (p50 / p95 / p99)",
@@ -1747,7 +1951,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 72
+        "y": 81
       },
       "id": 65,
       "title": "Transactions",
@@ -1759,7 +1963,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 73
+        "y": 82
       },
       "type": "timeseries",
       "title": "Transaction Rate by Kind & Result",
@@ -1808,7 +2012,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 73
+        "y": 82
       },
       "type": "timeseries",
       "title": "Transaction Sub-Operation Rate",
@@ -1857,7 +2061,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 81
+        "y": 90
       },
       "type": "timeseries",
       "title": "Txn Lock Wait (p50 / p95 / p99)",
@@ -1933,7 +2137,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 81
+        "y": 90
       },
       "type": "timeseries",
       "title": "Txn Prepare Duration (p50 / p95 / p99)",
@@ -2002,102 +2206,6 @@
           }
         ]
       }
-    },
-    {
-      "type": "row",
-      "id": 70,
-      "title": "Read Performance",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 89
-      },
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "id": 71,
-      "title": "Read Throughput",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 90
-      },
-      "targets": [
-        {
-          "expr": "sum by (op) (rate(t4_reads_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
-          "legendFormat": "{{op}}",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 72,
-      "title": "Read Error Rate",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 90
-      },
-      "targets": [
-        {
-          "expr": "sum by (op) (rate(t4_read_errors_total{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m]))",
-          "legendFormat": "{{op}}",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 73,
-      "title": "Read Latency (p50 / p95 / p99)",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 90
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
-          "legendFormat": "p50",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
-          "legendFormat": "p95",
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
-          "legendFormat": "p99",
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
     }
   ]
 }
