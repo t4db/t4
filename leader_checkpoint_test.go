@@ -20,8 +20,10 @@ import (
 )
 
 // blockingStore delays object-store Puts like a slow remote object store and
-// signals when the first upload lands, so a test can observe the system while
-// a checkpoint upload is still in flight.
+// signals when the first checkpoint object starts uploading, so a test can
+// observe the system while a checkpoint upload is still in flight. WAL and SST
+// uploads don't count: the WAL seal and Pebble flush queue them while the
+// checkpoint still holds the write fence.
 type blockingStore struct {
 	object.Store
 	delay    time.Duration
@@ -35,7 +37,9 @@ type blockingStore struct {
 
 func (s *blockingStore) Put(ctx context.Context, key string, r io.Reader) error {
 	start := time.Since(s.t0)
-	s.once.Do(func() { close(s.firstPut) })
+	if strings.HasPrefix(key, "checkpoint/") {
+		s.once.Do(func() { close(s.firstPut) })
+	}
 	s.mu.Lock()
 	s.putKeys = append(s.putKeys, key)
 	s.mu.Unlock()
