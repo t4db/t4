@@ -28,9 +28,11 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/testutil"
@@ -68,9 +70,10 @@ func TestUpgrade(t *testing.T) {
 // revisions needed to check history.
 type written struct {
 	state      state
-	compactRev int64 // revision the dataset was compacted at
-	revV1      int64 // revision of /upgrade/updated = v1, compacted away
-	revV2      int64 // revision of /upgrade/updated = v2, still readable
+	compactRev int64  // revision the dataset was compacted at
+	revV1      int64  // revision of /upgrade/updated = v1, compacted away
+	revV2      int64  // revision of /upgrade/updated = v2, still readable
+	aliceToken string // issued by the earlier release
 }
 
 // Auth is enabled as the dataset's last step; from then on clients log in as
@@ -81,6 +84,11 @@ func writeWithOld(t *testing.T, bin, dataDir string, extra []string) written {
 	t.Helper()
 	n := startNode(t, bin, dataDir, extra, "")
 	w := writeDataset(t, n.client)
+	login, err := n.client.Authenticate(context.Background(), "alice", "alice-password")
+	if err != nil {
+		t.Fatalf("log in as alice: %v", err)
+	}
+	w.aliceToken = login.Token
 	w.state = snapshot(t, n.rootClient(t))
 	n.stop(t)
 	return w
@@ -106,6 +114,12 @@ func checkWithNew(t *testing.T, bin, dataDir string, extra []string, want writte
 	}
 	if _, err := alice.Put(ctx, "/upgrade/plain/000", "x"); status.Code(err) != codes.PermissionDenied {
 		t.Errorf("alice write under /upgrade/: err=%v, want permission denied", err)
+	}
+	// A token issued by the earlier release stays valid. It is sent by hand:
+	// clientv3 would log in again on a rejected token.
+	tokenCtx := metadata.AppendToOutgoingContext(ctx, rpctypes.TokenFieldNameGRPC, want.aliceToken)
+	if _, err := etcdserverpb.NewKVClient(anon.ActiveConnection()).Range(tokenCtx, &etcdserverpb.RangeRequest{Key: []byte("/upgrade/plain/000")}); err != nil {
+		t.Errorf("read with alice's token from the earlier release: %v", err)
 	}
 
 	// History survives: the compacted revision stays compacted, later

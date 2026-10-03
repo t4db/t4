@@ -235,7 +235,8 @@ Client TLS and peer mTLS are independent — each uses its own cert/key/CA and c
 T4 implements the etcd v3 Auth API: username/password authentication with bearer tokens, and role-based access control
 scoped to key prefixes. Auth state (users, roles, enabled flag) is stored in Pebble and flows through the WAL, so it is
 replicated to followers and included in S3 checkpoints. Bearer tokens are persisted to Pebble and survive node
-restarts — clients do not need to re-authenticate after a restart.
+restarts — clients do not need to re-authenticate after a restart. Only a SHA-256 hash of each token is stored, so
+the WAL, checkpoints and backups do not contain usable tokens; passwords are stored as bcrypt hashes.
 
 Enable auth with `--auth-enabled`:
 
