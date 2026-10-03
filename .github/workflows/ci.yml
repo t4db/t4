@@ -147,6 +147,92 @@ jobs:
         if: failure()
         run: docker logs t4-s3-smoke || true
 
+  upgrade-matrix:
+    name: Upgrade Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.matrix.outputs.versions }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The latest patch of the previous minor release, the first patch of the
+      # latest minor release, and the latest release.
+      - name: Pick releases to upgrade from
+        id: matrix
+        run: |
+          versions=$(hack/upgrade-matrix.sh)
+          echo "Upgrading from: $versions"
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  test-upgrade:
+    name: Test Upgrade (from ${{ matrix.from }})
+    needs: upgrade-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        from: ${{ fromJSON(needs.upgrade-matrix.outputs.versions) }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Start S3 server
+        run: |
+          docker run -d --name t4-s3-upgrade \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=t4testadmin \
+            -e RUSTFS_SECRET_KEY=t4testadmin \
+            rustfs/rustfs:1.0.0
+
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:9000/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs t4-s3-upgrade
+          exit 1
+
+      - name: Download the release to upgrade from
+        run: |
+          gh release download "$FROM" --pattern t4-linux-amd64 --pattern checksums.txt --dir old
+          (cd old && grep ' t4-linux-amd64$' checksums.txt | sha256sum -c -)
+          chmod +x old/t4-linux-amd64
+        env:
+          FROM: ${{ matrix.from }}
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build t4
+        run: go build -o t4 ./cmd/t4
+
+      - name: Run upgrade test
+        run: go test -timeout 600s -count=1 -v -run TestUpgrade ./tests/upgrade
+        env:
+          T4_UPGRADE_FROM_BIN: ${{ github.workspace }}/old/t4-linux-amd64
+          T4_UPGRADE_TO_BIN: ${{ github.workspace }}/t4
+          T4_UPGRADE_S3: "1"
+          S3_ENDPOINT: http://127.0.0.1:9000
+          S3_ACCESS_KEY: t4testadmin
+          S3_SECRET_KEY: t4testadmin
+          S3_REGION: us-east-1
+
+      - name: Dump S3 server logs
+        if: failure()
+        run: docker logs t4-s3-upgrade || true
+
   test-race-linux:
     name: Test Race (Linux)
     runs-on: ubuntu-latest
