@@ -418,7 +418,12 @@ func startNode(t *testing.T, bin, dataDir string, extra []string, rootPass strin
 	if err := n.cmd.Start(); err != nil {
 		t.Fatalf("start %s: %v", bin, err)
 	}
-	t.Cleanup(func() { _ = n.cmd.Process.Kill() })
+	t.Cleanup(func() {
+		_ = n.cmd.Process.Kill()
+		if t.Failed() {
+			t.Logf("%s log:\n%s", bin, n.log)
+		}
+	})
 
 	user := ""
 	if rootPass != "" {
