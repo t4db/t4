@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/t4db/t4"
 	t4etcd "github.com/t4db/t4/etcd"
+	"github.com/t4db/t4/internal/wal"
 )
 
 // newServer opens a single-node t4 Node (no S3) and wraps it in an etcd Server.
@@ -662,5 +664,19 @@ func TestTracingOptionsNilIsFree(t *testing.T) {
 	}
 	if opts := t4etcd.TracingOptions(noop.NewTracerProvider()); len(opts) != 1 {
 		t.Fatalf("TracingOptions(tp) = %d options, want 1", len(opts))
+	}
+}
+
+// TestStatusReportsStorageVersion pins that Status reports the data format
+// version, so tools needing etcd's revision behaviour can check it.
+func TestStatusReportsStorageVersion(t *testing.T) {
+	srv := newServer(t)
+	resp, err := srv.Status(context.Background(), &etcdserverpb.StatusRequest{})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	want := strconv.Itoa(wal.WALFormatVersion)
+	if resp.StorageVersion != want {
+		t.Fatalf("StorageVersion=%q, want %q", resp.StorageVersion, want)
 	}
 }
