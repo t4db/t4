@@ -360,8 +360,9 @@ The `root` role always passes all checks regardless of the key.
 
 ### Auth namespace protection
 
-Keys under the `\x00auth/` prefix are reserved for internal auth storage. Access to these keys via the KV service is
-blocked for all users, including `root`. Attempting to read or write them returns `PermissionDenied`.
+Keys under the `\x00auth/` prefix are reserved for internal auth storage (users, roles and tokens). The KV and Watch
+services never expose or change them, for any user, including `root`: requests addressed to them return
+`PermissionDenied`, and ranges, watches and deletes that span the prefix skip them.
 
 ### Rate limiting
 

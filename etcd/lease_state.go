@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/etcd/auth"
 )
 
 const (
@@ -27,8 +28,11 @@ type leaseRecord struct {
 	ExpiryUnixNs int64 `json:"expiry_unix_ns"`
 }
 
+// isInternalKey reports whether key belongs to T4's own state, which the KV
+// and watch APIs never expose or let clients change: lease state, and auth
+// users, roles and tokens. A token key holds the bearer token itself.
 func isInternalKey(key string) bool {
-	return strings.HasPrefix(key, internalPrefix)
+	return strings.HasPrefix(key, internalPrefix) || auth.IsAuthPrefix(key)
 }
 
 func leaseKey(id int64) string {
