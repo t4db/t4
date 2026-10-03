@@ -12,6 +12,7 @@ import (
 	"context"
 	"math"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/etcd/auth"
+	"github.com/t4db/t4/internal/wal"
 )
 
 const (
@@ -38,6 +40,12 @@ const (
 	maxSendBytes                = math.MaxInt32
 	emulatedETCDVersion         = "3.5.13"
 )
+
+// storageVersion is the data format version (the WAL format) of the
+// databases this release serves. In format 2, T4 keeps leases and auth state
+// in reserved revisioned keys, so their writes consume revisions that no watch
+// event carries; tools that need etcd's revision behaviour can check it.
+var storageVersion = strconv.Itoa(wal.WALFormatVersion)
 
 // Server implements the etcd v3 gRPC protocol on top of a t4 Node.
 type Server struct {
@@ -369,7 +377,9 @@ func (s *Server) Alarm(_ context.Context, _ *etcdserverpb.AlarmRequest) (*etcdse
 	return &etcdserverpb.AlarmResponse{Header: s.header()}, nil
 }
 
-// Status returns basic node status: current revision, leader, and version.
+// Status returns basic node status: current revision, leader, version, and
+// the database's data format version as StorageVersion, where etcd reports
+// its storage schema version.
 func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcdserverpb.StatusResponse, error) {
 	rev := s.node.CurrentRevision()
 	leader := uint64(0)
@@ -380,6 +390,7 @@ func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcd
 	return &etcdserverpb.StatusResponse{
 		Header:           s.header(),
 		Version:          emulatedETCDVersion,
+		StorageVersion:   storageVersion,
 		Leader:           leader,
 		RaftIndex:        uint64(etcdRev),
 		RaftAppliedIndex: uint64(etcdRev),
