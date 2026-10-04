@@ -264,6 +264,7 @@ metadata.
 | `t4 run` | `T4_PEER_TLS_CA` | `--peer-tls-ca` |
 | `t4 run` | `T4_PEER_TLS_CERT` | `--peer-tls-cert` |
 | `t4 run` | `T4_PEER_TLS_KEY` | `--peer-tls-key` |
+| `t4 run` | `T4_PPROF` | `--pprof` |
 | `t4 run` | `T4_READ_CONSISTENCY` | `--read-consistency` |
 | `t4 run` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 run` | `T4_S3_BUCKET` | `--s3-bucket` |
@@ -412,6 +413,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--peer-tls-ca` | — | `T4_PEER_TLS_CA` | No | CA certificate file for peer mTLS (PEM) |
 | `t4 run` | `--peer-tls-cert` | — | `T4_PEER_TLS_CERT` | No | node certificate file for peer mTLS (PEM) |
 | `t4 run` | `--peer-tls-key` | — | `T4_PEER_TLS_KEY` | No | node private key file for peer mTLS (PEM) |
+| `t4 run` | `--pprof` | `false` | `T4_PPROF` | No | also serve Go runtime profiles at /debug/pprof/ on --metrics-addr; they expose process internals, so enable only where that address is not publicly reachable |
 | `t4 run` | `--read-consistency` | `linearizable` | `T4_READ_CONSISTENCY` | No | read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale) |
 | `t4 run` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 run` | `--s3-bucket` | — | `T4_S3_BUCKET` | No | S3 bucket |

@@ -855,6 +855,10 @@ unavailable:
   is on local disk.
 - **To recover:** repair S3 access and restart the node. On startup it replays all local WAL segments (including any
   partial segment left on disk), then resumes normal operation.
+- **Restarting during the outage is safe.** A single node that already has local data starts from it when S3 does not
+  answer within 15 s, and logs `object store unreachable at startup`; uploads resume once S3 is back. A node with an
+  empty data directory still needs S3 to start.
+- **To see where time and memory go**, run with `--pprof` and fetch profiles from `/debug/pprof/` on `--metrics-addr`.
 
 **After any S3 outage — what is safe**
 

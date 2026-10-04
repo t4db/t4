@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -69,7 +70,8 @@ func runCmd() *cobra.Command {
 		authEnabled bool
 		tokenTTLSec int
 		// observability
-		metricsAddr string
+		metricsAddr  string
+		pprofEnabled bool
 		// branch node
 		branchPrefix     string
 		branchCheckpoint string
@@ -144,6 +146,7 @@ func runCmd() *cobra.Command {
 				branchPrefix,
 				branchCheckpoint,
 				enc,
+				pprofEnabled,
 			)).Info("starting t4 server")
 
 			cfg := t4.Config{
@@ -237,7 +240,7 @@ func runCmd() *cobra.Command {
 			}).Info("t4 node opened")
 
 			// ── Observability ─────────────────────────────────────────────────
-			go serveMetrics(cmd.Context(), metricsAddr, node)
+			go serveMetrics(cmd.Context(), metricsAddr, node, pprofEnabled)
 
 			// ── Auth setup ───────────────────────────────────────────────────
 			var (
@@ -346,6 +349,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().IntVar(&tokenTTLSec, "token-ttl", 300, "bearer token TTL in seconds (env: T4_TOKEN_TTL)")
 	// observability
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "0.0.0.0:9090", "HTTP address for /metrics, /healthz, /readyz (e.g. 0.0.0.0:9090) (env: T4_METRICS_ADDR)")
+	cmd.Flags().BoolVar(&pprofEnabled, "pprof", false, "also serve Go runtime profiles at /debug/pprof/ on --metrics-addr; they expose process internals, so enable only where that address is not publicly reachable (env: T4_PPROF)")
 	// branch node
 	cmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "S3 key prefix of the source node to branch from (uses --s3-bucket) (env: T4_BRANCH_PREFIX)")
 	cmd.Flags().StringVar(&branchCheckpoint, "branch-checkpoint", "", "checkpoint index key returned by 't4 branch fork' (required with --branch-prefix) (env: T4_BRANCH_CHECKPOINT)")
@@ -389,6 +393,7 @@ func runCmd() *cobra.Command {
 			"auth-enabled":                         "T4_AUTH_ENABLED",
 			"token-ttl":                            "T4_TOKEN_TTL",
 			"metrics-addr":                         "T4_METRICS_ADDR",
+			"pprof":                                "T4_PPROF",
 			"branch-prefix":                        "T4_BRANCH_PREFIX",
 			"branch-checkpoint":                    "T4_BRANCH_CHECKPOINT",
 			"grpc-keepalive-min-time":              "T4_GRPC_KEEPALIVE_MIN_TIME",
@@ -429,6 +434,7 @@ func startupLogFields(
 	branchPrefix string,
 	branchCheckpoint string,
 	enc *objectStoreEncryptionFlags,
+	pprofEnabled bool,
 ) logrus.Fields {
 	fields := logrus.Fields{
 		"data_dir":                      dataDir,
@@ -451,6 +457,7 @@ func startupLogFields(
 		"peer_tls":                      tlsMode(peerTLSCert, peerTLSCA),
 		"auth":                          authMode(authEnabled, tokenTTLSec),
 		"metrics_addr":                  valueOrDisabled(metricsAddr),
+		"pprof":                         pprofEnabled,
 		"auto_compact_mode":             valueOrDefault(autoCompactMode, "auto"),
 		"auto_compact_retention":        autoCompactRetention.String(),
 		"auto_compact_retain_revisions": autoCompactRevisions,
@@ -658,9 +665,16 @@ func buildPeerTLS(ca, cert, key string) (serverCreds, clientCreds credentials.Tr
 	return credentials.NewTLS(serverTLS), credentials.NewTLS(clientTLS), nil
 }
 
-func serveMetrics(ctx context.Context, addr string, node *t4.Node) {
+func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled bool) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Gatherer(), promhttp.HandlerOpts{}))
+	if pprofEnabled {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
