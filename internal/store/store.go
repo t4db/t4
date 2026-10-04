@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -1208,7 +1209,7 @@ func (s *Store) ListRange(prefix string, opts ReadOptions) ([]*KeyValue, error) 
 // the start. Its cost grows with the retained history rather than with the
 // distance from HEAD, which is what listAtFromHead avoids.
 func (s *Store) listAtByReplay(prefix string, opts ReadOptions, targetRev int64) ([]*KeyValue, error) {
-	events, _, err := s.scanLog(prefix, 1, targetRev, false)
+	events, _, err := s.scanLog(prefix, 1, targetRev, false, opts.KeysOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -1350,7 +1351,7 @@ func (s *Store) History(key string) ([]Event, error) {
 	if key == "" {
 		return nil, fmt.Errorf("store: history key must not be empty")
 	}
-	events, _, err := s.scanLog("", 1, atomic.LoadInt64(&s.currentRev), true)
+	events, _, err := s.scanLog("", 1, atomic.LoadInt64(&s.currentRev), true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1378,7 +1379,7 @@ func (s *Store) Changes(prefix string, fromRev, toRev int64) ([]Event, error) {
 	if toRev > currentRev {
 		toRev = currentRev
 	}
-	events, _, err := s.scanLog(prefix, fromRev, toRev, true)
+	events, _, err := s.scanLog(prefix, fromRev, toRev, true, false)
 	return events, err
 }
 
@@ -1623,7 +1624,7 @@ func (s *Store) scanWatchRange(prefix string, fromRev, toRev int64, withPrevKV b
 		return nil, true
 	}
 	start := time.Now()
-	events, scanned, err := s.scanLog(prefix, fromRev, toRev, withPrevKV)
+	events, scanned, err := s.scanLog(prefix, fromRev, toRev, withPrevKV, false)
 	if err != nil {
 		return nil, false
 	}
@@ -1691,7 +1692,7 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 		}
 		toRev := atomic.LoadInt64(&s.currentRev)
 		start := time.Now()
-		events, scanned, err := s.scanLog("", nextRev, toRev, false)
+		events, scanned, err := s.scanLog("", nextRev, toRev, false, false)
 		if err != nil {
 			return
 		}
@@ -1857,8 +1858,10 @@ func recordWatchScanMetrics(d time.Duration, fromRev, toRev int64, scanned, matc
 
 // scanLog reads log entries in [fromRev, toRev] and returns events for keys
 // matching prefix plus the number of log records scanned. When withPrevKV is
-// false, the per-event PrevKV lookup is skipped.
-func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV bool) ([]Event, int, error) {
+// false, the per-event PrevKV lookup is skipped; when keysOnly is set, event
+// values are left nil. Records are decoded in place and only matching ones
+// are copied out.
+func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV, keysOnly bool) ([]Event, int, error) {
 	lower := logKey(fromRev)
 	upper := logKey(toRev + 1)
 
@@ -1871,22 +1874,26 @@ func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV bool) ([
 	}
 	defer func() { _ = iter.Close() }()
 
+	prefixBytes := []byte(prefix)
 	var events []Event
 	var scanned int
 	for iter.First(); iter.Valid(); iter.Next() {
 		scanned++
-		rev := decodeLogKey(iter.Key())
-		r, err := unmarshalRecord(iter.Value())
+		r, err := decodeRecord(iter.Value())
 		if err != nil {
 			return nil, scanned, err
 		}
-		if prefix != "" && (len(r.key) < len(prefix) || r.key[:len(prefix)] != prefix) {
+		if !bytes.HasPrefix(r.key, prefixBytes) {
 			continue
 		}
-		kv := recordToKV(r.key, rev, r)
+		rev := decodeLogKey(iter.Key())
+		if keysOnly {
+			r.value = nil
+		}
+		kv := viewToKV(string(r.key), rev, &r)
 		var prevKV *KeyValue
 		if withPrevKV && r.prevRevision > 0 {
-			prevKV, err = s.getLogEntry(r.key, r.prevRevision)
+			prevKV, err = s.getLogEntry(kv.Key, r.prevRevision)
 			if err != nil {
 				// Previous entry may have been compacted; non-fatal.
 				prevKV = nil
