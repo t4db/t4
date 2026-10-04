@@ -280,39 +280,33 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 			return nil, false
 		}
 		// Start write-processing loops immediately so that client writes are
-		// not blocked while we run Reconcile and the startup checkpoint below.
-		// Checkpoints hold fenceMu.Lock() only for local I/O (WAL seal, Pebble
-		// flush and checkpoint copy); the object-store upload runs unfenced.
+		// not blocked while we reconcile SSTs below.
 		n.bgWg.Add(1)
 		go func() { defer n.bgWg.Done(); n.commitLoop(bgCtx) }()
-		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
-			n.bgWg.Add(1)
-			go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()
-		}
 		if n.autoCompactEnabled() {
 			n.bgWg.Add(1)
 			go func() { defer n.bgWg.Done(); n.autoCompactLoop(bgCtx) }()
 		}
-		// Upload any SSTs that exist on disk but aren't in S3 yet. The
-		// follower didn't run SSTUploader.Start(), so its SSTs were never
-		// streamed. Additionally, becomeLeader may have restored from a
-		// checkpoint and replayed WAL, creating new SST files. Reconcile
-		// ensures all of them are in S3 before the first checkpoint.
+		// Upload the SSTs on disk that aren't in S3: the follower didn't run
+		// SSTUploader.Start(), and becomeLeader may have restored a checkpoint
+		// and replayed WAL. Its registry may also list SSTs the previous
+		// leader's GC has deleted since, such as those this node restored
+		// from a checkpoint, so it is verified against S3 first.
 		if n.sstUploader != nil {
 			rCtx, rCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			if rErr := n.sstUploader.Reconcile(rCtx); rErr != nil {
+			if rErr := n.sstUploader.ReconcileVerified(rCtx); rErr != nil {
 				n.log.Warnf("t4: promoted leader SST reconcile: %v", rErr)
 			}
 			rCancel()
 			n.sstUploader.Start(bgCtx)
 		}
-		// Write a checkpoint immediately after Reconcile so that all
-		// uploaded SSTs are referenced by a live checkpoint. Without this,
-		// the old leader's GCOrphanSSTs could delete the just-uploaded SSTs
-		// before the checkpointLoop gets a chance to write its startup
-		// checkpoint, which may have run before Reconcile finished.
+		// Only now start checkpointing: its startup checkpoint references
+		// every SST on disk, and they must all be in S3 by then. Writing it
+		// promptly also keeps the previous leader's GC from deleting SSTs this
+		// node just uploaded, since a live checkpoint references them.
 		if n.cfg.ObjectStore != nil && n.cfg.CheckpointInterval > 0 {
-			n.forceCheckpoint(bgCtx)
+			n.bgWg.Add(1)
+			go func() { defer n.bgWg.Done(); n.checkpointLoop(bgCtx) }()
 		}
 		return nil, true
 	}
