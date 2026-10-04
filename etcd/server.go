@@ -309,33 +309,128 @@ func fromEtcdRevision(rev int64) int64 {
 // must match the header revision produced by header() for the same underlying
 // state so that clients comparing header rev to KV rev see a consistent world.
 func kvToProto(kv *t4.KeyValue) *mvccpb.KeyValue {
+	pb := &mvccpb.KeyValue{}
+	fillKV(pb, kv, []byte(kv.Key))
+	return pb
+}
+
+// fillKV sets pb from kv, with key holding kv.Key's bytes.
+func fillKV(pb *mvccpb.KeyValue, kv *t4.KeyValue, key []byte) {
 	version := kv.Version
 	if version <= 0 {
 		version = 1
 	}
-	return &mvccpb.KeyValue{
-		Key:            []byte(kv.Key),
-		Value:          kv.Value,
-		ModRevision:    toEtcdRevision(kv.Revision),
-		CreateRevision: toEtcdRevision(kv.CreateRevision),
-		Lease:          kv.Lease,
-		Version:        version,
-	}
+	pb.Key = key
+	pb.Value = kv.Value
+	pb.ModRevision = toEtcdRevision(kv.Revision)
+	pb.CreateRevision = toEtcdRevision(kv.CreateRevision)
+	pb.Lease = kv.Lease
+	pb.Version = version
 }
 
-// eventToProto converts a t4 watch Event to the etcd mvccpb format.
-func eventToProto(e t4.Event) *mvccpb.Event {
-	ev := &mvccpb.Event{Kv: kvToProto(e.KV)}
+// protoBatch builds the mvccpb messages of responses from shared arrays
+// instead of allocating each message and each key separately: messages are
+// carved out of chunks, and keys are copied into a shared buffer. A chunk is
+// never grown in place, so messages already handed out stay valid, and it is
+// freed once none of its messages is referenced. Values are referenced, not
+// copied, as in kvToProto. Not safe for concurrent use.
+type protoBatch struct {
+	kvs      []mvccpb.KeyValue
+	events   []mvccpb.Event
+	keys     []byte
+	kvChunk  int // size of the last chunk of each kind
+	evChunk  int
+	maxChunk int
+}
+
+// protoKeyBytes is the key buffer allotted per message in a chunk when a
+// batch needs a new key buffer.
+const protoKeyBytes = 64
+
+// newProtoBatch returns a batch whose first chunks hold hint messages,
+// growing by doubling up to maxChunk messages per chunk.
+func newProtoBatch(hint, maxChunk int) *protoBatch {
+	first := min(max(hint, 1), maxChunk)
+	return &protoBatch{kvChunk: first / 2, evChunk: first / 2, maxChunk: maxChunk}
+}
+
+// newRangeBatch returns a batch sized for exactly the given KeyValues.
+func newRangeBatch(kvs []*t4.KeyValue) *protoBatch {
+	var keyBytes int
+	for _, kv := range kvs {
+		keyBytes += len(kv.Key)
+	}
+	b := &protoBatch{maxChunk: rangeProtoChunkMax}
+	if len(kvs) > 0 {
+		b.kvs = make([]mvccpb.KeyValue, len(kvs))
+		b.kvChunk = len(kvs)
+	}
+	b.keys = make([]byte, 0, keyBytes)
+	return b
+}
+
+// rangeProtoChunkMax and watchProtoChunkMax bound a chunk's message count. A
+// watch keeps its batch for its lifetime, holding its last chunks even when
+// idle, so its chunks are kept small: about 4 KB at most per watch.
+const (
+	rangeProtoChunkMax = 1024
+	watchProtoChunkMax = 16
+)
+
+func (b *protoBatch) nextKV() *mvccpb.KeyValue {
+	if len(b.kvs) == 0 {
+		b.kvChunk = min(max(2*b.kvChunk, 1), b.maxChunk)
+		b.kvs = make([]mvccpb.KeyValue, b.kvChunk)
+	}
+	pb := &b.kvs[0]
+	b.kvs = b.kvs[1:]
+	return pb
+}
+
+func (b *protoBatch) nextEvent() *mvccpb.Event {
+	if len(b.events) == 0 {
+		b.evChunk = min(max(2*b.evChunk, 1), b.maxChunk)
+		b.events = make([]mvccpb.Event, b.evChunk)
+	}
+	ev := &b.events[0]
+	b.events = b.events[1:]
+	return ev
+}
+
+// key copies k into the shared key buffer. The returned slice's capacity
+// ends at its length, so appending to it cannot overwrite the next key.
+func (b *protoBatch) key(k string) []byte {
+	if len(k) > cap(b.keys)-len(b.keys) {
+		b.keys = make([]byte, 0, max(len(k), protoKeyBytes*max(b.kvChunk, 1)))
+	}
+	off := len(b.keys)
+	b.keys = append(b.keys, k...)
+	return b.keys[off:len(b.keys):len(b.keys)]
+}
+
+// kv is kvToProto building from the batch.
+func (b *protoBatch) kv(kv *t4.KeyValue) *mvccpb.KeyValue {
+	pb := b.nextKV()
+	fillKV(pb, kv, b.key(kv.Key))
+	return pb
+}
+
+// event is eventToProto building from the batch.
+func (b *protoBatch) event(e t4.Event) *mvccpb.Event {
+	ev := b.nextEvent()
 	if e.Type == t4.EventDelete {
 		ev.Type = mvccpb.DELETE
 		// etcd reports a deletion as a tombstone: only the key and the
 		// revision of the delete. The deleted value's metadata is in PrevKv.
-		ev.Kv = &mvccpb.KeyValue{Key: ev.Kv.Key, ModRevision: ev.Kv.ModRevision}
+		ev.Kv = b.nextKV()
+		ev.Kv.Key = b.key(e.KV.Key)
+		ev.Kv.ModRevision = toEtcdRevision(e.KV.Revision)
 	} else {
 		ev.Type = mvccpb.PUT
+		ev.Kv = b.kv(e.KV)
 	}
 	if e.PrevKV != nil {
-		ev.PrevKv = kvToProto(e.PrevKV)
+		ev.PrevKv = b.kv(e.PrevKV)
 	}
 	return ev
 }

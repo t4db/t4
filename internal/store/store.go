@@ -859,7 +859,42 @@ func idxEntryFrom(r pebble.Reader, key string) (idxEntry, error) {
 
 // idxToKeysOnlyKV builds a keys-only KeyValue from a v2 index value.
 func idxToKeysOnlyKV(key string, ie idxEntry) *KeyValue {
-	return &KeyValue{Key: key, Revision: ie.rev, CreateRevision: ie.createRevision, Version: ie.version}
+	kv := &KeyValue{}
+	idxToKeysOnlyKVInto(kv, key, ie)
+	return kv
+}
+
+func idxToKeysOnlyKVInto(kv *KeyValue, key string, ie idxEntry) {
+	*kv = KeyValue{Key: key, Revision: ie.rev, CreateRevision: ie.createRevision, Version: ie.version}
+}
+
+// kvSlab hands out KeyValues from shared backing arrays, so that a listing of
+// n keys allocates a few arrays rather than n structs. An array is never
+// grown in place, so the pointers already handed out stay valid.
+type kvSlab struct {
+	free []KeyValue
+	size int
+}
+
+// newKVSlab returns a slab whose first array holds hint KeyValues, within
+// [kvSlabMin, kvSlabMax]; later arrays double up to kvSlabMax.
+func newKVSlab(hint int64) *kvSlab {
+	return &kvSlab{size: int(min(max(hint, kvSlabMin), kvSlabMax)) / 2}
+}
+
+const (
+	kvSlabMin = 16
+	kvSlabMax = 1024
+)
+
+func (s *kvSlab) next() *KeyValue {
+	if len(s.free) == 0 {
+		s.size = min(max(2*s.size, kvSlabMin), kvSlabMax)
+		s.free = make([]KeyValue, s.size)
+	}
+	kv := &s.free[0]
+	s.free = s.free[1:]
+	return kv
 }
 
 // stripToKeysOnly clears what a keys-only read does not return, so results
@@ -884,7 +919,14 @@ func recordToKV(key string, rev int64, r *record) *KeyValue {
 // viewToKV builds a KeyValue from a record decoded in place, copying its
 // value out of the source buffer.
 func viewToKV(key string, rev int64, r *recordView) *KeyValue {
-	return &KeyValue{
+	kv := &KeyValue{}
+	viewToKVInto(kv, key, rev, r)
+	return kv
+}
+
+// viewToKVInto is viewToKV filling kv.
+func viewToKVInto(kv *KeyValue, key string, rev int64, r *recordView) {
+	*kv = KeyValue{
 		Key:            key,
 		Value:          cloneValue(r.value),
 		Revision:       rev,
@@ -910,6 +952,13 @@ const logKeyScratchSize = 11
 // value points at the record directly; a v1 value falls back to logEntryAt's
 // search. lk is a logKeyScratchSize scratch buffer.
 func logEntryForIdx(db pebble.Reader, lk []byte, key string, ie idxEntry) (*KeyValue, error) {
+	return logEntryForIdxInto(db, lk, key, ie, nil)
+}
+
+// logEntryForIdxInto is logEntryForIdx filling dst, when non-nil, for a
+// record found where a v2 index value points. Other records come back in a
+// KeyValue of their own.
+func logEntryForIdxInto(db pebble.Reader, lk []byte, key string, ie idxEntry, dst *KeyValue) (*KeyValue, error) {
 	if !ie.v2 {
 		return logEntryAt(db, lk, key, ie.rev)
 	}
@@ -935,7 +984,11 @@ func logEntryForIdx(db pebble.Reader, lk []byte, key string, ie idxEntry) (*KeyV
 	if string(r.key) != key {
 		return logEntryAt(db, lk, key, ie.rev)
 	}
-	return viewToKV(key, ie.rev, &r), nil
+	if dst == nil {
+		return viewToKV(key, ie.rev, &r), nil
+	}
+	viewToKVInto(dst, key, ie.rev, &r)
+	return dst, nil
 }
 
 // logEntryAt is logEntryFrom with a caller-supplied logKeyScratchSize scratch
@@ -1274,6 +1327,7 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 
 	var out []*KeyValue
 	lk := make([]byte, logKeyScratchSize)
+	slab := newKVSlab(limit)
 	for iter.First(); iter.Valid(); iter.Next() {
 		if limit > 0 && int64(len(out)) >= limit {
 			break
@@ -1281,10 +1335,12 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 		k := string(iter.Key()[1:]) // strip 'i' prefix
 		ie := decodeIdx(iter.Value())
 		if keysOnly && ie.v2 {
-			out = append(out, idxToKeysOnlyKV(k, ie))
+			kv := slab.next()
+			idxToKeysOnlyKVInto(kv, k, ie)
+			out = append(out, kv)
 			continue
 		}
-		kv, err := logEntryForIdx(db, lk, k, ie)
+		kv, err := logEntryForIdxInto(db, lk, k, ie, slab.next())
 		if err != nil {
 			return nil, err
 		}
