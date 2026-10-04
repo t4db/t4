@@ -686,3 +686,45 @@ func BenchmarkDatasetSize(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkListShapes measures List allocations across result shapes,
+// including paginated reads whose limit exceeds what they return (small
+// collections and last pages), where buffers sized by the limit go unused.
+func BenchmarkListShapes(b *testing.B) {
+	for _, tc := range []struct {
+		keys  int
+		limit int64
+	}{
+		{3, 500},
+		{100, 0},
+		{500, 500},
+		{5000, 0},
+	} {
+		b.Run(fmt.Sprintf("keys=%d/limit=%d", tc.keys, tc.limit), func(b *testing.B) {
+			n := openBenchNode(b)
+			ctx := context.Background()
+			ops := make([]t4.TxnOp, 0, tc.keys)
+			for i := range tc.keys {
+				ops = append(ops, t4.TxnOp{Type: t4.TxnPut, Key: fmt.Sprintf("/bench/shape/%05d", i), Value: []byte("value")})
+			}
+			if _, err := n.Txn(ctx, t4.TxnRequest{Success: ops}); err != nil {
+				b.Fatal(err)
+			}
+			var opts []t4.ReadOption
+			if tc.limit > 0 {
+				opts = append(opts, t4.WithLimit(tc.limit))
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				kvs, err := n.List("/bench/shape/", opts...)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(kvs) != tc.keys {
+					b.Fatalf("got %d keys, want %d", len(kvs), tc.keys)
+				}
+			}
+		})
+	}
+}

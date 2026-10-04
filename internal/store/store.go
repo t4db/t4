@@ -871,15 +871,19 @@ func idxToKeysOnlyKVInto(kv *KeyValue, key string, ie idxEntry) {
 // kvSlab hands out KeyValues from shared backing arrays, so that a listing of
 // n keys allocates a few arrays rather than n structs. An array is never
 // grown in place, so the pointers already handed out stay valid.
+//
+// Arrays start at kvSlabMin and double up to kvSlabMax, never past what the
+// listing's limit can still use: a limit is an upper bound, and paginated
+// reads often return far less (small collections, last pages).
 type kvSlab struct {
-	free []KeyValue
-	size int
+	free  []KeyValue
+	size  int
+	limit int64 // 0: unlimited
+	given int64 // KeyValues allocated so far
 }
 
-// newKVSlab returns a slab whose first array holds hint KeyValues, within
-// [kvSlabMin, kvSlabMax]; later arrays double up to kvSlabMax.
-func newKVSlab(hint int64) *kvSlab {
-	return &kvSlab{size: int(min(max(hint, kvSlabMin), kvSlabMax)) / 2}
+func newKVSlab(limit int64) *kvSlab {
+	return &kvSlab{size: kvSlabMin / 2, limit: limit}
 }
 
 const (
@@ -889,8 +893,13 @@ const (
 
 func (s *kvSlab) next() *KeyValue {
 	if len(s.free) == 0 {
-		s.size = min(max(2*s.size, kvSlabMin), kvSlabMax)
-		s.free = make([]KeyValue, s.size)
+		s.size = min(2*s.size, kvSlabMax)
+		n := int64(s.size)
+		if s.limit > 0 {
+			n = max(min(n, s.limit-s.given), 1)
+		}
+		s.free = make([]KeyValue, n)
+		s.given += n
 	}
 	kv := &s.free[0]
 	s.free = s.free[1:]
