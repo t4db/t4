@@ -392,9 +392,10 @@ func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubsc
 	}
 
 	// pending holds matched events not yet sent, in revision order;
-	// pendingRevs holds their revisions.
+	// pendingRevs holds their revisions. Their messages come from batch.
 	var pending []*mvccpb.Event
 	var pendingRevs []int64
+	batch := newProtoBatch(1, watchProtoChunkMax)
 	// sealedRev is the revision through which this watch has read every
 	// event off the channel. The channel carries one event at a time, so the
 	// newest revision may still be arriving; it is sealed by a progress marker
@@ -447,7 +448,7 @@ func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubsc
 		if !ok {
 			return
 		}
-		pending = append(pending, eventToProto(ev))
+		pending = append(pending, batch.event(ev))
 		pendingRevs = append(pendingRevs, e.KV.Revision)
 	}
 	// sendProgress flushes sealed events, then reports the revision this watch

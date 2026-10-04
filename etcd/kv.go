@@ -111,9 +111,10 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		if err != nil {
 			return nil, kvError(err)
 		}
+		batch := newRangeBatch(all)
 		kvs := make([]*mvccpb.KeyValue, 0, len(all))
 		for _, kv := range all {
-			kvs = append(kvs, kvToProtoForRange(kv, r))
+			kvs = append(kvs, batch.rangeKV(kv, r))
 		}
 		if r.Limit <= 0 {
 			total = int64(len(kvs))
@@ -147,16 +148,24 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	}
 
 	total := int64(0)
-	var kvs []*mvccpb.KeyValue
+	var matched []*t4.KeyValue
 	for _, kv := range all {
 		if !matchRange(kv, key, rangeEnd) {
 			continue
 		}
 		total++
-		if r.Limit > 0 && int64(len(kvs)) >= r.Limit {
+		if r.Limit > 0 && int64(len(matched)) >= r.Limit {
 			continue
 		}
-		kvs = append(kvs, kvToProtoForRange(kv, r))
+		matched = append(matched, kv)
+	}
+	var kvs []*mvccpb.KeyValue
+	if len(matched) > 0 {
+		batch := newRangeBatch(matched)
+		kvs = make([]*mvccpb.KeyValue, 0, len(matched))
+		for _, kv := range matched {
+			kvs = append(kvs, batch.rangeKV(kv, r))
+		}
 	}
 
 	return &etcdserverpb.RangeResponse{
@@ -664,6 +673,15 @@ func kvError(err error) error {
 
 func kvToProtoForRange(kv *t4.KeyValue, r *etcdserverpb.RangeRequest) *mvccpb.KeyValue {
 	pb := kvToProto(kv)
+	if r.KeysOnly {
+		applyKeysOnly(pb, r)
+	}
+	return pb
+}
+
+// rangeKV is kvToProtoForRange building from the batch.
+func (b *protoBatch) rangeKV(kv *t4.KeyValue, r *etcdserverpb.RangeRequest) *mvccpb.KeyValue {
+	pb := b.kv(kv)
 	if r.KeysOnly {
 		applyKeysOnly(pb, r)
 	}
