@@ -17,9 +17,13 @@ type fakeStore struct {
 	block    chan struct{} // when non-nil, uploads wait on it
 	attempts int
 	objects  map[string]bool
+	// conflicts holds keys already taken by different entries.
+	conflicts map[string]bool
 }
 
-func newFakeStore() *fakeStore { return &fakeStore{objects: make(map[string]bool)} }
+func newFakeStore() *fakeStore {
+	return &fakeStore{objects: make(map[string]bool), conflicts: make(map[string]bool)}
+}
 
 func (f *fakeStore) upload(ctx context.Context, path, key string) error {
 	f.mu.Lock()
@@ -35,6 +39,12 @@ func (f *fakeStore) upload(ctx context.Context, path, key string) error {
 	}
 	if down {
 		return errors.New("object store unreachable")
+	}
+	f.mu.Lock()
+	conflict := f.conflicts[key]
+	f.mu.Unlock()
+	if conflict {
+		return ErrSegmentConflict
 	}
 	if _, err := os.Stat(path); err != nil {
 		return err
@@ -175,6 +185,57 @@ func TestLeftoverSegmentsUploadedOnStart(t *testing.T) {
 		if time.Now().After(deadline) {
 			_, uploaded := store.counts()
 			t.Fatalf("uploaded %d of 5 leftover segments after restart", uploaded)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestConflictingLeftoverDoesNotBlockSyncWrites reproduces a promotion: the
+// new leader's WAL directory holds a segment it wrote as a follower, whose
+// key the previous leader already published with different entries. That
+// conflict is permanent, but it must not block writes once the leader
+// switches to synchronous uploads (replication below its ACK target).
+func TestConflictingLeftoverDoesNotBlockSyncWrites(t *testing.T) {
+	dir := t.TempDir()
+	follower, err := Open(dir, 1, 1) // no uploader: segments stay local
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	follower.Start(ctx)
+	for seq := int64(1); seq <= 3; seq++ {
+		if err := follower.Append(&Entry{Revision: seq, Term: 1, Op: OpCreate, Key: "k", Value: []byte("v")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := follower.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newFakeStore()
+	store.conflicts[ObjectKey(1, 1)] = true
+	w := startWAL(t, dir, store.upload)
+	t.Cleanup(func() { _ = w.Close() })
+	w.SetSyncUpload(true)
+
+	for seq := int64(4); seq <= 6; seq++ {
+		err := w.AppendBatch(context.Background(), []*Entry{{Revision: seq, Term: 2, Op: OpCreate, Key: "k", Value: []byte("v")}})
+		if err != nil {
+			t.Fatalf("write %d after promotion: %v", seq, err)
+		}
+	}
+	// The conflicting leftover is dropped, not retried forever.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		w.pendingMu.Lock()
+		n := len(w.leftover)
+		w.pendingMu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("conflicting leftover segment still queued")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

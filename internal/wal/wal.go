@@ -78,6 +78,14 @@ type WAL struct {
 	// acknowledged write while missing an earlier one.
 	pendingMu sync.Mutex
 	pending   map[string]string // object key → local path
+
+	// leftover holds segment files found in the directory when the WAL
+	// started, by object key, guarded by pendingMu. They are uploaded in the
+	// background like pending segments, but never gate synchronous uploads:
+	// a follower's segments, left behind when it becomes leader, can collide
+	// with the previous leader's segments under the same key, and such a
+	// conflict must not block writes.
+	leftover map[string]string
 }
 
 // ErrSegmentConflict is returned by an Uploader when the segment's object key
@@ -106,6 +114,7 @@ func New(opts ...Option) *WAL {
 		segMaxAge:  DefaultSegmentMaxAge,
 		uploadWake: make(chan struct{}, 1),
 		pending:    make(map[string]string),
+		leftover:   make(map[string]string),
 	}
 	for _, o := range opts {
 		o(w)
@@ -305,7 +314,7 @@ func (w *WAL) Start(ctx context.Context) {
 	w.uploadCtx, w.uploadCancel = context.WithCancel(ctx)
 	loopCtx, cancel := context.WithCancel(ctx)
 	w.cancelLoops = cancel
-	if w.uploader != nil && !w.syncUpload {
+	if w.uploader != nil {
 		w.queueLocalSegments()
 	}
 	w.wg.Add(2)
@@ -313,11 +322,9 @@ func (w *WAL) Start(ctx context.Context) {
 	go w.uploadLoop(loopCtx)
 }
 
-// queueLocalSegments queues the segment files already in the WAL directory:
-// an uploaded segment's file is removed, so these were never uploaded, by an
-// earlier run or by this one before a restart. Synchronous-upload mode leaves
-// them alone: it uploads every batch before acknowledging it, and a pending
-// segment that cannot be uploaded would block its writes.
+// queueLocalSegments queues the segment files already in the WAL directory
+// as leftovers: an uploaded segment's file is removed, so these were never
+// uploaded, by an earlier run, or by this node as a follower.
 func (w *WAL) queueLocalSegments() {
 	paths, err := LocalSegments(w.dir)
 	if err != nil {
@@ -329,14 +336,21 @@ func (w *WAL) queueLocalSegments() {
 		if !ok {
 			continue
 		}
-		w.queueUpload(ObjectKey(term, firstRev), path)
+		w.pendingMu.Lock()
+		w.leftover[ObjectKey(term, firstRev)] = path
+		w.pendingMu.Unlock()
 	}
+	w.wakeUploader()
 }
 
 // queueUpload marks a sealed segment for upload and wakes uploadLoop. It
 // never blocks, so it is safe to call with w.mu held.
 func (w *WAL) queueUpload(objKey, localPath string) {
 	w.addPending(objKey, localPath)
+	w.wakeUploader()
+}
+
+func (w *WAL) wakeUploader() {
 	select {
 	case w.uploadWake <- struct{}{}:
 	default: // uploadLoop is already due to run
@@ -463,6 +477,61 @@ func (w *WAL) donePending(objKey string) {
 	w.pendingMu.Unlock()
 }
 
+// queuedUpload is a segment waiting for upload.
+type queuedUpload struct {
+	key, path string
+	leftover  bool
+}
+
+// uploadQueue returns the pending and leftover segments oldest first (keys
+// sort by term, then first sequence).
+func (w *WAL) uploadQueue() []queuedUpload {
+	w.pendingMu.Lock()
+	q := make([]queuedUpload, 0, len(w.pending)+len(w.leftover))
+	for k, p := range w.pending {
+		q = append(q, queuedUpload{key: k, path: p})
+	}
+	for k, p := range w.leftover {
+		if _, ok := w.pending[k]; !ok {
+			q = append(q, queuedUpload{key: k, path: p, leftover: true})
+		}
+	}
+	w.pendingMu.Unlock()
+	sort.Slice(q, func(i, j int) bool { return q[i].key < q[j].key })
+	return q
+}
+
+// doneUpload removes a segment from the upload queue.
+func (w *WAL) doneUpload(objKey string) {
+	w.pendingMu.Lock()
+	delete(w.pending, objKey)
+	delete(w.leftover, objKey)
+	w.pendingMu.Unlock()
+}
+
+// uploadOne uploads a queued segment and reports whether the caller should go
+// on with the next one. A conflict is permanent: a pending segment stays
+// queued, so that synchronous-upload mode does not publish later writes past
+// entries missing from object storage, and is skipped from then on; for a
+// leftover the published object is authoritative, so it is dropped.
+func (w *WAL) uploadOne(ctx context.Context, u queuedUpload, conflicted map[string]bool) error {
+	err := w.uploader(ctx, u.path, u.key)
+	switch {
+	case err == nil, errors.Is(err, os.ErrNotExist):
+		// Without the local file there is nothing left to upload.
+		w.doneUpload(u.key)
+	case errors.Is(err, ErrSegmentConflict) && u.leftover:
+		w.log.Warnf("wal: leftover segment %q differs from published %q — keeping the published object: %v", u.path, u.key, err)
+		w.doneUpload(u.key)
+	case errors.Is(err, ErrSegmentConflict):
+		w.log.Errorf("wal: upload %q → %q: %v", u.path, u.key, err)
+		conflicted[u.key] = true
+	default:
+		return fmt.Errorf("%q → %q: %w", u.path, u.key, err)
+	}
+	return nil
+}
+
 // pendingSorted returns the pending segments' object keys oldest first (keys
 // sort by term, then first sequence), with their local paths.
 func (w *WAL) pendingSorted() ([]string, map[string]string) {
@@ -585,27 +654,16 @@ func (w *WAL) uploadLoop(ctx context.Context) {
 	}
 }
 
-// uploadPass uploads pending segments oldest first and stops at the first
-// failure. Segments in conflicted are skipped: their key holds different
-// entries, so they can never be uploaded. They stay pending, so that
-// synchronous-upload mode does not publish later writes past entries missing
-// from object storage.
+// uploadPass uploads queued segments oldest first and stops at the first
+// failure. Pending segments in conflicted are skipped: their key holds
+// different entries, so they can never be uploaded (see uploadOne).
 func (w *WAL) uploadPass(ctx context.Context, conflicted map[string]bool) error {
-	keys, paths := w.pendingSorted()
-	for _, k := range keys {
-		if conflicted[k] {
+	for _, u := range w.uploadQueue() {
+		if conflicted[u.key] {
 			continue
 		}
-		err := w.uploader(ctx, paths[k], k)
-		switch {
-		case err == nil, errors.Is(err, os.ErrNotExist):
-			// Without the local file there is nothing left to upload.
-			w.donePending(k)
-		case errors.Is(err, ErrSegmentConflict):
-			w.log.Errorf("wal: upload %q → %q: %v", paths[k], k, err)
-			conflicted[k] = true
-		default:
-			return fmt.Errorf("%q → %q: %w", paths[k], k, err)
+		if err := w.uploadOne(ctx, u, conflicted); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -660,16 +718,10 @@ func (w *WAL) Close() error {
 	uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer uploadCancel()
 
-	keys, paths := w.pendingSorted()
-	for _, k := range keys {
-		err := w.uploader(uploadCtx, paths[k], k)
-		switch {
-		case err == nil, errors.Is(err, os.ErrNotExist):
-			w.donePending(k)
-		case errors.Is(err, ErrSegmentConflict):
-			w.log.Errorf("wal: close upload %q → %q: %v", paths[k], k, err)
-		default:
-			w.log.Errorf("wal: close upload %q → %q: %v", paths[k], k, err)
+	conflicted := make(map[string]bool)
+	for _, u := range w.uploadQueue() {
+		if err := w.uploadOne(uploadCtx, u, conflicted); err != nil {
+			w.log.Errorf("wal: close upload %v", err)
 			return err
 		}
 	}
