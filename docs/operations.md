@@ -838,7 +838,9 @@ In cluster mode, S3 uploads are fully async — WAL segments and checkpoints are
 blocking writes. If S3 becomes unavailable:
 
 - **Writes continue.** Durability is backed by the peer WAL + quorum ACK across nodes, not by S3.
-- **WAL uploads queue.** Failed uploads are retried; a backlog of unsealed segments accumulates in `<data-dir>/wal/`.
+- **WAL uploads queue.** Sealed segments accumulate in `<data-dir>/wal/` until uploaded, including across restarts.
+  Uploads go oldest first and stop at the first failure, then retry after a backoff of 1 s doubling up to 30 s, so a
+  long outage costs one attempt per backoff period rather than one per queued segment.
 - **Leader election is unaffected** as long as the existing lock record is still readable from S3. If the lock expires
   or cannot be read, election is blocked until S3 is reachable again.
 - **No committed write is lost.** On restart, local WAL segments are replayed before any S3 reads (step 4 of the
