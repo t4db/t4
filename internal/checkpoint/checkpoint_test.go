@@ -900,3 +900,84 @@ func TestWriteManifestLosesRaceToNewer(t *testing.T) {
 		t.Fatalf("manifest term=%d seq=%d, want the newer term=2 seq=5", got.Term, got.LastSequence)
 	}
 }
+
+// putIndex writes a checkpoint index referencing ssts.
+func putIndex(t *testing.T, store object.Store, term uint64, rev int64, ssts ...string) string {
+	t.Helper()
+	key := checkpoint.CheckpointIndexKey(term, rev)
+	b, err := json.Marshal(&checkpoint.CheckpointIndex{Term: term, Revision: rev, LastSequence: rev, SSTFiles: ssts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), key, bytes.NewReader(b)); err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// TestGCKeepsSSTsOfManifestCheckpoint pins that the checkpoint manifest/latest
+// names keeps its SSTs even when newer checkpoints push it out of the keep
+// window: it is preserved, and so must be everything a restore from it reads.
+func TestGCKeepsSSTsOfManifestCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := object.NewMem()
+	putIndex(t, store, 1, 1, "sst/a/1.sst", "sst/shared/2.sst")
+	current := putIndex(t, store, 1, 2, "sst/shared/2.sst")
+	putIndex(t, store, 1, 3, "sst/c/3.sst") // newer checkpoints whose
+	putIndex(t, store, 1, 4, "sst/c/3.sst") // manifest writes did not land
+	if err := testCP.WriteManifest(ctx, store, &checkpoint.Manifest{CheckpointKey: current, Term: 1, Revision: 2, LastSequence: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, orphans, err := testCP.GCCheckpoints(ctx, store, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted %d checkpoints, want 1 (rev 1)", deleted)
+	}
+	if _, ok := orphans["sst/shared/2.sst"]; ok {
+		t.Error("an SST of the manifest's checkpoint was marked orphan")
+	}
+	if _, ok := orphans["sst/a/1.sst"]; !ok {
+		t.Errorf("orphans = %v, want sst/a/1.sst", orphans)
+	}
+	if _, err := testCP.ReadCheckpointIndex(ctx, store, current); err != nil {
+		t.Errorf("manifest's checkpoint deleted: %v", err)
+	}
+}
+
+// flakyGetStore fails reads of one key with a transient error.
+type flakyGetStore struct {
+	object.Store
+	key string
+}
+
+func (s flakyGetStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == s.key {
+		return nil, errors.New("transient read failure")
+	}
+	return s.Store.Get(ctx, key)
+}
+
+// TestGCAbortsWhenLiveIndexUnreadable pins that GC deletes nothing when it
+// cannot read a kept checkpoint's index: it could not tell which SSTs that
+// checkpoint needs.
+func TestGCAbortsWhenLiveIndexUnreadable(t *testing.T) {
+	ctx := context.Background()
+	mem := object.NewMem()
+	old := putIndex(t, mem, 1, 1, "sst/shared/1.sst")
+	putIndex(t, mem, 1, 2, "sst/b/2.sst")
+	kept := putIndex(t, mem, 1, 3, "sst/shared/1.sst")
+
+	_, orphans, err := testCP.GCCheckpoints(ctx, flakyGetStore{Store: mem, key: kept}, 2)
+	if err == nil {
+		t.Fatal("GC ran although a kept checkpoint's index could not be read")
+	}
+	if len(orphans) != 0 {
+		t.Errorf("orphans = %v, want none", orphans)
+	}
+	if _, err := testCP.ReadCheckpointIndex(ctx, mem, old); err != nil {
+		t.Errorf("checkpoint deleted despite the aborted round: %v", err)
+	}
+}

@@ -717,24 +717,37 @@ func (mgr *Manager) GCCheckpoints(ctx context.Context, store object.Store, keep 
 	}
 
 	// Collect SSTs referenced by surviving checkpoints so we never delete them.
+	// A kept checkpoint whose index cannot be read would leave its SSTs
+	// unprotected, so give up this round instead; one already gone needs no
+	// protection.
 	liveSSTs := make(map[string]struct{})
-	for _, k := range keys[len(keys)-keep:] {
+	protect := func(k string) error {
 		idx, err := mgr.ReadCheckpointIndex(ctx, store, k)
+		if errors.Is(err, object.ErrNotFound) {
+			return nil
+		}
 		if err != nil {
-			continue
+			return fmt.Errorf("checkpoint gc: read live index %q: %w", k, err)
 		}
 		for _, s := range idx.SSTFiles {
 			liveSSTs[s] = struct{}{}
+		}
+		return nil
+	}
+	for _, k := range keys[len(keys)-keep:] {
+		if err := protect(k); err != nil {
+			return 0, nil, err
 		}
 	}
-	// Also protect SSTs from pinned (branch) checkpoints.
+	// Also protect SSTs from pinned (branch) checkpoints, and from the
+	// checkpoint manifest/latest names, which is kept below even when it is
+	// not among the newest keep. Restores start from it.
+	if manifest != nil {
+		pinnedKeys[manifest.CheckpointKey] = true
+	}
 	for k := range pinnedKeys {
-		idx, err := mgr.ReadCheckpointIndex(ctx, store, k)
-		if err != nil {
-			continue
-		}
-		for _, s := range idx.SSTFiles {
-			liveSSTs[s] = struct{}{}
+		if err := protect(k); err != nil {
+			return 0, nil, err
 		}
 	}
 
@@ -744,11 +757,8 @@ func (mgr *Manager) GCCheckpoints(ctx context.Context, store object.Store, keep 
 	toDelete := keys[:len(keys)-keep]
 	var deleted int
 	for _, k := range toDelete {
-		if manifest != nil && k == manifest.CheckpointKey {
-			continue
-		}
 		if pinnedKeys[k] {
-			continue // branch is pinned to this checkpoint; preserve it
+			continue // manifest/latest or a branch points here; preserve it
 		}
 		// Harvest SST candidates from this checkpoint before deleting it.
 		idx, err := mgr.ReadCheckpointIndex(ctx, store, k)

@@ -848,6 +848,27 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 	return seq, true
 }
 
+// gcContext returns the context object-store GC runs under, or false if GC
+// must not run. A leader GCs only while its lease shows no other node can
+// have taken over, and stops when the lease ends: a superseded leader would
+// otherwise delete checkpoints and SSTs the new leader's checkpoints rely
+// on, judged against its own outdated view. A single node has no rival.
+func (n *Node) gcContext(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+	now := time.Now()
+	limit := now.Add(2 * time.Minute)
+	if n.loadRole() == roleLeader {
+		deadline := n.leaseDeadline(now)
+		if !now.Before(deadline) {
+			return nil, nil, false
+		}
+		if deadline.Before(limit) {
+			limit = deadline
+		}
+	}
+	gcCtx, cancel := context.WithDeadline(ctx, limit)
+	return gcCtx, cancel, true
+}
+
 func (n *Node) maybeCheckpoint(ctx context.Context) {
 	// Held through GC too, so GC cannot delete SSTs a concurrent checkpoint
 	// is about to reference.
@@ -861,12 +882,17 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		return
 	}
 
+	gcCtx, cancel, ok := n.gcContext(ctx)
+	if !ok {
+		n.log.Warnf("t4: skipping object-store GC: leader lease expired")
+		return
+	}
+	defer cancel()
+
 	// GC WAL segments from S3 that are fully covered by this checkpoint AND
 	// that all connected followers have applied. WAL segment boundaries and
 	// follower ACKs are sequence-based, while the checkpoint manifest still
 	// advertises the user-visible revision.
-	gcCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
 	gcSeq := seq
 	if n.peerSrv != nil {
 		if minFollower := n.peerSrv.MinFollowerAppliedRev(); minFollower < gcSeq {

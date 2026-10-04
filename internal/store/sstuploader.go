@@ -158,6 +158,42 @@ func (u *SSTUploader) Reconcile(ctx context.Context) error {
 	return nil
 }
 
+// ReconcileVerified is Reconcile for a registry that may be stale: SSTs it
+// records as uploaded may have been deleted since. It lists the store's SSTs
+// once, forgets the registered ones that are gone, and then uploads every
+// local SST not in the registry, which re-uploads those.
+//
+// A node fills its registry when it opens, whatever its role. A follower
+// keeps the SSTs it restored from a checkpoint while the leader's checkpoint
+// GC may delete them from the store once no checkpoint references them. A
+// follower about to become leader must call this before its first
+// checkpoint: trusting the registry, that checkpoint would reference SSTs
+// that no longer exist.
+//
+// If the store cannot be listed, the whole registry is forgotten, so that
+// checkpoints upload every SST they reference themselves.
+func (u *SSTUploader) ReconcileVerified(ctx context.Context) error {
+	keys, err := u.store.List(ctx, "sst/")
+	if err != nil {
+		u.mu.Lock()
+		clear(u.local)
+		u.mu.Unlock()
+		return fmt.Errorf("sstuploader: list uploaded ssts: %w", err)
+	}
+	present := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		present[k] = struct{}{}
+	}
+	u.mu.Lock()
+	for name, key := range u.local {
+		if _, ok := present[key]; !ok {
+			delete(u.local, name)
+		}
+	}
+	u.mu.Unlock()
+	return u.Reconcile(ctx)
+}
+
 // Start launches the background upload goroutine. Call once; runs until ctx
 // is cancelled.
 //
