@@ -68,14 +68,14 @@ type WAL struct {
 	uploadCtx    context.Context
 	uploadCancel context.CancelFunc
 
-	uploadC     chan uploadTask
+	uploadWake  chan struct{} // signals uploadLoop that a segment is pending
 	wg          sync.WaitGroup
 	cancelLoops context.CancelFunc // cancels rotationLoop and uploadLoop
 
 	// pending holds sealed segments whose upload has not been confirmed, by
-	// object key. Synchronous-upload mode uploads them before the active
-	// segment, so object storage never holds an acknowledged write while
-	// missing an earlier one.
+	// object key: it is the upload queue. Synchronous-upload mode uploads them
+	// before the active segment, so object storage never holds an
+	// acknowledged write while missing an earlier one.
 	pendingMu sync.Mutex
 	pending   map[string]string // object key → local path
 }
@@ -86,10 +86,13 @@ type WAL struct {
 // not in object storage under that key and never will be.
 var ErrSegmentConflict = errors.New("wal: segment key already holds different entries")
 
-type uploadTask struct {
-	localPath string
-	objectKey string
-}
+// Upload retry backoff: after a failed pass, uploadLoop waits uploadRetryMin,
+// doubling per consecutive failure up to uploadRetryMax. Variables so that
+// tests can shorten them.
+var (
+	uploadRetryMin = time.Second
+	uploadRetryMax = 30 * time.Second
+)
 
 // RecoveryStore is the state-machine subset needed for WAL replay.
 type RecoveryStore interface {
@@ -101,7 +104,7 @@ func New(opts ...Option) *WAL {
 	w := &WAL{
 		segMaxSize: DefaultSegmentMaxSize,
 		segMaxAge:  DefaultSegmentMaxAge,
-		uploadC:    make(chan uploadTask, 64),
+		uploadWake: make(chan struct{}, 1),
 		pending:    make(map[string]string),
 	}
 	for _, o := range opts {
@@ -177,7 +180,7 @@ func (w *WAL) Open(dir string, term uint64, startRev int64) error {
 	w.dir = dir
 	w.term = term
 	w.closed = false
-	w.uploadC = make(chan uploadTask, 64)
+	w.uploadWake = make(chan struct{}, 1)
 	w.active = nil
 	return nil
 }
@@ -302,9 +305,42 @@ func (w *WAL) Start(ctx context.Context) {
 	w.uploadCtx, w.uploadCancel = context.WithCancel(ctx)
 	loopCtx, cancel := context.WithCancel(ctx)
 	w.cancelLoops = cancel
+	if w.uploader != nil && !w.syncUpload {
+		w.queueLocalSegments()
+	}
 	w.wg.Add(2)
 	go w.rotationLoop(loopCtx)
 	go w.uploadLoop(loopCtx)
+}
+
+// queueLocalSegments queues the segment files already in the WAL directory:
+// an uploaded segment's file is removed, so these were never uploaded, by an
+// earlier run or by this one before a restart. Synchronous-upload mode leaves
+// them alone: it uploads every batch before acknowledging it, and a pending
+// segment that cannot be uploaded would block its writes.
+func (w *WAL) queueLocalSegments() {
+	paths, err := LocalSegments(w.dir)
+	if err != nil {
+		w.log.Errorf("wal: list local segments to upload: %v", err)
+		return
+	}
+	for _, path := range paths {
+		term, firstRev, ok := ParseSegmentName(filepath.Base(path))
+		if !ok {
+			continue
+		}
+		w.queueUpload(ObjectKey(term, firstRev), path)
+	}
+}
+
+// queueUpload marks a sealed segment for upload and wakes uploadLoop. It
+// never blocks, so it is safe to call with w.mu held.
+func (w *WAL) queueUpload(objKey, localPath string) {
+	w.addPending(objKey, localPath)
+	select {
+	case w.uploadWake <- struct{}{}:
+	default: // uploadLoop is already due to run
+	}
 }
 
 // Append writes e to the active segment and fsyncs.
@@ -427,24 +463,28 @@ func (w *WAL) donePending(objKey string) {
 	w.pendingMu.Unlock()
 }
 
+// pendingSorted returns the pending segments' object keys oldest first (keys
+// sort by term, then first sequence), with their local paths.
+func (w *WAL) pendingSorted() ([]string, map[string]string) {
+	w.pendingMu.Lock()
+	keys := make([]string, 0, len(w.pending))
+	paths := make(map[string]string, len(w.pending))
+	for k, p := range w.pending {
+		keys = append(keys, k)
+		paths[k] = p
+	}
+	w.pendingMu.Unlock()
+	sort.Strings(keys)
+	return keys, paths
+}
+
 // uploadPendingLocked uploads the sealed segments whose asynchronous upload
 // has not been confirmed, oldest first (object keys sort by term, then first
 // sequence). The uploader is idempotent, so racing the upload loop on the
 // same segment is harmless; a segment whose local file is already gone was
 // uploaded by that loop. Must be called with w.mu held.
 func (w *WAL) uploadPendingLocked() error {
-	w.pendingMu.Lock()
-	keys := make([]string, 0, len(w.pending))
-	for k := range w.pending {
-		keys = append(keys, k)
-	}
-	paths := make(map[string]string, len(keys))
-	for _, k := range keys {
-		paths[k] = w.pending[k]
-	}
-	w.pendingMu.Unlock()
-	sort.Strings(keys)
-
+	keys, paths := w.pendingSorted()
 	for _, k := range keys {
 		err := w.uploader(w.uploadCtx, paths[k], k)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -470,13 +510,7 @@ func (w *WAL) rotateLocked() {
 		return
 	}
 	if w.uploader != nil {
-		objKey := ObjectKey(seg.Term(), seg.FirstRev())
-		w.addPending(objKey, seg.Path())
-		select {
-		case w.uploadC <- uploadTask{localPath: seg.Path(), objectKey: objKey}:
-		default:
-			w.log.Warnf("wal: upload queue full, dropping %q (will retry on restart)", seg.Path())
-		}
+		w.queueUpload(ObjectKey(seg.Term(), seg.FirstRev()), seg.Path())
 	}
 	w.log.Debugf("wal: sealed segment %q (%d entries, %d bytes)", seg.Path(), seg.EntryCount(), seg.Size())
 	w.active = nil
@@ -500,13 +534,7 @@ func (w *WAL) rotationLoop(ctx context.Context) {
 				old := w.active
 				w.active = nil
 				if w.uploader != nil {
-					objKey := ObjectKey(old.Term(), old.FirstRev())
-					w.addPending(objKey, old.Path())
-					select {
-					case w.uploadC <- uploadTask{localPath: old.Path(), objectKey: objKey}:
-					default:
-						w.log.Warnf("wal: upload queue full, segment %q will be retried on restart", old.Path())
-					}
+					w.queueUpload(ObjectKey(old.Term(), old.FirstRev()), old.Path())
 				}
 			}
 			w.mu.Unlock()
@@ -517,50 +545,70 @@ func (w *WAL) rotationLoop(ctx context.Context) {
 	}
 }
 
-// uploadLoop drains the upload queue.
+// uploadLoop uploads pending segments in the background, oldest first. A
+// failed upload ends the pass, and the next pass starts after a backoff that
+// doubles from uploadRetryMin up to uploadRetryMax: while object storage is
+// down that is one attempt per backoff period, not one per pending segment,
+// however long the outage and the backlog grow. Segments sealed during the
+// backoff wait for the next pass.
 func (w *WAL) uploadLoop(ctx context.Context) {
 	defer w.wg.Done()
+	if w.uploader == nil {
+		return
+	}
+	conflicted := make(map[string]bool)
+	var (
+		backoff time.Duration
+		retryC  <-chan time.Time
+	)
 	for {
 		select {
-		case task := <-w.uploadC:
-			if w.uploader == nil {
-				continue
+		case <-w.uploadWake:
+			if retryC != nil {
+				continue // backing off; the retry pass covers it
 			}
-			if err := w.uploader(ctx, task.localPath, task.objectKey); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				w.log.Errorf("wal: upload %q → %q: %v", task.localPath, task.objectKey, err)
-				// If the local file is gone the segment was already uploaded and
-				// cleaned up (or discarded as empty). Retrying cannot help.
-				if errors.Is(err, os.ErrNotExist) {
-					w.donePending(task.objectKey)
-					continue
-				}
-				// A conflict is permanent, so don't re-queue. The segment stays
-				// pending: sync-upload mode must not publish later writes past
-				// entries that are missing from object storage.
-				if errors.Is(err, ErrSegmentConflict) {
-					continue
-				}
-				// Re-queue with a delay so we don't spin on transient S3 errors.
-				go func(t uploadTask) {
-					select {
-					case <-time.After(5 * time.Second):
-						select {
-						case w.uploadC <- t:
-						default:
-						}
-					case <-ctx.Done():
-					}
-				}(task)
-				continue
-			}
-			w.donePending(task.objectKey)
+		case <-retryC:
+			retryC = nil
 		case <-ctx.Done():
 			return
 		}
+		if err := w.uploadPass(ctx, conflicted); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			backoff = min(max(2*backoff, uploadRetryMin), uploadRetryMax)
+			w.log.Errorf("wal: upload %v; retrying in %v", err, backoff)
+			retryC = time.After(backoff)
+			continue
+		}
+		backoff = 0
 	}
+}
+
+// uploadPass uploads pending segments oldest first and stops at the first
+// failure. Segments in conflicted are skipped: their key holds different
+// entries, so they can never be uploaded. They stay pending, so that
+// synchronous-upload mode does not publish later writes past entries missing
+// from object storage.
+func (w *WAL) uploadPass(ctx context.Context, conflicted map[string]bool) error {
+	keys, paths := w.pendingSorted()
+	for _, k := range keys {
+		if conflicted[k] {
+			continue
+		}
+		err := w.uploader(ctx, paths[k], k)
+		switch {
+		case err == nil, errors.Is(err, os.ErrNotExist):
+			// Without the local file there is nothing left to upload.
+			w.donePending(k)
+		case errors.Is(err, ErrSegmentConflict):
+			w.log.Errorf("wal: upload %q → %q: %v", paths[k], k, err)
+			conflicted[k] = true
+		default:
+			return fmt.Errorf("%q → %q: %w", paths[k], k, err)
+		}
+	}
+	return nil
 }
 
 // Close seals the active segment (if any), uploads it synchronously so that
@@ -590,7 +638,7 @@ func (w *WAL) Close() error {
 	w.mu.Unlock()
 
 	// Stop background loops first; after wg.Wait() the upload loop has fully
-	// exited and we own uploadC exclusively for synchronous draining below.
+	// exited and nothing else uploads pending segments.
 	if w.cancelLoops != nil {
 		w.cancelLoops()
 	}
@@ -605,38 +653,34 @@ func (w *WAL) Close() error {
 		return nil
 	}
 
-	// Drain any segments that were sealed and queued before Close() was called
-	// but not yet uploaded (the upload loop may have exited mid-queue due to
-	// context cancellation).  Then upload the final segment.  All uploads use a
-	// fresh context so they are not affected by the already-cancelled bgCtx.
+	// Upload the segments still pending, oldest first, then the final
+	// segment. All uploads use a fresh context so they are not affected by
+	// the already-cancelled bgCtx. Stop at the first failure: the rest stay
+	// local and are queued again when the WAL next starts.
 	uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer uploadCancel()
 
-	var uploadErr error
-	for {
-		select {
-		case task := <-w.uploadC:
-			if err := w.uploader(uploadCtx, task.localPath, task.objectKey); err != nil {
-				w.log.Errorf("wal: close drain upload %q: %v", task.localPath, err)
-				if uploadErr == nil {
-					uploadErr = err
-				}
-			}
+	keys, paths := w.pendingSorted()
+	for _, k := range keys {
+		err := w.uploader(uploadCtx, paths[k], k)
+		switch {
+		case err == nil, errors.Is(err, os.ErrNotExist):
+			w.donePending(k)
+		case errors.Is(err, ErrSegmentConflict):
+			w.log.Errorf("wal: close upload %q → %q: %v", paths[k], k, err)
 		default:
-			goto drained
+			w.log.Errorf("wal: close upload %q → %q: %v", paths[k], k, err)
+			return err
 		}
 	}
-drained:
 	if finalSeg != nil {
 		objKey := ObjectKey(finalSeg.Term(), finalSeg.FirstRev())
 		if err := w.uploader(uploadCtx, finalSeg.Path(), objKey); err != nil {
 			w.log.Errorf("wal: close upload final segment: %v", err)
-			if uploadErr == nil {
-				uploadErr = err
-			}
+			return err
 		}
 	}
-	return uploadErr
+	return nil
 }
 
 // SealAndFlush seals the active segment immediately (blocking) and queues it
@@ -655,9 +699,7 @@ func (w *WAL) SealAndFlush(nextSeq int64) error {
 	}
 	w.active = nil
 	if w.uploader != nil {
-		objKey := ObjectKey(old.Term(), old.FirstRev())
-		w.addPending(objKey, old.Path())
-		w.uploadC <- uploadTask{localPath: old.Path(), objectKey: objKey}
+		w.queueUpload(ObjectKey(old.Term(), old.FirstRev()), old.Path())
 	}
 	return nil
 }
