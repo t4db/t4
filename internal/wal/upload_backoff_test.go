@@ -16,18 +16,20 @@ type fakeStore struct {
 	down     bool
 	block    chan struct{} // when non-nil, uploads wait on it
 	attempts int
+	tried    map[string]bool // keys an upload was attempted for
 	objects  map[string]bool
 	// conflicts holds keys already taken by different entries.
 	conflicts map[string]bool
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{objects: make(map[string]bool), conflicts: make(map[string]bool)}
+	return &fakeStore{tried: make(map[string]bool), objects: make(map[string]bool), conflicts: make(map[string]bool)}
 }
 
 func (f *fakeStore) upload(ctx context.Context, path, key string) error {
 	f.mu.Lock()
 	f.attempts++
+	f.tried[key] = true
 	down, block := f.down, f.block
 	f.mu.Unlock()
 	if block != nil {
@@ -117,12 +119,20 @@ func TestUploadBacksOffDuringOutage(t *testing.T) {
 
 	const segments = 100
 	sealSegments(t, w, 1, segments)
+
 	time.Sleep(500 * time.Millisecond)
 
-	// Passes at 0, 20, 60, 140, 220, ... ms: about 8 in 500ms, one attempt
-	// each. Before, every segment was retried on its own.
-	if attempts, _ := store.counts(); attempts > 15 {
-		t.Errorf("%d upload attempts for %d failing segments in 500ms, want one per backoff period", attempts, segments)
+	// A pass stops at its first failure, so while the store is down only the
+	// oldest segment is tried, once per backoff period. Before, every segment
+	// was tried and retried on its own.
+	store.mu.Lock()
+	tried, attempts := len(store.tried), store.attempts
+	store.mu.Unlock()
+	if tried != 1 {
+		t.Errorf("uploads tried for %d of %d segments while the store was down, want only the oldest", tried, segments)
+	}
+	if attempts > segments/2 {
+		t.Errorf("%d upload attempts for %d failing segments, want one per backoff period", attempts, segments)
 	}
 
 	store.set(false)
