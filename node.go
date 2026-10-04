@@ -314,6 +314,10 @@ func applyObjectStoreEncryption(cfg *Config) error {
 	return nil
 }
 
+// startupObjectStoreProbeTimeout bounds how long a single node with local data
+// waits for the object store at startup before starting without it.
+const startupObjectStoreProbeTimeout = 15 * time.Second
+
 // Open creates and starts a Node.
 func Open(cfg Config) (*Node, error) {
 	cfg.setDefaults()
@@ -349,6 +353,26 @@ func Open(cfg Config) (*Node, error) {
 	// inheritedSSTs is populated during BranchPoint restore: maps SST filename
 	// to the source store's S3 key.  Applied to the SSTUploader after open.
 	var inheritedSSTs map[string]string
+
+	// A single node that already has local data does not need the object
+	// store to start: its local data is authoritative, and the object store
+	// only receives copies of it. If the store is unreachable, start from
+	// local data instead of failing, so that a restart during an object-store
+	// outage does not take the node down. WAL segments and checkpoints are
+	// uploaded once the store recovers.
+	objectStoreDown := false
+	if cfg.ObjectStore != nil && cfg.PeerListenAddr == "" && cfg.RestorePoint == nil && cfg.BranchPoint == nil {
+		if _, err := os.Stat(pebbleDir); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), startupObjectStoreProbeTimeout)
+			_, perr := cp.ReadManifest(ctx, cfg.ObjectStore)
+			cancel()
+			if perr != nil {
+				objectStoreDown = true
+				log.Errorf("t4: object store unreachable at startup (%v); starting from local data only. "+
+					"Entries the object store holds beyond local data, if any, are not replayed", perr)
+			}
+		}
+	}
 
 	// ── Restore checkpoint ───────────────────────────────────────────────────
 	switch {
@@ -402,7 +426,7 @@ func Open(cfg Config) (*Node, error) {
 				}
 			}
 		}
-	case cfg.ObjectStore != nil:
+	case cfg.ObjectStore != nil && !objectStoreDown:
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		manifest, err := cp.ReadManifest(ctx, cfg.ObjectStore)
@@ -468,10 +492,14 @@ func Open(cfg Config) (*Node, error) {
 		if len(inheritedSSTs) > 0 {
 			sstUp.SetInherited(inheritedSSTs)
 		}
-		reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer reconcileCancel()
-		if err := sstUp.Reconcile(reconcileCtx); err != nil {
-			log.Warnf("t4: SST reconcile: %v", err)
+		// With the object store down, SSTs missing from it are uploaded by
+		// the next checkpoint instead.
+		if !objectStoreDown {
+			reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer reconcileCancel()
+			if err := sstUp.Reconcile(reconcileCtx); err != nil {
+				log.Warnf("t4: SST reconcile: %v", err)
+			}
 		}
 	}
 	// Always derive startRev from pebble's actual revision, not the checkpoint
@@ -558,7 +586,7 @@ func Open(cfg Config) (*Node, error) {
 				return nil, fmt.Errorf("t4: branch WAL replay: %w", err)
 			}
 		}
-	case cfg.ObjectStore != nil:
+	case cfg.ObjectStore != nil && !objectStoreDown:
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 

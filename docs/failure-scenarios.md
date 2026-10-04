@@ -110,7 +110,9 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 1. Restore S3 access.
 2. Restart the node. It replays all local WAL segments (including any partial segment) before resuming.
 
-**Tested by:** `TestObjectStoreUnavailableWritesSucceed`
+A restart during the outage is also safe: with local data present, the node starts from it when S3 does not answer within 15 s, without replaying from S3. Only a node with an empty data directory needs S3 to start.
+
+**Tested by:** `TestObjectStoreUnavailableWritesSucceed`, `TestSingleNodeRestartsDuringObjectStoreOutage`
 
 ---
 
