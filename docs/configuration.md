@@ -401,7 +401,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--grpc-keepalive-min-time` | `5s` | `T4_GRPC_KEEPALIVE_MIN_TIME` | No | minimum interval the server demands between client keepalive pings |
 | `t4 run` | `--grpc-keepalive-permit-without-stream` | `true` | `T4_GRPC_KEEPALIVE_PERMIT_WITHOUT_STREAM` | No | accept client pings even when no streams are open; required for etcd v3 client compatibility |
 | `t4 run` | `--grpc-keepalive-timeout` | `20s` | `T4_GRPC_KEEPALIVE_TIMEOUT` | No | server keepalive ping ack timeout before declaring the connection dead |
-| `t4 run` | `--grpc-stream-workers` | `0` | `T4_GRPC_STREAM_WORKERS` | No | goroutines kept to serve RPCs; 0 picks max(16, 4*GOMAXPROCS), negative starts a goroutine per RPC |
+| `t4 run` | `--grpc-stream-workers` | `0` | `T4_GRPC_STREAM_WORKERS` | No | goroutines kept to serve RPCs; 0 picks max(16, min(4*GOMAXPROCS, 64)), negative starts a goroutine per RPC |
 | `t4 run` | `--leader-watch-interval-sec` | `20` | `T4_LEADER_WATCH_INTERVAL_SEC` | No | how often (seconds) the leader renews its lock while it hears all followers; the lock stays valid 3x as long (min 2) |
 | `t4 run` | `--listen` | `0.0.0.0:3379` | `T4_LISTEN` | No | gRPC listen address (kine/etcd protocol) |
 | `t4 run` | `--log-level` | `info` | `T4_LOG_LEVEL` | No | log level (trace/debug/info/warn/error) |
