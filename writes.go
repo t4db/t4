@@ -1106,6 +1106,9 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 	n.writeC <- req
 	n.mu.Unlock()
 	_, err = n.await(ctx, req, "compact", start, "", e.Revision)
+	if err == nil {
+		metrics.CompactRevision.Set(float64(revision))
+	}
 	return err
 }
 

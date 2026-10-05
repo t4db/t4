@@ -49,6 +49,20 @@ config:
   # Leader checkpoint frequency in minutes.
   checkpointIntervalMin: 15
 
+  # Automatic history compaction (maps to the --auto-compact-* flags).
+  # Strategy: "off" | "time" | "revision"; empty infers the strategy from the
+  # retention settings below, matching the t4 binary defaults.
+  autoCompactMode: ""
+  # time strategy: retain revision history for this long ("24h", "168h", ...).
+  autoCompactRetention: ""
+  # revision strategy: keep this many recent revisions. 0 disables.
+  autoCompactRetainRevisions: 0
+  # How often to check the compaction watermark; empty uses the strategy default.
+  autoCompactInterval: ""
+  # time strategy: revision/time sampling interval; empty defaults to
+  # clamp(retention/7, 1m, 24h).
+  autoCompactSampleInterval: ""
+
   # gRPC server keepalive policy. Defaults match real etcd; lowering these
   # values risks `GOAWAY too_many_pings` for clients that ping aggressively.
   # Pass plain Go duration strings (e.g. "5s", "20s", "2h").
@@ -169,6 +183,28 @@ serviceMonitor:
 # ── Pod configuration ─────────────────────────────────────────────────────────
 podAnnotations: {}
 podLabels: {}
+
+# ── Escape hatches ────────────────────────────────────────────────────────────
+# Raw extra arguments appended to the `t4 run` invocation, e.g.
+#   extraArgs: ["--auto-compact-mode=time"]
+# Prefer the typed config.* keys where one exists; this is for flags the chart
+# does not model. Entries are shell fragments — quote values that need it.
+extraArgs: []
+
+# Extra environment variables for the t4 container. Full Kubernetes EnvVar
+# syntax (including valueFrom), e.g.
+#   extraEnv:
+#     - name: T4_LOG_LEVEL
+#       value: debug
+extraEnv: []
+
+# Labels merged into every resource this chart renders (StatefulSet, Services,
+# ServiceAccount, Secret, ServiceMonitor, ...). Pod-level labels: use podLabels.
+commonLabels: {}
+
+# Annotations merged into the StatefulSet, both Services, and the
+# ServiceAccount. Pod-level annotations: use podAnnotations.
+commonAnnotations: {}
 
 podSecurityContext:
   fsGroup: 65532
