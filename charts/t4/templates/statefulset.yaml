@@ -5,6 +5,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "t4.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   serviceName: {{ include "t4.headlessServiceName" . }}
   replicas: {{ .Values.replicaCount }}
@@ -66,6 +70,21 @@ spec:
                 --segment-max-size-mb={{ .Values.config.segmentMaxSizeMb }} \
                 --segment-max-age-sec={{ .Values.config.segmentMaxAgeSec }} \
                 --checkpoint-interval-min={{ .Values.config.checkpointIntervalMin }} \
+                {{- with .Values.config.autoCompactMode }}
+                --auto-compact-mode={{ . | quote }} \
+                {{- end }}
+                {{- with .Values.config.autoCompactRetention }}
+                --auto-compact-retention={{ . | quote }} \
+                {{- end }}
+                {{- if gt (int .Values.config.autoCompactRetainRevisions) 0 }}
+                --auto-compact-retain-revisions={{ .Values.config.autoCompactRetainRevisions }} \
+                {{- end }}
+                {{- with .Values.config.autoCompactInterval }}
+                --auto-compact-interval={{ . | quote }} \
+                {{- end }}
+                {{- with .Values.config.autoCompactSampleInterval }}
+                --auto-compact-sample-interval={{ . | quote }} \
+                {{- end }}
                 --grpc-keepalive-min-time={{ .Values.config.grpcKeepaliveMinTime | quote }} \
                 --grpc-keepalive-interval={{ .Values.config.grpcKeepaliveInterval | quote }} \
                 --grpc-keepalive-timeout={{ .Values.config.grpcKeepaliveTimeout | quote }} \
@@ -103,6 +122,9 @@ spec:
                 --peer-tls-cert=/etc/t4/tls/peer/tls.crt \
                 --peer-tls-key=/etc/t4/tls/peer/tls.key \
                 --peer-tls-ca=/etc/t4/tls/peer/ca.crt \
+                {{- end }}
+                {{- range .Values.extraArgs }}
+                {{ . }} \
                 {{- end }}
           env:
             - name: MY_POD_NAME
@@ -142,6 +164,9 @@ spec:
             {{- if $effectiveRegion }}
             - name: T4_S3_REGION
               value: {{ $effectiveRegion | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
           ports:
             - name: client
