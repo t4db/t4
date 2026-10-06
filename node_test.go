@@ -339,7 +339,9 @@ func TestNodeHistoryRing(t *testing.T) {
 	if _, err := n.Put(c, "/k/1", []byte("v1b"), 0); err != nil {
 		t.Fatal(err)
 	}
-	n.Delete(c, "/k/2")
+	if _, err := n.Delete(c, "/k/2"); err != nil {
+		t.Fatal(err)
+	}
 
 	kvs, err := n.List("/k/", t4.WithRevision(pin))
 	if err != nil {

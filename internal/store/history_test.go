@@ -210,7 +210,7 @@ func BenchmarkListAtHist(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			b.Cleanup(func() { s.Close() })
+			b.Cleanup(func() { _ = s.Close() })
 			// Enabled before any writes: the ring warms only from new commits.
 			s.SetHistoryRingSize(ringSize)
 			var rev int64
