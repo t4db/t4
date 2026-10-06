@@ -952,27 +952,22 @@
         "y": 20
       },
       "type": "timeseries",
-      "title": "Read Latency (p50 / p95 / p99)",
-      "description": "Local read latency percentiles (all op types combined; excludes follower linearizable-read sync).",
+      "title": "Read Latency by Op (p50 / p99)",
+      "description": "Per-operation read latency. Internal bookkeeping reads (lease expiry) are not included.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
-          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.50, sum by (le, op) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p50 {{op}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
-          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.99, sum by (le, op) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
+          "legendFormat": "p99 {{op}}",
           "refId": "B"
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(t4_read_duration_seconds_bucket{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[2m])))",
-          "legendFormat": "p99",
-          "refId": "C"
         }
       ],
       "options": {
@@ -1000,23 +995,7 @@
           },
           "unit": "s"
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "p99"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       }
     },
     {

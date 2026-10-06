@@ -10,6 +10,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -152,6 +153,7 @@ func runCmd() *cobra.Command {
 				enc,
 				pprofEnabled,
 			)).Info("starting t4 server")
+			warnLargeGOMAXPROCS()
 
 			cfg := t4.Config{
 				DataDir:                      dataDir,
@@ -366,7 +368,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&grpcKeepaliveTime, "grpc-keepalive-interval", defaultsKA.Time, "server keepalive ping interval; how often the server pings idle connections (env: T4_GRPC_KEEPALIVE_INTERVAL)")
 	cmd.Flags().DurationVar(&grpcKeepaliveTimeout, "grpc-keepalive-timeout", defaultsKA.Timeout, "server keepalive ping ack timeout before declaring the connection dead (env: T4_GRPC_KEEPALIVE_TIMEOUT)")
 	cmd.Flags().BoolVar(&grpcKeepalivePermitWithoutStream, "grpc-keepalive-permit-without-stream", defaultsKA.PermitWithoutStream, "accept client pings even when no streams are open; required for etcd v3 client compatibility (env: T4_GRPC_KEEPALIVE_PERMIT_WITHOUT_STREAM)")
-	cmd.Flags().IntVar(&grpcStreamWorkers, "grpc-stream-workers", 0, "goroutines kept to serve RPCs; 0 picks max(16, 4*GOMAXPROCS), negative starts a goroutine per RPC (env: T4_GRPC_STREAM_WORKERS)")
+	cmd.Flags().IntVar(&grpcStreamWorkers, "grpc-stream-workers", 0, "goroutines kept to serve RPCs; 0 picks max(16, min(4*GOMAXPROCS, 64)), negative starts a goroutine per RPC (env: T4_GRPC_STREAM_WORKERS)")
 	prependPreRunE(cmd, func(cmd *cobra.Command, _ []string) error {
 		return applyEnvVars(cmd, map[string]string{
 			"data-dir":                             "T4_DATA_DIR",
@@ -471,6 +473,7 @@ func startupLogFields(
 		"auto_compact_interval":         autoCompactInterval.String(),
 		"auto_compact_sample_interval":  autoCompactSampleInt.String(),
 		"object_store_encryption":       enc.enabled(),
+		"gomaxprocs":                    runtime.GOMAXPROCS(0),
 	}
 
 	if branchCheckpoint != "" {
@@ -670,6 +673,23 @@ func buildPeerTLS(ca, cert, key string) (serverCreds, clientCreds credentials.Tr
 		MinVersion:   tls.VersionTLS13,
 	}
 	return credentials.NewTLS(serverTLS), credentials.NewTLS(clientTLS), nil
+}
+
+// largeGOMAXPROCS is the GOMAXPROCS above which T4 warns at startup.
+const largeGOMAXPROCS = 64
+
+// warnLargeGOMAXPROCS warns when Go would use a very large number of OS
+// threads: Go derives GOMAXPROCS from the container's CPU limit, so without
+// one it uses every core of the host. The garbage collector then runs a
+// quarter of them as mark workers and keeps idle ones busy, which on a large
+// host costs tens of cores for little work.
+func warnLargeGOMAXPROCS() {
+	n := runtime.GOMAXPROCS(0)
+	if n <= largeGOMAXPROCS || os.Getenv("GOMAXPROCS") != "" {
+		return
+	}
+	logrus.Warnf("t4: GOMAXPROCS is %d (no CPU limit, or a very large one); Go's garbage collector scales with it, "+
+		"which can cost tens of cores on a large host. Set a container CPU limit or GOMAXPROCS (for example 8)", n)
 }
 
 func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled bool) {

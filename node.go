@@ -1101,6 +1101,7 @@ type readOpts struct {
 	fromKey  string
 	limit    int64
 	keysOnly bool
+	internal bool
 }
 
 func (o readOpts) hasRevision() bool { return o.revision > 0 }
@@ -1146,6 +1147,14 @@ func WithFromKey(k string) ReadOption {
 // returns all matching entries.
 func WithLimit(n int64) ReadOption {
 	return func(o *readOpts) { o.limit = n }
+}
+
+// WithInternalRead marks a read T4 makes for its own bookkeeping, such as
+// expiring leases, rather than one a client asked for. It is left out of
+// t4_reads_total, t4_read_errors_total and t4_read_duration_seconds, so that
+// those describe client traffic only.
+func WithInternalRead() ReadOption {
+	return func(o *readOpts) { o.internal = true }
 }
 
 // WithKeysOnly makes List return each key with its Revision, CreateRevision
@@ -1217,7 +1226,12 @@ func observeRead(op string, start time.Time, err error) {
 
 func (n *Node) Get(key string, opts ...ReadOption) (kv *KeyValue, err error) {
 	start := time.Now()
-	defer func() { observeRead("get", start, err) }()
+	o := applyReadOpts(opts)
+	defer func() {
+		if !o.internal {
+			observeRead("get", start, err)
+		}
+	}()
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -1226,7 +1240,6 @@ func (n *Node) Get(key string, opts ...ReadOption) (kv *KeyValue, err error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	o := applyReadOpts(opts)
 	var sv *istore.KeyValue
 	if o.hasRevision() {
 		sv, err = n.db.Load().GetAt(key, o.revision)
@@ -1241,7 +1254,12 @@ func (n *Node) Get(key string, opts ...ReadOption) (kv *KeyValue, err error) {
 
 func (n *Node) Exists(key string, opts ...ReadOption) (exists bool, err error) {
 	start := time.Now()
-	defer func() { observeRead("exists", start, err) }()
+	o := applyReadOpts(opts)
+	defer func() {
+		if !o.internal {
+			observeRead("exists", start, err)
+		}
+	}()
 	if n.closed.Load() {
 		return false, ErrClosed
 	}
@@ -1250,7 +1268,6 @@ func (n *Node) Exists(key string, opts ...ReadOption) (exists bool, err error) {
 	if n.closed.Load() {
 		return false, ErrClosed
 	}
-	o := applyReadOpts(opts)
 	if o.hasRevision() {
 		return n.db.Load().ExistsAt(key, o.revision)
 	}
@@ -1259,7 +1276,12 @@ func (n *Node) Exists(key string, opts ...ReadOption) (exists bool, err error) {
 
 func (n *Node) List(prefix string, opts ...ReadOption) (list []*KeyValue, err error) {
 	start := time.Now()
-	defer func() { observeRead("list", start, err) }()
+	o := applyReadOpts(opts)
+	defer func() {
+		if !o.internal {
+			observeRead("list", start, err)
+		}
+	}()
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -1268,7 +1290,6 @@ func (n *Node) List(prefix string, opts ...ReadOption) (list []*KeyValue, err er
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	o := applyReadOpts(opts)
 	svs, err := n.db.Load().ListRange(prefix, o.storeOptions())
 	if err != nil {
 		return nil, err
@@ -1282,7 +1303,12 @@ func (n *Node) List(prefix string, opts ...ReadOption) (list []*KeyValue, err er
 
 func (n *Node) Count(prefix string, opts ...ReadOption) (count int64, err error) {
 	start := time.Now()
-	defer func() { observeRead("count", start, err) }()
+	o := applyReadOpts(opts)
+	defer func() {
+		if !o.internal {
+			observeRead("count", start, err)
+		}
+	}()
 	if n.closed.Load() {
 		return 0, ErrClosed
 	}
@@ -1291,7 +1317,6 @@ func (n *Node) Count(prefix string, opts ...ReadOption) (count int64, err error)
 	if n.closed.Load() {
 		return 0, ErrClosed
 	}
-	o := applyReadOpts(opts)
 	return n.db.Load().CountRange(prefix, o.storeOptions())
 }
 

@@ -531,9 +531,9 @@ The dashboard contains eight sections:
 | `t4_writes_total`                | counter   | `op`      | Completed write operations                                                                            |
 | `t4_write_errors_total`          | counter   | `op`      | Write operations that returned an error                                                               |
 | `t4_write_duration_seconds`      | histogram | `op`      | Write latency (WAL + apply)                                                                           |
-| `t4_reads_total`                 | counter   | `op`        | Completed read operations                                                                             |
-| `t4_read_errors_total`           | counter   | `op`        | Read operations that returned an error                                                                |
-| `t4_read_duration_seconds`       | histogram | `op`        | Read latency (local store execution, excluding follower sync)                                         |
+| `t4_reads_total`                 | counter   | `op`        | Completed client read operations (T4's own bookkeeping reads, such as lease expiry, are excluded)     |
+| `t4_read_errors_total`           | counter   | `op`        | Client read operations that returned an error                                                         |
+| `t4_read_duration_seconds`       | histogram | `op`        | Client read latency up to 10 s (local store execution, excluding follower sync)                       |
 | `t4_forwarded_writes_total`      | counter   | `op`      | Writes forwarded from follower to leader                                                              |
 | `t4_forward_duration_seconds`    | histogram | `op`      | Forwarded write round-trip latency                                                                    |
 | `t4_current_revision`            | gauge     | —         | Latest applied revision                                                                               |
