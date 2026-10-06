@@ -479,10 +479,14 @@ func (s *Server) Alarm(_ context.Context, _ *etcdserverpb.AlarmRequest) (*etcdse
 	return &etcdserverpb.AlarmResponse{Header: s.header()}, nil
 }
 
-// Status returns basic node status: current revision, leader, version, and
-// the database's data format version as StorageVersion, where etcd reports
-// its storage schema version.
+// Status returns basic node status: current revision, leader, version, the
+// local Pebble size as DbSize, and the database's data format version as
+// StorageVersion, where etcd reports its storage schema version.
 func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcdserverpb.StatusResponse, error) {
+	dbSize, err := s.node.DBSize()
+	if err != nil {
+		return nil, err
+	}
 	rev := s.node.CurrentRevision()
 	leader := uint64(0)
 	if s.node.IsLeader() {
@@ -493,6 +497,7 @@ func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcd
 		Header:           s.header(),
 		Version:          emulatedETCDVersion,
 		StorageVersion:   storageVersion,
+		DbSize:           dbSize,
 		Leader:           leader,
 		RaftIndex:        uint64(etcdRev),
 		RaftAppliedIndex: uint64(etcdRev),

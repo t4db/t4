@@ -679,4 +679,7 @@ func TestStatusReportsStorageVersion(t *testing.T) {
 	if resp.StorageVersion != want {
 		t.Fatalf("StorageVersion=%q, want %q", resp.StorageVersion, want)
 	}
+	if resp.DbSize <= 0 {
+		t.Fatalf("DbSize=%d, want > 0", resp.DbSize)
+	}
 }

@@ -342,6 +342,9 @@ func (s *Store) Close() error {
 // Pebble exposes the underlying *pebble.DB for checkpoint creation.
 func (s *Store) Pebble() *pebble.DB { return s.db }
 
+// DiskSpaceUsage returns the on-disk size of the Pebble database in bytes.
+func (s *Store) DiskSpaceUsage() uint64 { return s.db.Metrics().DiskSpaceUsage() }
+
 // Flush forces Pebble to flush any buffered writes so a subsequent checkpoint
 // captures the latest applied state even when live commits use pebble.NoSync.
 func (s *Store) Flush() error { return s.db.Flush() }

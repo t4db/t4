@@ -6,6 +6,7 @@ package metrics
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -59,6 +60,11 @@ var (
 
 	// CompactRevision tracks the compaction watermark.
 	CompactRevision prometheus.Gauge
+
+	// DBSizeBytes reports the on-disk size of the local Pebble database
+	// (sstables, WAL, manifest and in-progress compaction output), sampled at
+	// scrape time from the source installed with SetDBSizeFunc.
+	DBSizeBytes prometheus.GaugeFunc
 
 	// Role has one labelled gauge per possible role; the active one is set to 1.
 	Role *prometheus.GaugeVec
@@ -131,6 +137,7 @@ var (
 )
 
 var once sync.Once
+var dbSizeFunc atomic.Pointer[func() (uint64, bool)]
 var gatherer prometheus.Gatherer = prometheus.DefaultGatherer
 
 // Register registers all t4 metrics on reg. Only the first call takes
@@ -221,6 +228,18 @@ func Register(reg prometheus.Registerer) {
 		CompactRevision = prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "t4_compact_revision",
 			Help: "Compaction watermark revision.",
+		})
+
+		DBSizeBytes = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "t4_db_size_bytes",
+			Help: "On-disk size of the local Pebble database in bytes.",
+		}, func() float64 {
+			if f := dbSizeFunc.Load(); f != nil {
+				if size, ok := (*f)(); ok {
+					return float64(size)
+				}
+			}
+			return 0
 		})
 
 		Role = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -337,6 +356,7 @@ func Register(reg prometheus.Registerer) {
 			ForwardDuration,
 			CurrentRevision,
 			CompactRevision,
+			DBSizeBytes,
 			Role,
 			ReplicationDegraded,
 			WALUploadsTotal,
@@ -376,4 +396,10 @@ func SetRole(role string) {
 			Role.WithLabelValues(r).Set(0)
 		}
 	}
+}
+
+// SetDBSizeFunc installs the source sampled by DBSizeBytes on each scrape.
+// f reports ok=false when the database is unavailable (e.g. closed).
+func SetDBSizeFunc(f func() (size uint64, ok bool)) {
+	dbSizeFunc.Store(&f)
 }
