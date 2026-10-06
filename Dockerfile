@@ -1,6 +1,8 @@
 # Builds the t4 server binary.
 # Run: docker build -t t4 .
-FROM golang:1.27-bookworm AS builder
+# The builder runs natively on the build host and cross-compiles for the
+# target platform, so multi-arch builds don't run the Go toolchain under QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -11,8 +13,10 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=
 ARG DATE=
+ARG TARGETOS
+ARG TARGETARCH
 
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
       -trimpath \
       -ldflags="-s -w \
         -X github.com/t4db/t4/internal/version.Version=${VERSION} \
