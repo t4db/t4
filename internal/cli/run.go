@@ -120,9 +120,6 @@ func runCmd() *cobra.Command {
 			if autoCompactRevisions < 0 {
 				return fmt.Errorf("--auto-compact-retain-revisions must be non-negative")
 			}
-			if historyRingSize < 0 {
-				return fmt.Errorf("--history-ring-size must be non-negative")
-			}
 
 			logrus.WithFields(startupLogFields(
 				dataDir,
@@ -334,7 +331,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&autoCompactInterval, "auto-compact-interval", 0, "how often to check autocompaction; 0 defaults by strategy (env: T4_AUTO_COMPACT_INTERVAL)")
 	cmd.Flags().DurationVar(&autoCompactSampleInt, "auto-compact-sample-interval", 0, "time strategy: revision/time sampling interval; 0 defaults to clamp(retention/7, 1m, 24h) when enabled (env: T4_AUTO_COMPACT_SAMPLE_INTERVAL)")
 	cmd.Flags().StringVar(&readConsistency, "read-consistency", "linearizable", "read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale) (env: T4_READ_CONSISTENCY)")
-	cmd.Flags().IntVar(&historyRingSize, "history-ring-size", 0, "in-memory recent-history ring capacity in revisions; covered revision-pinned reads skip the log-tail scan (0 disables) (env: T4_HISTORY_RING_SIZE)")
+	cmd.Flags().IntVar(&historyRingSize, "history-ring-size", 0, "in-memory recent-history ring capacity in revisions; covered revision-pinned reads skip the log-tail scan (0 defaults to 16384, negative disables) (env: T4_HISTORY_RING_SIZE)")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level (trace/debug/info/warn/error) (env: T4_LOG_LEVEL)")
 	// multi-node
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "stable unique node identifier (default: hostname) (env: T4_NODE_ID)")

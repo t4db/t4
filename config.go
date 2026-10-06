@@ -101,7 +101,9 @@ type Config struct {
 	// Revisions that fall out of the ring are served by the existing Pebble
 	// undo/replay paths, so the ring changes read cost, never correctness.
 	// It starts empty at open and warms from new writes.
-	// Default: 0 (disabled).
+	//
+	// 0 keeps the default (16384 revisions); a negative value disables the
+	// ring entirely.
 	HistoryRingSize int
 
 	// ── Storage ──────────────────────────────────────────────────────────────
@@ -383,6 +385,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.WatchSendTimeout == 0 {
 		c.WatchSendTimeout = 30 * time.Second
+	}
+	if c.HistoryRingSize == 0 {
+		c.HistoryRingSize = 16384
 	}
 	if c.Logger == nil {
 		c.Logger = defaultLogger()
