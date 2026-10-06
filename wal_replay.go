@@ -158,6 +158,7 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 		n.fenceMu.Unlock()
 		return false, fmt.Errorf("open new pebble after restore: %w", rerr)
 	}
+	newDB.SetHistoryRingSize(n.cfg.HistoryRingSize)
 	if n.cfg.NodeID != "" {
 		rerr = newDB.SetNodeID(n.cfg.NodeID)
 		if rerr == nil {

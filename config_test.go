@@ -44,3 +44,16 @@ func TestAutoCompactRevisionDefaults(t *testing.T) {
 		t.Fatalf("AutoCompactInterval: want %s got %s", time.Minute, cfg.AutoCompactInterval)
 	}
 }
+
+func TestHistoryRingSizeDefaults(t *testing.T) {
+	cfg := Config{}
+	cfg.setDefaults()
+	if cfg.HistoryRingSize != 16384 {
+		t.Fatalf("HistoryRingSize default: want 16384 got %d", cfg.HistoryRingSize)
+	}
+	cfg = Config{HistoryRingSize: -1}
+	cfg.setDefaults()
+	if cfg.HistoryRingSize != -1 {
+		t.Fatalf("HistoryRingSize explicit negative: want -1 got %d", cfg.HistoryRingSize)
+	}
+}
