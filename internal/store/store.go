@@ -50,6 +50,11 @@ type Store struct {
 	// lastTerm is the term of the entry at lastSeq (see position.go).
 	lastTerm atomic.Uint64
 
+	// maxUndoSpan bounds how far behind HEAD a revision-pinned read may
+	// reach; reads beyond it fail with ErrCompacted. 0 disables the bound.
+	// Set once at open, read on every pinned read, so accessed atomically.
+	maxUndoSpan int64
+
 	// posMu guards the leader-known position: the key it is stored under
 	// (nil until SetNodeID) and its value.
 	posMu     sync.Mutex
@@ -346,6 +351,12 @@ func (s *Store) CurrentRevision() int64 { return atomic.LoadInt64(&s.currentRev)
 
 // CompactRevision returns the oldest revision still available.
 func (s *Store) CompactRevision() int64 { return atomic.LoadInt64(&s.compactRev) }
+
+// SetMaxUndoSpan bounds how many revisions behind HEAD a revision-pinned read
+// may reach. Reads pinned further back fail with ErrCompacted, telling the
+// client to resync from HEAD instead of paying for a history scan whose cost
+// grows with the writes since the pinned revision. 0 disables the bound.
+func (s *Store) SetMaxUndoSpan(span int64) { atomic.StoreInt64(&s.maxUndoSpan, span) }
 
 // LastSequence returns the highest WAL/peer-stream sequence applied. Used by
 // WAL-replay code to validate stream continuity. Diverges from
@@ -828,6 +839,12 @@ func (s *Store) resolveReadRevision(revision int64) (int64, error) {
 	}
 	if revision > currentRev {
 		return 0, ErrFutureRevision
+	}
+	// Retained but far behind HEAD: serving the read would scan O(writes
+	// since revision) of log tail. The client resyncs from HEAD instead,
+	// as with a compacted revision.
+	if span := atomic.LoadInt64(&s.maxUndoSpan); span > 0 && currentRev-revision > span {
+		return 0, ErrCompacted
 	}
 	return revision, nil
 }

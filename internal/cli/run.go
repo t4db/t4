@@ -48,6 +48,7 @@ func runCmd() *cobra.Command {
 		autoCompactInterval   time.Duration
 		autoCompactSampleInt  time.Duration
 		readConsistency       string
+		maxUndoSpan           int64
 		logLevel              string
 		// multi-node
 		nodeID                 string
@@ -118,6 +119,9 @@ func runCmd() *cobra.Command {
 			if autoCompactRevisions < 0 {
 				return fmt.Errorf("--auto-compact-retain-revisions must be non-negative")
 			}
+			if maxUndoSpan < 0 {
+				return fmt.Errorf("--max-undo-span must be non-negative")
+			}
 
 			logrus.WithFields(startupLogFields(
 				dataDir,
@@ -152,6 +156,7 @@ func runCmd() *cobra.Command {
 			cfg := t4.Config{
 				DataDir:                      dataDir,
 				ReadConsistency:              t4.ReadConsistency(readConsistency),
+				MaxUndoSpan:                  maxUndoSpan,
 				SegmentMaxSize:               segmentMaxSizeMB << 20,
 				SegmentMaxAge:                time.Duration(segmentMaxAgeSec) * time.Second,
 				CheckpointInterval:           time.Duration(checkpointIntervalMin) * time.Minute,
@@ -327,6 +332,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&autoCompactInterval, "auto-compact-interval", 0, "how often to check autocompaction; 0 defaults by strategy (env: T4_AUTO_COMPACT_INTERVAL)")
 	cmd.Flags().DurationVar(&autoCompactSampleInt, "auto-compact-sample-interval", 0, "time strategy: revision/time sampling interval; 0 defaults to clamp(retention/7, 1m, 24h) when enabled (env: T4_AUTO_COMPACT_SAMPLE_INTERVAL)")
 	cmd.Flags().StringVar(&readConsistency, "read-consistency", "linearizable", "read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale) (env: T4_READ_CONSISTENCY)")
+	cmd.Flags().Int64Var(&maxUndoSpan, "max-undo-span", 0, "cap on how many revisions behind HEAD a revision-pinned read may reach; reads beyond the cap fail as compacted so clients resync from HEAD (0 disables) (env: T4_MAX_UNDO_SPAN)")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level (trace/debug/info/warn/error) (env: T4_LOG_LEVEL)")
 	// multi-node
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "stable unique node identifier (default: hostname) (env: T4_NODE_ID)")
@@ -376,6 +382,7 @@ func runCmd() *cobra.Command {
 			"auto-compact-interval":                "T4_AUTO_COMPACT_INTERVAL",
 			"auto-compact-sample-interval":         "T4_AUTO_COMPACT_SAMPLE_INTERVAL",
 			"read-consistency":                     "T4_READ_CONSISTENCY",
+			"max-undo-span":                        "T4_MAX_UNDO_SPAN",
 			"log-level":                            "T4_LOG_LEVEL",
 			"node-id":                              "T4_NODE_ID",
 			"peer-listen":                          "T4_PEER_LISTEN",

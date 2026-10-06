@@ -312,6 +312,48 @@ func TestNodeCount(t *testing.T) {
 	}
 }
 
+// TestNodeMaxUndoSpan pins that Config.MaxUndoSpan caps revision-pinned
+// reads: further behind HEAD than the cap they fail with ErrCompacted, and
+// the cap is reapplied when the store is reopened.
+func TestNodeMaxUndoSpan(t *testing.T) {
+	dir := t.TempDir()
+	open := func() *t4.Node {
+		n, err := t4.Open(t4.Config{DataDir: dir, MaxUndoSpan: 2})
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		t.Cleanup(func() { _ = n.Close() })
+		return n
+	}
+
+	n := open()
+	c := ctx(t)
+	pinned, err := n.Put(c, "foo", []byte("bar"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ { // head at pinned+3, one past the cap
+		if _, err := n.Put(c, "bump", []byte(strconv.Itoa(i)), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := n.List("", t4.WithRevision(pinned+2)); err != nil {
+		t.Fatalf("list at cap boundary: %v", err)
+	}
+	if _, err := n.List("", t4.WithRevision(pinned)); !errors.Is(err, t4.ErrCompacted) {
+		t.Fatalf("list beyond cap: got %v, want ErrCompacted", err)
+	}
+
+	if err := n.Close(); err != nil {
+		t.Fatal(err)
+	}
+	n = open()
+	if _, err := n.List("", t4.WithRevision(pinned)); !errors.Is(err, t4.ErrCompacted) {
+		t.Fatalf("list beyond cap after reopen: got %v, want ErrCompacted", err)
+	}
+}
+
 // ── Watch ─────────────────────────────────────────────────────────────────────
 
 func TestNodeWatch(t *testing.T) {

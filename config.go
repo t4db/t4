@@ -90,6 +90,21 @@ type Config struct {
 	// leaders and single-node deployments since the sync is a no-op).
 	ReadConsistency ReadConsistency
 
+	// MaxUndoSpan bounds how many revisions behind HEAD a revision-pinned
+	// read may reach. Serving a read pinned further back costs O(writes
+	// since the pinned revision): the store scans the log tail and undoes
+	// every change made after it. Beyond the bound the read fails with
+	// ErrCompacted, which the etcd adapter surfaces as the standard
+	// compaction error, so clients (apiserver, kine) resync from HEAD —
+	// the same recovery they use for genuinely compacted revisions.
+	//
+	// Set this on deployments where clients pin revisions before a write
+	// burst (e.g. Kubernetes resync lists); the bound turns a pathological
+	// resync into a cheap error plus a fresh list. Revision-pinned watches
+	// are not affected.
+	// Default: 0 (no bound; full retained history stays readable).
+	MaxUndoSpan int64
+
 	// ── Storage ──────────────────────────────────────────────────────────────
 
 	// DataDir is the directory used for local Pebble data and WAL segments.
