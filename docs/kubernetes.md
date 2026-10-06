@@ -331,6 +331,26 @@ args:
 
 ---
 
+## CPU and memory
+
+Go sizes its scheduler and garbage collector by `GOMAXPROCS`, which it takes from the container's CPU limit. Without a
+CPU limit, it is the core count of the node: on a large node T4 then runs hundreds of GC workers and can spend tens of
+cores on garbage collection under modest load. T4 logs a warning at startup when `GOMAXPROCS` is above 64.
+
+Bound it with a CPU limit, or, if you avoid CPU limits, by setting `GOMAXPROCS` from the CPU request:
+
+```yaml
+env:
+  - name: GOMAXPROCS
+    valueFrom:
+      resourceFieldRef:
+        resource: requests.cpu
+        divisor: "1"   # rounds up to whole cores
+```
+
+Also set `GOMEMLIMIT` to about 80% of the memory limit (for example `GOMEMLIMIT=1600MiB` with a 2Gi limit), so the
+garbage collector works harder as memory fills instead of letting the container be OOM-killed.
+
 ## Health and readiness probes
 
 | Endpoint | Meaning |

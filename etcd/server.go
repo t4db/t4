@@ -169,10 +169,17 @@ func WithStreamWorkers(n int) Option {
 // A worker serving a streaming RPC (Watch, LeaseKeepAlive) is held for the
 // stream's lifetime, and when every worker is busy gRPC falls back to a new
 // goroutine per RPC. The pool is sized well above GOMAXPROCS so a few held
-// streams leave room for unary calls.
+// streams leave room for unary calls, up to maxDefaultStreamWorkers. Without
+// a CPU limit GOMAXPROCS is the host's core count, and the pool would keep
+// thousands of mostly idle goroutines for the GC to scan; many long-lived
+// streams take the whole pool either way, after which RPCs get a goroutine
+// each as without a pool.
 func DefaultStreamWorkers() int {
-	return max(16, 4*runtime.GOMAXPROCS(0))
+	return max(16, min(4*runtime.GOMAXPROCS(0), maxDefaultStreamWorkers))
 }
+
+// maxDefaultStreamWorkers caps DefaultStreamWorkers.
+const maxDefaultStreamWorkers = 64
 
 // NewServerOptions returns the gRPC server options needed to host the
 // etcd v3 surface: auth interceptors (when authStore is non-nil) and a
