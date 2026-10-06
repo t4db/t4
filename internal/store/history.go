@@ -26,10 +26,13 @@ type histRev struct {
 }
 
 // histChange records that key changed, its previous state living at prevRev
-// (0 when the key was created by the change).
+// (0 when the key was created by the change). create mirrors the log record's
+// create flag so a zero prevRev on a non-create can be told apart from "the
+// key did not exist" and treated as a broken chain, as undoAfter does.
 type histChange struct {
 	key     string
 	prevRev int64
+	create  bool
 }
 
 func newHistoryRing(cap int) *historyRing {
@@ -63,8 +66,9 @@ func (h *historyRing) append(rev int64, changes []histChange) {
 }
 
 // changesSince merges the ring into an undo map for a read pinned at rev:
-// every key matching prefix and fromKey that changed after rev maps to the
-// revision of its state at rev, or to 0 when the key did not exist at rev.
+// every key matching prefix and fromKey that changed after rev maps to its
+// first change after rev, whose prevRev is the revision of its state at rev
+// (0 when the key did not exist at rev).
 // The first (oldest) change to a key wins, as in undoAfter's ascending log
 // scan. Non-matching keys are skipped during the walk, so the map never
 // holds changes outside the read's range even when the window is large.
@@ -77,13 +81,13 @@ func (h *historyRing) append(rev int64, changes []histChange) {
 // earliest change after rev is by construction the one with an anchor at or
 // below rev, and entries for later revisions never predate it, so extra
 // changes cannot corrupt the map.
-func (h *historyRing) changesSince(prefix, fromKey string, rev int64) (map[string]int64, bool) {
+func (h *historyRing) changesSince(prefix, fromKey string, rev int64) (map[string]histChange, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.revs) == 0 || h.revs[0].rev > rev+1 {
 		return nil, false
 	}
-	m := make(map[string]int64, 64)
+	m := make(map[string]histChange, 64)
 	for _, hr := range h.revs {
 		if hr.rev <= rev {
 			continue
@@ -93,11 +97,19 @@ func (h *historyRing) changesSince(prefix, fromKey string, rev int64) (map[strin
 				continue
 			}
 			if _, ok := m[c.key]; !ok {
-				m[c.key] = c.prevRev
+				m[c.key] = c
 			}
 		}
 	}
 	return m, true
+}
+
+// reset drops every retained revision. It clears in place rather than
+// swapping the ring so a reader holding the ring pointer sees the reset too.
+func (h *historyRing) reset() {
+	h.mu.Lock()
+	h.revs = nil
+	h.mu.Unlock()
 }
 
 // floor returns the oldest retained revision, for tests and diagnostics.

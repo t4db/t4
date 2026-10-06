@@ -27,23 +27,35 @@ func (s *Store) undoFromHist(snap pebble.Reader, prefix, fromKey string, rev int
 	}
 	undo := make(map[string]*KeyValue, len(merged))
 	lk := make([]byte, logKeyScratchSize)
-	for key, prevRev := range merged {
-		if prevRev == 0 {
-			undo[key] = nil
-			continue
-		}
-		if prevRev > rev {
-			// By construction the earliest change after rev anchors at or
-			// below rev; treat a violation as corruption and unwind.
-			return nil, errUndoChain
-		}
-		prev, err := logEntryAt(snap, lk, key, prevRev)
-		if err != nil || prev == nil {
-			return nil, errUndoChain
+	for key, c := range merged {
+		prev, err := histStateAt(snap, lk, c, rev)
+		if err != nil {
+			return nil, err
 		}
 		undo[key] = prev
 	}
 	return undo, nil
+}
+
+// histStateAt returns the state at rev of the key whose first change after
+// rev is c: nil when c created it, else the record c anchors to.
+func histStateAt(snap pebble.Reader, lk []byte, c histChange, rev int64) (*KeyValue, error) {
+	if c.prevRev == 0 {
+		if !c.create {
+			return nil, errUndoChain
+		}
+		return nil, nil
+	}
+	if c.prevRev > rev {
+		// By construction the earliest change after rev anchors at or
+		// below rev; treat a violation as corruption and unwind.
+		return nil, errUndoChain
+	}
+	prev, err := logEntryAt(snap, lk, c.key, c.prevRev)
+	if err != nil || prev == nil {
+		return nil, errUndoChain
+	}
+	return prev, nil
 }
 
 func (s *Store) listAtFromHist(prefix string, opts ReadOptions, rev int64) ([]*KeyValue, error) {
@@ -86,21 +98,15 @@ func (s *Store) getAtFromHist(key string, rev int64) (*KeyValue, error) {
 	if !ok {
 		return nil, errUndoChain
 	}
-	prevRev, changed := merged[key]
+	c, changed := merged[key]
 	if !changed {
+		if ie.rev != 0 {
+			// Live at a revision after rev, yet the ring has no change after rev.
+			return nil, errUndoChain
+		}
 		return nil, nil // never existed at or after rev
 	}
-	if prevRev == 0 {
-		return nil, nil // created after rev
-	}
-	if prevRev > rev {
-		return nil, errUndoChain
-	}
-	prev, err := logEntryAt(snap, make([]byte, logKeyScratchSize), key, prevRev)
-	if err != nil || prev == nil {
-		return nil, errUndoChain
-	}
-	return prev, nil
+	return histStateAt(snap, make([]byte, logKeyScratchSize), c, rev)
 }
 
 // ── merge helpers shared with the Pebble undo path ─────────────────────────

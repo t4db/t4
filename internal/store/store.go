@@ -447,9 +447,9 @@ func (s *Store) Apply(entries []wal.Entry) error {
 	var maxRev, maxSeq int64
 	var tip Position
 	// Changes for the history ring, grouped by revision. The ring is fed
-	// only from here — never from Recover's replay, whose term-conflict
-	// rewrites would leave stale anchors. An empty ring after startup is
-	// fine: pinned reads fall back to the Pebble paths until it warms.
+	// only from here — Recover's replay, whose term-conflict rewrites would
+	// leave stale anchors, clears it instead. An empty ring is fine: pinned
+	// reads fall back to the Pebble paths until it warms.
 	ring := s.hist.Load()
 	var histChanges []histRev
 	var curRev int64
@@ -518,11 +518,11 @@ func histChangesOf(e *wal.Entry) ([]histChange, error) {
 		}
 		cs := make([]histChange, 0, len(ops))
 		for _, op := range ops {
-			cs = append(cs, histChange{key: op.Key, prevRev: op.PrevRevision})
+			cs = append(cs, histChange{key: op.Key, prevRev: op.PrevRevision, create: op.Op == wal.OpCreate})
 		}
 		return cs, nil
 	}
-	return []histChange{{key: e.Key, prevRev: e.PrevRevision}}, nil
+	return []histChange{{key: e.Key, prevRev: e.PrevRevision, create: e.Op == wal.OpCreate}}, nil
 }
 
 // commitBatch writes the current-revision and last-sequence meta keys into b,
@@ -530,9 +530,10 @@ func histChangesOf(e *wal.Entry) ([]histChange, error) {
 // currentRev/lastSeq counters. The counters only ever move forward. On any
 // error b is closed and the error is returned.
 //
-// histChanges are appended to the history ring after the commit but before
-// currentRev moves, so any revision a reader can pin is already covered by
-// the ring.
+// histChanges are appended to the history ring before the commit, so every
+// change a reader's snapshot can hold is already in the ring; ring entries
+// newer than the snapshot are harmless (see changesSince). A failed commit
+// clears the ring rather than leave changes Pebble never saw.
 //
 // tip is the position of the batch's last entry. fromLeader marks entries a
 // leader streamed to this node or it wrote as leader: only those advance the
@@ -555,18 +556,22 @@ func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, tip Position,
 			return fmt.Errorf("store: set last seq: %w", err)
 		}
 	}
+	ring := s.hist.Load()
+	if ring != nil {
+		for _, hr := range histChanges {
+			ring.append(hr.rev, hr.changes)
+		}
+	}
 	writeOpts := pebble.NoSync
 	if sync {
 		writeOpts = pebble.Sync
 	}
 	if err := b.Commit(writeOpts); err != nil {
+		if ring != nil && len(histChanges) > 0 {
+			ring.reset()
+		}
 		_ = b.Close()
 		return fmt.Errorf("store: commit batch: %w", err)
-	}
-	if ring := s.hist.Load(); ring != nil {
-		for _, hr := range histChanges {
-			ring.append(hr.rev, hr.changes)
-		}
 	}
 	if maxRev > atomic.LoadInt64(&s.currentRev) {
 		atomic.StoreInt64(&s.currentRev, maxRev)
@@ -588,10 +593,17 @@ func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, tip Position,
 }
 
 // Recover applies entries without broadcasting to watchers. Used during
-// startup replay before the node is serving requests.
+// startup replay and by follower resync and leader catch-up, which run on the
+// live store. Its revisions bypass the history ring, so the ring is cleared
+// first: a ring that skipped them would still claim to cover pins below them.
+// Clearing before the commit keeps any snapshot holding these revisions from
+// meeting a ring that predates them.
 func (s *Store) Recover(entries []wal.Entry) error {
 	if len(entries) == 0 {
 		return nil
+	}
+	if ring := s.hist.Load(); ring != nil {
+		ring.reset()
 	}
 	b := s.db.NewBatch()
 	var maxRev, maxSeq int64
