@@ -90,6 +90,20 @@ type Config struct {
 	// leaders and single-node deployments since the sync is a no-op).
 	ReadConsistency ReadConsistency
 
+	// HistoryRingSize enables the in-memory recent-history ring holding the
+	// changed keys (but not their values) of the last N revisions. A read
+	// pinned to a covered revision then builds its undo map in memory and
+	// touches only the changed keys' records, instead of scanning every log
+	// record written since the pin — which is O(all writes since the pin)
+	// and is paid once per paginated page. The ring is per-node memory:
+	// bounded by N revisions worth of changed key names.
+	//
+	// Revisions that fall out of the ring are served by the existing Pebble
+	// undo/replay paths, so the ring changes read cost, never correctness.
+	// It starts empty at open and warms from new writes.
+	// Default: 0 (disabled).
+	HistoryRingSize int
+
 	// ── Storage ──────────────────────────────────────────────────────────────
 
 	// DataDir is the directory used for local Pebble data and WAL segments.

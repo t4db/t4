@@ -50,6 +50,11 @@ type Store struct {
 	// lastTerm is the term of the entry at lastSeq (see position.go).
 	lastTerm atomic.Uint64
 
+	// hist is the in-memory recent-history ring serving revision-pinned
+	// reads; nil keeps reads on the Pebble undo/replay paths. Swapped
+	// wholesale by SetHistoryRingSize.
+	hist atomic.Pointer[historyRing]
+
 	// posMu guards the leader-known position: the key it is stored under
 	// (nil until SetNodeID) and its value.
 	posMu     sync.Mutex
@@ -347,6 +352,19 @@ func (s *Store) CurrentRevision() int64 { return atomic.LoadInt64(&s.currentRev)
 // CompactRevision returns the oldest revision still available.
 func (s *Store) CompactRevision() int64 { return atomic.LoadInt64(&s.compactRev) }
 
+// SetHistoryRingSize enables the in-memory recent-history ring with capacity
+// for the last n revisions (n <= 0 disables it). Revision-pinned reads
+// covered by the ring build their undo map from memory and touch only the
+// changed keys' records, instead of scanning the Pebble log tail whose cost
+// grows with every write since the pinned revision.
+func (s *Store) SetHistoryRingSize(n int) {
+	if n <= 0 {
+		s.hist.Store(nil)
+		return
+	}
+	s.hist.Store(newHistoryRing(n))
+}
+
 // LastSequence returns the highest WAL/peer-stream sequence applied. Used by
 // WAL-replay code to validate stream continuity. Diverges from
 // CurrentRevision after Compact entries.
@@ -428,6 +446,14 @@ func (s *Store) Apply(entries []wal.Entry) error {
 	b := s.db.NewBatch()
 	var maxRev, maxSeq int64
 	var tip Position
+	// Changes for the history ring, grouped by revision. The ring is fed
+	// only from here — never from Recover's replay, whose term-conflict
+	// rewrites would leave stale anchors. An empty ring after startup is
+	// fine: pinned reads fall back to the Pebble paths until it warms.
+	ring := s.hist.Load()
+	var histChanges []histRev
+	var curRev int64
+	var curChanges []histChange
 	for i := range entries {
 		e := &entries[i]
 		if seq := e.Sequence(); seq > tip.Seq {
@@ -448,6 +474,21 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			_ = b.Close()
 			return err
 		}
+		if ring != nil {
+			cs, err := histChangesOf(e)
+			if err != nil {
+				_ = b.Close()
+				return err
+			}
+			if e.Revision != curRev {
+				if len(curChanges) > 0 {
+					histChanges = append(histChanges, histRev{rev: curRev, changes: curChanges})
+					curChanges = nil
+				}
+				curRev = e.Revision
+			}
+			curChanges = append(curChanges, cs...)
+		}
 		if e.Revision > maxRev {
 			maxRev = e.Revision
 		}
@@ -455,11 +496,33 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			maxSeq = seq
 		}
 	}
-	if err := s.commitBatch(b, maxRev, maxSeq, tip, true, false); err != nil {
+	if len(curChanges) > 0 {
+		histChanges = append(histChanges, histRev{rev: curRev, changes: curChanges})
+	}
+	if err := s.commitBatch(b, maxRev, maxSeq, tip, true, false, histChanges); err != nil {
 		return err
 	}
 	s.broadcast()
 	return nil
+}
+
+// histChanges returns e's per-key changes for the history ring: a create is
+// anchored at revision 0 (the key had no state before), updates and deletes
+// anchor at the record they replace. All txn sub-ops are kept in order; the
+// ring merge's first-change-wins rule resolves duplicate keys inside a txn.
+func histChangesOf(e *wal.Entry) ([]histChange, error) {
+	if e.Op == wal.OpTxn {
+		ops, err := wal.DecodeTxnOps(e.Value)
+		if err != nil {
+			return nil, fmt.Errorf("store: history decode txn ops rev=%d: %w", e.Revision, err)
+		}
+		cs := make([]histChange, 0, len(ops))
+		for _, op := range ops {
+			cs = append(cs, histChange{key: op.Key, prevRev: op.PrevRevision})
+		}
+		return cs, nil
+	}
+	return []histChange{{key: e.Key, prevRev: e.PrevRevision}}, nil
 }
 
 // commitBatch writes the current-revision and last-sequence meta keys into b,
@@ -467,10 +530,14 @@ func (s *Store) Apply(entries []wal.Entry) error {
 // currentRev/lastSeq counters. The counters only ever move forward. On any
 // error b is closed and the error is returned.
 //
+// histChanges are appended to the history ring after the commit but before
+// currentRev moves, so any revision a reader can pin is already covered by
+// the ring.
+//
 // tip is the position of the batch's last entry. fromLeader marks entries a
 // leader streamed to this node or it wrote as leader: only those advance the
 // leader-known position (position.go).
-func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, tip Position, fromLeader, sync bool) error {
+func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, tip Position, fromLeader, sync bool, histChanges []histRev) error {
 	known, advanceKnown, err := s.recordPositions(b, tip, fromLeader)
 	if err != nil {
 		_ = b.Close()
@@ -495,6 +562,11 @@ func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, tip Position,
 	if err := b.Commit(writeOpts); err != nil {
 		_ = b.Close()
 		return fmt.Errorf("store: commit batch: %w", err)
+	}
+	if ring := s.hist.Load(); ring != nil {
+		for _, hr := range histChanges {
+			ring.append(hr.rev, hr.changes)
+		}
 	}
 	if maxRev > atomic.LoadInt64(&s.currentRev) {
 		atomic.StoreInt64(&s.currentRev, maxRev)
@@ -579,7 +651,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 			maxRev = e.Revision
 		}
 	}
-	return s.commitBatch(b, maxRev, maxSeq, tip, false, true)
+	return s.commitBatch(b, maxRev, maxSeq, tip, false, true, nil)
 }
 
 func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
@@ -780,6 +852,9 @@ func (s *Store) Get(key string) (*KeyValue, error) {
 }
 
 // GetAt returns the value of key as of revision. A revision of 0 means current.
+// Revision-pinned reads prefer the history ring, then the undo-from-HEAD
+// scan, then log replay; both ring and scan signal with errUndoChain when
+// they cannot serve the revision.
 func (s *Store) GetAt(key string, revision int64) (*KeyValue, error) {
 	targetRev, err := s.resolveReadRevision(revision)
 	if err != nil {
@@ -789,7 +864,12 @@ func (s *Store) GetAt(key string, revision int64) (*KeyValue, error) {
 		return s.Get(key)
 	}
 	if s.nearHead(targetRev) {
-		kv, err := s.getAtFromHead(key, targetRev)
+		// Ring first, then the undo scan; both signal errUndoChain on gaps.
+		kv, err := s.getAtFromHist(key, targetRev)
+		if !errors.Is(err, errUndoChain) {
+			return kv, err
+		}
+		kv, err = s.getAtFromHead(key, targetRev)
 		if !errors.Is(err, errUndoChain) {
 			return kv, err
 		}
@@ -1144,32 +1224,7 @@ func (s *Store) listAtFromHead(prefix string, opts ReadOptions, rev int64) ([]*K
 	if err != nil {
 		return nil, err
 	}
-	// Dropping the changed keys removes at most len(undo) entries from the
-	// head of the listing, so that many extra suffice to fill the limit.
-	limit := opts.Limit
-	if limit > 0 {
-		limit += int64(len(undo))
-	}
-	head, err := listCurrentFrom(snap, prefix, opts.FromKey, limit, opts.KeysOnly)
-	if err != nil {
-		return nil, err
-	}
-	out := head[:0]
-	for _, kv := range head {
-		if _, changed := undo[kv.Key]; !changed {
-			out = append(out, kv)
-		}
-	}
-	for _, kv := range undo {
-		if kv != nil {
-			out = append(out, kv)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-	if opts.Limit > 0 && int64(len(out)) > opts.Limit {
-		out = out[:opts.Limit]
-	}
-	return out, nil
+	return listFromUndo(snap, prefix, opts, undo)
 }
 
 func (s *Store) countAtFromHead(prefix, fromKey string, rev int64) (int64, error) {
@@ -1180,23 +1235,7 @@ func (s *Store) countAtFromHead(prefix, fromKey string, rev int64) (int64, error
 	if err != nil {
 		return 0, err
 	}
-	n, err := countCurrentFrom(snap, prefix, fromKey)
-	if err != nil {
-		return 0, err
-	}
-	for key, kv := range undo {
-		cur, err := idxRevFrom(snap, key)
-		if err != nil {
-			return 0, err
-		}
-		if cur != 0 {
-			n--
-		}
-		if kv != nil {
-			n++
-		}
-	}
-	return n, nil
+	return countFromUndo(snap, prefix, fromKey, undo)
 }
 
 func (s *Store) getAtRevision(key string, targetRev int64) (*KeyValue, error) {
@@ -1250,7 +1289,12 @@ func (s *Store) ListRange(prefix string, opts ReadOptions) ([]*KeyValue, error) 
 	var kvs []*KeyValue
 	fromHead := s.nearHead(targetRev)
 	if fromHead {
-		kvs, err = s.listAtFromHead(prefix, opts, targetRev)
+		// The ring serves the same shape undoFromHead would; it earns its
+		// keep here, where the alternative is scanning the log tail.
+		kvs, err = s.listAtFromHist(prefix, opts, targetRev)
+		if errors.Is(err, errUndoChain) {
+			kvs, err = s.listAtFromHead(prefix, opts, targetRev)
+		}
 	}
 	if !fromHead || errors.Is(err, errUndoChain) {
 		kvs, err = s.listAtByReplay(prefix, opts, targetRev)
@@ -1376,6 +1420,9 @@ func (s *Store) CountRange(prefix string, opts ReadOptions) (int64, error) {
 		return 0, err
 	}
 	if s.nearHead(targetRev) {
+		if n, err := s.countAtFromHist(prefix, opts.FromKey, targetRev); !errors.Is(err, errUndoChain) {
+			return n, err
+		}
 		n, err := s.countAtFromHead(prefix, opts.FromKey, targetRev)
 		if !errors.Is(err, errUndoChain) {
 			return n, err

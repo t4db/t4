@@ -312,6 +312,56 @@ func TestNodeCount(t *testing.T) {
 	}
 }
 
+// TestNodeHistoryRing pins that Config.HistoryRingSize serves
+// revision-pinned reads: results stay correct around deletions and updates,
+// and after a reopen (ring cold, Pebble paths take over) pinned reads keep
+// answering.
+func TestNodeHistoryRing(t *testing.T) {
+	dir := t.TempDir()
+	open := func() *t4.Node {
+		n, err := t4.Open(t4.Config{DataDir: dir, HistoryRingSize: 100})
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		t.Cleanup(func() { _ = n.Close() })
+		return n
+	}
+
+	n := open()
+	c := ctx(t)
+	pin, err := n.Put(c, "/k/1", []byte("v1"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.Put(c, "/k/2", []byte("v2"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.Put(c, "/k/1", []byte("v1b"), 0); err != nil {
+		t.Fatal(err)
+	}
+	n.Delete(c, "/k/2")
+
+	kvs, err := n.List("/k/", t4.WithRevision(pin))
+	if err != nil {
+		t.Fatalf("list at pin: %v", err)
+	}
+	if len(kvs) != 1 || string(kvs[0].Value) != "v1" || kvs[0].Key != "/k/1" {
+		t.Fatalf("list at pin: %+v, want /k/1=v1 only", kvs)
+	}
+
+	if err := n.Close(); err != nil {
+		t.Fatal(err)
+	}
+	n = open()
+	kvs, err = n.List("/k/", t4.WithRevision(pin))
+	if err != nil {
+		t.Fatalf("list at pin after reopen: %v", err)
+	}
+	if len(kvs) != 1 || string(kvs[0].Value) != "v1" {
+		t.Fatalf("list at pin after reopen: %+v, want /k/1=v1 only", kvs)
+	}
+}
+
 // ── Watch ─────────────────────────────────────────────────────────────────────
 
 func TestNodeWatch(t *testing.T) {
