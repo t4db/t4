@@ -91,9 +91,9 @@ func (s *Server) getLease(ctx context.Context, id int64, linearizable bool) (*le
 		err error
 	)
 	if linearizable {
-		kv, err = s.node.LinearizableGet(ctx, leaseKey(id))
+		kv, err = s.node.LinearizableGet(ctx, leaseKey(id), t4.WithInternalRead())
 	} else {
-		kv, err = s.node.Get(leaseKey(id))
+		kv, err = s.node.Get(leaseKey(id), t4.WithInternalRead())
 	}
 	if err != nil {
 		return nil, err
@@ -128,9 +128,9 @@ func (s *Server) listLeases(ctx context.Context, linearizable bool) ([]*leaseRec
 		err error
 	)
 	if linearizable {
-		kvs, err = s.node.LinearizableList(ctx, leasePrefix)
+		kvs, err = s.node.LinearizableList(ctx, leasePrefix, t4.WithInternalRead())
 	} else {
-		kvs, err = s.node.List(leasePrefix)
+		kvs, err = s.node.List(leasePrefix, t4.WithInternalRead())
 	}
 	if err != nil {
 		return nil, err
@@ -173,9 +173,9 @@ func (s *Server) collectLeaseKeys(ctx context.Context, leaseID int64, linearizab
 		err error
 	)
 	if linearizable {
-		kvs, err = s.node.LinearizableList(ctx, "")
+		kvs, err = s.node.LinearizableList(ctx, "", t4.WithInternalRead())
 	} else {
-		kvs, err = s.node.List("")
+		kvs, err = s.node.List("", t4.WithInternalRead())
 	}
 	if err != nil {
 		return nil, err

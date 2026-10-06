@@ -172,9 +172,12 @@ func Register(reg prometheus.Registerer) {
 		}, []string{"op"})
 
 		ReadDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "t4_read_duration_seconds",
-			Help:    "Read operation duration (local execution, excluding follower sync).",
-			Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .5},
+			Name: "t4_read_duration_seconds",
+			Help: "Read operation duration (local execution, excluding follower sync).",
+			// Up to 10s: with a top bucket of 0.5s, quantiles of slow
+			// reads (large lists, reads at old revisions) read as 0.5s
+			// however long they took.
+			Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		}, []string{"op"})
 
 		TxnRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
