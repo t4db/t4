@@ -248,6 +248,8 @@ type Node struct {
 	entriesSinceCheckpoint int64
 	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
 	checkpointMu           sync.Mutex          // serializes checkpoints and checkpoint GC; taken before fenceMu
+	sstSweepMarks          map[string]struct{} // SSTs the last sweep found unreferenced; guarded by checkpointMu
+	sstSweepTerm           uint64              // term sstSweepMarks was collected under; guarded by checkpointMu
 	checkpointShutdownWait time.Duration       // how long graceful shutdown waits for an in-flight checkpoint
 	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
 	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample

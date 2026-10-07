@@ -838,8 +838,14 @@ compaction.
 
 ### Garbage collection
 
-Old checkpoints and WAL segments accumulate in S3 unless explicitly pruned. Run `t4 gc` periodically (e.g. daily via
-cron) to reclaim storage:
+The leader garbage-collects S3 automatically after each checkpoint: it keeps the two most recent checkpoints (plus the
+one `manifest/latest` names and any pinned by a branch), deletes the SSTs only the dropped checkpoints referenced,
+deletes WAL segments that the new checkpoint covers and every connected follower has applied, and sweeps `sst/` for SSTs
+no checkpoint references and that are not live on the leader — tables Pebble compacted away between checkpoints, and
+ones followers uploaded. A swept SST is deleted only once two consecutive sweeps found it unreferenced, so it takes two
+checkpoint intervals to go. GC runs only while the leader's lease is valid.
+
+`t4 gc` runs the same passes, except the `sst/` sweep, from outside the cluster, with its own retention:
 
 ```bash
 t4 gc \
