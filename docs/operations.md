@@ -26,6 +26,11 @@ t4 run \
   --s3-endpoint http://s3.internal:9000
 ```
 
+The store must support conditional PUTs. `If-None-Match: *` is required in every mode: WAL segment uploads use it so a
+segment already in the store is never overwritten. Multi-node clusters also require `If-Match`, for leader election and
+for `manifest/latest`. A single node is the only writer of its manifest, so it does not use `If-Match` and runs on
+stores without it, such as older radosgw releases.
+
 ### Object-store encryption at rest
 
 Enable client-side encryption for all T4 object-store data with a 32-byte AES-256 key:

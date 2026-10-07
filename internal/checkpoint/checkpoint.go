@@ -39,6 +39,9 @@ func (stdlibCheckpointLogger) Warnf(format string, args ...interface{}) {
 // logger — no global state.
 type Manager struct {
 	log checkpointLogger
+	// singleWriter is set when this node is the only one that writes the
+	// manifest, as in single-node mode; see SetSingleWriter.
+	singleWriter bool
 }
 
 // New creates a Manager.  If log is nil a stdlib-backed logger is used.
@@ -48,6 +51,13 @@ func New(log checkpointLogger) *Manager {
 	}
 	return &Manager{log: log}
 }
+
+// SetSingleWriter declares that no other node writes this store's manifest,
+// as in single-node mode. WriteManifest then skips the conditional write: with
+// one writer, checking the current manifest before a plain write keeps it
+// from moving backwards, and stores without If-Match (such as older radosgw)
+// keep working. Call it before the Manager is used.
+func (mgr *Manager) SetSingleWriter() { mgr.singleWriter = true }
 
 // FormatVersion constants for checkpoint objects.
 //
@@ -180,8 +190,8 @@ var ErrStaleManifest = errors.New("manifest/latest points to a newer checkpoint"
 //
 // The write is conditional on the manifest being unchanged since it was read,
 // so a write that lands late (a PUT cancelled client side that still reached
-// the store) is rejected too. Stores without conditional writes get a plain
-// write.
+// the store) is rejected too. Stores without conditional writes, and a
+// Manager marked SetSingleWriter, get a plain write after the check.
 func (mgr *Manager) WriteManifest(ctx context.Context, store object.Store, m *Manifest) error {
 	if err := mgr.putManifest(ctx, store, m); err != nil {
 		return fmt.Errorf("checkpoint: write manifest: %w", err)
@@ -195,7 +205,16 @@ func (mgr *Manager) putManifest(ctx context.Context, store object.Store, m *Mani
 		return err
 	}
 	cs, ok := store.(object.ConditionalStore)
-	if !ok {
+	if !ok || mgr.singleWriter {
+		old, err := mgr.ReadManifest(ctx, store)
+		if err != nil {
+			return err
+		}
+		if old != nil {
+			if err := checkNotStale(old, m); err != nil {
+				return err
+			}
+		}
 		return store.Put(ctx, ManifestKey, bytes.NewReader(b))
 	}
 
@@ -212,10 +231,19 @@ func (mgr *Manager) putManifest(ctx context.Context, store object.Store, m *Mani
 		return err
 	}
 
+	if err := checkNotStale(old, m); err != nil {
+		return err
+	}
+	return cs.PutIfMatch(ctx, ManifestKey, bytes.NewReader(b), cur.ETag)
+}
+
+// checkNotStale returns ErrStaleManifest if old points to a later checkpoint
+// than m: a higher term, or the same term and a higher sequence.
+func checkNotStale(old, m *Manifest) error {
 	if old.Term > m.Term || (old.Term == m.Term && old.LastSequence > m.LastSequence) {
 		return fmt.Errorf("%w: term=%d seq=%d", ErrStaleManifest, old.Term, old.LastSequence)
 	}
-	return cs.PutIfMatch(ctx, ManifestKey, bytes.NewReader(b), cur.ETag)
+	return nil
 }
 
 // Write creates a Pebble checkpoint and uploads it: individual SST files at
