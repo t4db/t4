@@ -327,6 +327,10 @@ func Open(cfg Config) (*Node, error) {
 
 	log := cfg.Logger
 	cp := checkpoint.New(log)
+	if cfg.PeerListenAddr == "" {
+		// Single-node mode: no other node writes the manifest.
+		cp.SetSingleWriter()
+	}
 
 	// Register all t4 metrics on the configured registerer.
 	// When nil, metrics.Register falls back to prometheus.DefaultRegisterer.
