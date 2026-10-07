@@ -809,3 +809,70 @@ func (mgr *Manager) GCOrphanSSTs(ctx context.Context, store object.Store, candid
 	}
 	return len(keys), nil
 }
+
+// SweepUnreferencedSSTs deletes SSTs that GCOrphanSSTs never sees: ones no
+// checkpoint ever referenced, such as tables the uploader streamed that Pebble
+// compacted away before the next checkpoint, or that a follower uploaded.
+//
+// It lists "sst/" and treats a key as unreferenced when no checkpoint in the
+// store (pinned branch checkpoints included) lists it and it is not in live,
+// the uploader's keys for tables still on local disk. A key is deleted only
+// once it was also unreferenced in the previous sweep, passed as marked: an
+// upload lands in the store before the uploader registers it, so a single
+// sweep can catch a live table in between. The caller keeps the returned set
+// and passes it as marked to the next sweep, which must run under the same
+// leadership term; a fresh term starts from nil.
+//
+// Callers must serialize sweeps with checkpoint writing, as maybeCheckpoint
+// does with checkpointMu, so no checkpoint is written between reading the
+// references and deleting.
+func (mgr *Manager) SweepUnreferencedSSTs(ctx context.Context, store object.Store, live, marked map[string]struct{}) (int, map[string]struct{}, error) {
+	keys, err := store.List(ctx, "sst/")
+	if err != nil {
+		return 0, marked, fmt.Errorf("sst sweep: list: %w", err)
+	}
+	cps, err := mgr.ListRemote(ctx, store)
+	if err != nil {
+		return 0, marked, fmt.Errorf("sst sweep: list checkpoints: %w", err)
+	}
+	referenced := make(map[string]struct{})
+	for _, k := range cps {
+		idx, err := mgr.ReadCheckpointIndex(ctx, store, k)
+		if errors.Is(err, object.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, marked, fmt.Errorf("sst sweep: read index %q: %w", k, err)
+		}
+		for _, s := range idx.SSTFiles {
+			referenced[s] = struct{}{}
+		}
+	}
+
+	unreferenced := make(map[string]struct{})
+	var toDelete []string
+	for _, k := range keys {
+		if _, ok := referenced[k]; ok {
+			continue
+		}
+		if _, ok := live[k]; ok {
+			continue
+		}
+		if _, ok := marked[k]; ok {
+			toDelete = append(toDelete, k)
+		} else {
+			unreferenced[k] = struct{}{}
+		}
+	}
+	if len(toDelete) == 0 {
+		return 0, unreferenced, nil
+	}
+	if err := store.DeleteMany(ctx, toDelete); err != nil {
+		// Keep them marked so the next sweep retries.
+		for _, k := range toDelete {
+			unreferenced[k] = struct{}{}
+		}
+		return 0, unreferenced, fmt.Errorf("sst sweep: delete: %w", err)
+	}
+	return len(toDelete), unreferenced, nil
+}

@@ -19,6 +19,7 @@ import (
 
 // SSTUploader streams Pebble SST files to object storage as they are created,
 // keeping an in-memory registry of filename → S3 key for all live SSTs.
+// Tables Pebble deletes leave the registry.
 //
 // This decouples SST upload from checkpoint creation: checkpoints only write
 // a JSON index (already-uploaded SST keys), so there is no upload burst at
@@ -101,6 +102,16 @@ func (u *SSTUploader) EventListener() pebble.EventListener {
 			for i := range info.Output.Tables {
 				queueTable(info.Output.Tables[i].FileNum)
 			}
+		},
+		// Forget tables Pebble has deleted, so the registry names only live
+		// tables and the leader's SST sweep can reclaim the rest.
+		TableDeleted: func(info pebble.TableDeleteInfo) {
+			if info.Err != nil {
+				return
+			}
+			u.mu.Lock()
+			delete(u.local, filepath.Base(info.Path))
+			u.mu.Unlock()
 		},
 	}
 }
@@ -317,6 +328,14 @@ func (u *SSTUploader) uploadOne(ctx context.Context, path string) error {
 	u.mu.Lock()
 	u.local[name] = s3Key
 	u.mu.Unlock()
+	// Pebble may have deleted the table while it uploaded, firing
+	// TableDeleted before it was registered. Pebble removes the file before
+	// that event, so a missing file here means the entry must go.
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		u.mu.Lock()
+		delete(u.local, name)
+		u.mu.Unlock()
+	}
 	return nil
 }
 

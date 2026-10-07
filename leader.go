@@ -934,4 +934,31 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 			n.log.Infof("t4: sst gc: deleted %d orphan sst(s)", sstDeleted)
 		}
 	}
+
+	n.sweepSSTs(gcCtx)
+}
+
+// sweepSSTs deletes SSTs that no checkpoint references and that are not live
+// tables of this node, which GCOrphanSSTs cannot find: tables Pebble
+// compacted away between checkpoints, and ones followers uploaded. A key goes
+// only after two consecutive sweeps in the same term found it unreferenced.
+// The caller must hold checkpointMu.
+func (n *Node) sweepSSTs(ctx context.Context) {
+	if n.sstSweepTerm != n.term {
+		n.sstSweepMarks = nil
+		n.sstSweepTerm = n.term
+	}
+	live := make(map[string]struct{})
+	if n.sstUploader != nil {
+		for _, key := range n.sstUploader.Registry() {
+			live[key] = struct{}{}
+		}
+	}
+	deleted, marks, err := n.cp.SweepUnreferencedSSTs(ctx, n.cfg.ObjectStore, live, n.sstSweepMarks)
+	n.sstSweepMarks = marks
+	if err != nil {
+		n.log.Warnf("t4: sst sweep: %v", err)
+	} else if deleted > 0 {
+		n.log.Infof("t4: sst sweep: deleted %d unreferenced sst(s)", deleted)
+	}
 }
