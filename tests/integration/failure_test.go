@@ -20,6 +20,7 @@ import (
 
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
 )
@@ -316,6 +317,9 @@ func TestPreviousFollowerStartsAloneWithoutPreviousLeader(t *testing.T) {
 
 // ── TestFollowerRequestsReturnNoLeaderWhileLeaderUnavailable ─────────────────
 
+// TestFollowerRequestsReturnNoLeaderWhileLeaderUnavailable pins that a node
+// following a leader it cannot reach answers ErrNoLeader rather than a raw
+// dial error, for linearizable reads and forwarded writes alike.
 func TestFollowerRequestsReturnNoLeaderWhileLeaderUnavailable(t *testing.T) {
 	store := object.NewMem()
 	leaderDir := t.TempDir()
@@ -337,6 +341,11 @@ func TestFollowerRequestsReturnNoLeaderWhileLeaderUnavailable(t *testing.T) {
 	if err := leader.Close(); err != nil {
 		t.Fatalf("close leader: %v", err)
 	}
+	// A graceful Close releases the lock, and a node that finds it released
+	// takes over at once, which races the requests below. Make the lock that
+	// of a crashed leader instead, still valid for a minute, so the restarted
+	// node keeps following an unreachable leader throughout.
+	holdLockAsCrashedLeader(t, store, time.Minute)
 
 	restarted := openElectionTestNode(t, store, followerID, restartDir)
 	defer func() { _ = restarted.Close() }()
@@ -353,6 +362,29 @@ func TestFollowerRequestsReturnNoLeaderWhileLeaderUnavailable(t *testing.T) {
 	writeCancel()
 	if !errors.Is(writeErr, t4.ErrNoLeader) {
 		t.Fatalf("Put while leader unavailable = %v, want ErrNoLeader", writeErr)
+	}
+}
+
+// holdLockAsCrashedLeader rewrites the leader lock as its holder's last renewal
+// before a crash, valid for validFor from now: unlike a released lock, no node
+// may take it over until it expires.
+func holdLockAsCrashedLeader(t *testing.T, store object.Store, validFor time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	rec, err := election.NewLock(store, "test", "").Read(ctx)
+	if err != nil || rec == nil {
+		t.Fatalf("read leader lock: rec=%v err=%v", rec, err)
+	}
+	now := time.Now()
+	rec.RenewedNano = now.UnixNano()
+	rec.ValidUntilNano = now.Add(validFor).UnixNano()
+	rec.LastSeenNano = rec.ValidUntilNano - election.FastTTL.Nanoseconds()
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, election.LockKey, bytes.NewReader(b)); err != nil {
+		t.Fatalf("write leader lock: %v", err)
 	}
 }
 
