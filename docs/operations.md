@@ -495,6 +495,7 @@ The dashboard contains eight sections:
 | `t4_forward_duration_seconds`    | histogram | `op`          | Forwarded write round-trip latency                                                                    |
 | `t4_current_revision`            | gauge     | —             | Latest applied revision                                                                               |
 | `t4_compact_revision`            | gauge     | —             | Compaction watermark                                                                                  |
+| `t4_db_size_bytes`               | gauge     | —             | On-disk size of the local Pebble database                                                             |
 | `t4_role`                        | gauge     | `role`        | 1 for the active role (`leader`/`follower`/`single`)                                                  |
 | `t4_replication_degraded`        | gauge     | —             | 1 while the leader flushes each batch to S3 for lack of follower ACKs                                 |
 | `t4_wal_uploads_total`           | counter   | —             | WAL segments successfully uploaded                                                                    |

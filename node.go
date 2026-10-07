@@ -794,6 +794,10 @@ func Open(cfg Config) (*Node, error) {
 
 	// ── Observability ─────────────────────────────────────────────────────────
 	n.updateMetrics()
+	metrics.SetDBSizeFunc(func() (uint64, bool) {
+		size, err := n.DBSize()
+		return uint64(size), err == nil
+	})
 
 	return n, nil
 }
@@ -1318,6 +1322,18 @@ func (n *Node) Count(prefix string, opts ...ReadOption) (count int64, err error)
 		return 0, ErrClosed
 	}
 	return n.db.Load().CountRange(prefix, o.storeOptions())
+}
+
+// DBSize returns the on-disk size of the local Pebble database in bytes. It
+// holds readMu like a read so it never touches a store that resync or Close
+// has closed.
+func (n *Node) DBSize() (int64, error) {
+	n.readMu.RLock()
+	defer n.readMu.RUnlock()
+	if n.closed.Load() {
+		return 0, ErrClosed
+	}
+	return int64(n.db.Load().DiskSpaceUsage()), nil
 }
 
 func (n *Node) CurrentRevision() int64 { return n.db.Load().CurrentRevision() }

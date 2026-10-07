@@ -3,7 +3,7 @@
   "uid": "t4-overview",
   "description": "Cluster health, write performance, replication lag, WAL/checkpoint activity, and S3 object store metrics for a T4 node or cluster.",
   "schemaVersion": 38,
-  "version": 2,
+  "version": 3,
   "tags": [
     "t4"
   ],
@@ -491,7 +491,7 @@
       "title": "Compact Revision",
       "gridPos": {
         "h": 4,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 5
       },
@@ -533,8 +533,8 @@
       "title": "WAL GC Segments (1h)",
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 6,
         "y": 5
       },
       "datasource": {
@@ -575,8 +575,8 @@
       "title": "Auth Failures (1h)",
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 12,
         "y": 5
       },
       "datasource": {
@@ -610,6 +610,49 @@
         "textMode": "auto",
         "colorMode": "background"
       }
+    },
+    {
+      "id": 74,
+      "type": "stat",
+      "title": "DB Size (max)",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(t4_db_size_bytes{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "description": "Largest on-disk Pebble database across selected nodes."
     },
     {
       "collapsed": false,
@@ -2184,6 +2227,117 @@
             ]
           }
         ]
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 98
+      },
+      "id": 75,
+      "title": "Storage",
+      "type": "row"
+    },
+    {
+      "id": 76,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 99
+      },
+      "type": "timeseries",
+      "title": "DB Size by Instance",
+      "description": "On-disk size of each node's local Pebble database (sstables, WAL, manifest, in-progress compactions).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "t4_db_size_bytes{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "bytes",
+          "min": 0
+        }
+      }
+    },
+    {
+      "id": 77,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 99
+      },
+      "type": "timeseries",
+      "title": "DB Growth Rate",
+      "description": "Change in on-disk size per hour. Sustained growth with flat key counts usually means compaction is falling behind.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "deriv(t4_db_size_bytes{job=\"$job\", app_kubernetes_io_instance=\"$cluster\", instance=~\"$instance\"}[30m]) * 3600",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "bytes"
+        }
       }
     }
   ]
