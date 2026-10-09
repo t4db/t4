@@ -13,6 +13,7 @@ package etcd_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -564,6 +565,74 @@ func TestCompatLeaseRevokeDeletesKeys(t *testing.T) {
 	}
 	if _, err := cli.TimeToLive(ctx, lease.ID); err == nil {
 		t.Fatal("expected TimeToLive on revoked lease to fail")
+	}
+}
+
+// TestCompatLeaseRevokeDeletesOnlyCurrentlyAttachedKeys checks that a revoke
+// follows keys as they move between leases: a key that left the lease, by
+// moving to another or by a put without one, survives it.
+func TestCompatLeaseRevokeDeletesOnlyCurrentlyAttachedKeys(t *testing.T) {
+	_, cli := newCompatNode(t)
+	ctx := context.Background()
+
+	a, err := cli.Grant(ctx, 30)
+	if err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	b, err := cli.Grant(ctx, 30)
+	if err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	for _, put := range []struct {
+		key   string
+		lease clientv3.LeaseID
+	}{
+		{"/compat/lease/stays-on-a", a.ID},
+		{"/compat/lease/moves-to-b", a.ID},
+		{"/compat/lease/detached", a.ID},
+		{"/compat/lease/plain", 0},
+		{"/compat/lease/moves-to-b", b.ID},
+		{"/compat/lease/detached", 0},
+	} {
+		var opts []clientv3.OpOption
+		if put.lease != 0 {
+			opts = append(opts, clientv3.WithLease(put.lease))
+		}
+		if _, err := cli.Put(ctx, put.key, "v", opts...); err != nil {
+			t.Fatalf("Put %s: %v", put.key, err)
+		}
+	}
+
+	ttl, err := cli.TimeToLive(ctx, a.ID, clientv3.WithAttachedKeys())
+	if err != nil {
+		t.Fatalf("TimeToLive: %v", err)
+	}
+	if len(ttl.Keys) != 1 || string(ttl.Keys[0]) != "/compat/lease/stays-on-a" {
+		t.Fatalf("TimeToLive Keys of a: got %q", ttl.Keys)
+	}
+
+	if _, err := cli.Revoke(ctx, a.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	resp, err := cli.Get(ctx, "/compat/lease/", clientv3.WithPrefix(), clientv3.WithKeysOnly())
+	if err != nil {
+		t.Fatalf("Get after revoke: %v", err)
+	}
+	var got []string
+	for _, kv := range resp.Kvs {
+		got = append(got, string(kv.Key))
+	}
+	want := []string{"/compat/lease/detached", "/compat/lease/moves-to-b", "/compat/lease/plain"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("keys after revoking a: got %q, want %q", got, want)
+	}
+
+	ttl, err = cli.TimeToLive(ctx, b.ID, clientv3.WithAttachedKeys())
+	if err != nil {
+		t.Fatalf("TimeToLive: %v", err)
+	}
+	if len(ttl.Keys) != 1 || string(ttl.Keys[0]) != "/compat/lease/moves-to-b" {
+		t.Fatalf("TimeToLive Keys of b: got %q", ttl.Keys)
 	}
 }
 

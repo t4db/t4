@@ -169,27 +169,24 @@ func userEvent(e t4.Event) (t4.Event, bool) {
 
 func (s *Server) collectLeaseKeys(ctx context.Context, leaseID int64, linearizable bool) ([]string, error) {
 	var (
-		kvs []*t4.KeyValue
-		err error
+		keys []string
+		err  error
 	)
 	if linearizable {
-		kvs, err = s.node.LinearizableList(ctx, "", t4.WithInternalRead())
+		keys, err = s.node.LinearizableLeaseKeys(ctx, leaseID)
 	} else {
-		kvs, err = s.node.List("", t4.WithInternalRead())
+		keys, err = s.node.LeaseKeys(leaseID)
 	}
 	if err != nil {
 		return nil, err
 	}
-	var keys []string
-	for _, kv := range kvs {
-		if kv == nil || isInternalKey(kv.Key) {
-			continue
-		}
-		if kv.Lease == leaseID {
-			keys = append(keys, kv.Key)
+	out := keys[:0]
+	for _, key := range keys {
+		if !isInternalKey(key) {
+			out = append(out, key)
 		}
 	}
-	return keys, nil
+	return out, nil
 }
 
 // revokeLease deletes every key attached to leaseID and the lease record
