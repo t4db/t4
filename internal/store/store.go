@@ -206,7 +206,7 @@ func Open(dir string, log logger, extraOpts ...func(*pebble.Options)) (*Store, e
 				return nil, err
 			}
 			if err := s.ensureLeaseIdx(log); err != nil {
-				db.Close()
+				_ = db.Close()
 				return nil, err
 			}
 			return s, nil
@@ -662,7 +662,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 							return fmt.Errorf("store: cleanup stale idx %q rev=%d: %w", r.key, e.Revision, err)
 						}
 						if err := la.discard(b, r.key, r.lease); err != nil {
-							b.Close()
+							_ = b.Close()
 							return err
 						}
 					}
