@@ -14,10 +14,12 @@ import (
 //	'l' + rev(8B BE)  → serialised entry  (append-only change log)
 //	'i' + key bytes   → index value        (current modRevision per live key; see encodeIdx)
 //	'm' + name bytes  → metadata value     (compact rev, current rev, etc.)
+//	'e' + lease(8B BE) + key bytes → empty (live keys attached to a lease; see lease_index.go)
 const (
-	prefixLog  = byte('l')
-	prefixIdx  = byte('i')
-	prefixMeta = byte('m')
+	prefixLog   = byte('l')
+	prefixIdx   = byte('i')
+	prefixMeta  = byte('m')
+	prefixLease = byte('e')
 )
 
 var (
@@ -25,7 +27,7 @@ var (
 	// metaCurrentRevKey persists the highest revision committed to this store.
 	// Written in every Apply/Recover batch so loadMeta recovers the exact
 	// current revision even when the last WAL entry was an OpCompact (which
-	// does not write a log key).
+	// does not write a log key). See encodeCurrentRev for its value.
 	metaCurrentRevKey = []byte{prefixMeta, 'r', 'e', 'v'}
 	// metaLastSeqKey persists the highest WAL/peer-stream sequence applied.
 	// Used by replayRemote to validate the WAL stream is contiguous starting
@@ -130,6 +132,22 @@ func decodeRev(b []byte) int64 {
 	return int64(binary.BigEndian.Uint64(b))
 }
 
+// leaseIdxMaintained follows the revision in metaCurrentRevKey's value when
+// the batch that wrote it kept the lease index up to date. Binaries that
+// predate the lease index read only the revision and write it back without
+// the flag, so a store they applied writes to is detected on Open and its
+// lease index rebuilt (see ensureLeaseIdx). Riding on a key every batch
+// writes anyway keeps the flag free on the write path.
+const leaseIdxMaintained = byte(1)
+
+// encodeCurrentRev encodes metaCurrentRevKey's value: rev(8) + leaseIdxMaintained.
+func encodeCurrentRev(rev int64) []byte {
+	b := make([]byte, 9)
+	binary.BigEndian.PutUint64(b, uint64(rev))
+	b[8] = leaseIdxMaintained
+	return b
+}
+
 // Index values. The first 8 bytes are always the key's modRevision, which is
 // all a legacy (v1) value holds and all older binaries read, so v2 values
 // stay readable after a rollback and the two formats can be mixed freely.
@@ -175,6 +193,21 @@ func decodeIdx(b []byte) idxEntry {
 		e.v2 = true
 	}
 	return e
+}
+
+// leaseIdxKey is the lease index entry recording that key is attached to
+// lease.
+func leaseIdxKey(lease int64, key string) []byte {
+	k := make([]byte, 9+len(key))
+	k[0] = prefixLease
+	binary.BigEndian.PutUint64(k[1:9], uint64(lease))
+	copy(k[9:], key)
+	return k
+}
+
+// leaseIdxBounds returns the iteration bounds of lease's index entries.
+func leaseIdxBounds(lease int64) (lower, upper []byte) {
+	return leaseIdxKey(lease, ""), leaseIdxKey(lease+1, "")
 }
 
 func revisionSampleKey(unixNano int64) []byte {

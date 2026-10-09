@@ -205,6 +205,10 @@ func Open(dir string, log logger, extraOpts ...func(*pebble.Options)) (*Store, e
 				db.Close()
 				return nil, err
 			}
+			if err := s.ensureLeaseIdx(log); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
 			return s, nil
 		}
 		if !isPebbleLockError(err) || time.Now().After(deadline) {
@@ -457,6 +461,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 	var histChanges []histRev
 	var curRev int64
 	var curChanges []histChange
+	var la leaseApply
 	for i := range entries {
 		e := &entries[i]
 		if seq := e.Sequence(); seq > tip.Seq {
@@ -464,7 +469,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 		}
 		if e.Op == wal.OpCompact {
 			// PrevRevision carries the compact target (see node.go Compact).
-			if err := s.applyCompact(b, e.PrevRevision); err != nil {
+			if err := s.applyCompact(b, &la, e.PrevRevision); err != nil {
 				_ = b.Close()
 				return err
 			}
@@ -473,7 +478,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			}
 			continue
 		}
-		if err := s.applyEntry(b, e); err != nil {
+		if err := s.applyEntry(b, &la, e); err != nil {
 			_ = b.Close()
 			return err
 		}
@@ -548,7 +553,7 @@ func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, tip Position,
 		return err
 	}
 	if maxRev > 0 {
-		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
+		if err := b.Set(metaCurrentRevKey, encodeCurrentRev(maxRev), pebble.NoSync); err != nil {
 			_ = b.Close()
 			return fmt.Errorf("store: set current rev: %w", err)
 		}
@@ -611,6 +616,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 	b := s.db.NewBatch()
 	var maxRev, maxSeq int64
 	var tip Position
+	var la leaseApply
 	for i := range entries {
 		e := &entries[i]
 		if seq := e.Sequence(); seq > maxSeq {
@@ -618,7 +624,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 			tip = Position{Term: e.Term, Seq: seq}
 		}
 		if e.Op == wal.OpCompact {
-			if err := s.applyCompact(b, e.PrevRevision); err != nil {
+			if err := s.applyCompact(b, &la, e.PrevRevision); err != nil {
 				_ = b.Close()
 				return err
 			}
@@ -640,6 +646,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 					for iter.First(); iter.Valid(); iter.Next() {
 						if stale, serr := unmarshalRecord(iter.Value()); serr == nil && !stale.delete {
 							_ = b.Delete(idxKey(stale.key), pebble.NoSync)
+							_ = la.discard(b, stale.key, stale.lease)
 						}
 						_ = b.Delete(iter.Key(), pebble.NoSync)
 					}
@@ -654,10 +661,14 @@ func (s *Store) Recover(entries []wal.Entry) error {
 							b.Close()
 							return fmt.Errorf("store: cleanup stale idx %q rev=%d: %w", r.key, e.Revision, err)
 						}
+						if err := la.discard(b, r.key, r.lease); err != nil {
+							_ = b.Close()
+							return err
+						}
 					}
 				}
 			}
-			if err := s.applyEntry(b, e); err != nil {
+			if err := s.applyEntry(b, &la, e); err != nil {
 				b.Close()
 				return err
 			}
@@ -669,9 +680,9 @@ func (s *Store) Recover(entries []wal.Entry) error {
 	return s.commitBatch(b, maxRev, maxSeq, tip, false, true, nil)
 }
 
-func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
+func (s *Store) applyEntry(b *pebble.Batch, la *leaseApply, e *wal.Entry) error {
 	if e.Op == wal.OpTxn {
-		return s.applyTxnEntry(b, e)
+		return s.applyTxnEntry(b, la, e)
 	}
 	lk := logKey(e.Revision)
 
@@ -687,6 +698,9 @@ func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
 	}
 	if err := b.Set(lk, marshalRecord(r), pebble.NoSync); err != nil {
 		return fmt.Errorf("store: set log key rev=%d: %w", e.Revision, err)
+	}
+	if err := la.attach(b, e.Key, liveLease(r)); err != nil {
+		return err
 	}
 	ik := idxKey(e.Key)
 	if e.Op == wal.OpDelete {
@@ -704,7 +718,7 @@ func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
 // applyTxnEntry decodes and atomically applies all sub-operations from an
 // OpTxn WAL entry. Each sub-op is stored at logKeyWithSub(rev, i) so that
 // the log scan in Watch returns one event per key at the transaction revision.
-func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) error {
+func (s *Store) applyTxnEntry(b *pebble.Batch, la *leaseApply, e *wal.Entry) error {
 	ops, err := wal.DecodeTxnOps(e.Value)
 	if err != nil {
 		return fmt.Errorf("store: decode txn ops rev=%d: %w", e.Revision, err)
@@ -724,6 +738,9 @@ func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) error {
 		if err := b.Set(lk, marshalRecord(r), pebble.NoSync); err != nil {
 			return fmt.Errorf("store: set txn log key rev=%d sub=%d: %w", e.Revision, i, err)
 		}
+		if err := la.attach(b, op.Key, liveLease(r)); err != nil {
+			return err
+		}
 		ik := idxKey(op.Key)
 		if op.Op == wal.OpDelete {
 			if err := b.Delete(ik, pebble.NoSync); err != nil {
@@ -738,7 +755,7 @@ func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) error {
 	return nil
 }
 
-func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
+func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) error {
 	if err := b.Set(metaCompactKey, encodeRev(compactRev), pebble.NoSync); err != nil {
 		return err
 	}
@@ -760,6 +777,7 @@ func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
 	defer func() { _ = iter.Close() }()
 
 	seen := make(map[string]struct{})
+	leaseCur := make(map[string]int64)
 	for iter.Last(); iter.Valid(); iter.Prev() {
 		entryRev := decodeLogKey(iter.Key())
 		r, err := unmarshalRecord(iter.Value())
@@ -772,6 +790,9 @@ func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
 		}
 		if err := b.Delete(iter.Key(), pebble.NoSync); err != nil {
 			return fmt.Errorf("store: compact delete rev=%d: %w", entryRev, err)
+		}
+		if err := s.dropStaleLeaseIdx(b, la, leaseCur, r.key, r.lease); err != nil {
+			return err
 		}
 	}
 	if err := iter.Error(); err != nil {

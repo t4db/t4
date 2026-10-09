@@ -1222,6 +1222,18 @@ func (n *Node) LinearizableCount(ctx context.Context, prefix string, opts ...Rea
 	return n.Count(prefix, opts...)
 }
 
+// LinearizableLeaseKeys returns the live keys attached to lease, in key order,
+// with linearizability guaranteed.
+func (n *Node) LinearizableLeaseKeys(ctx context.Context, lease int64) ([]string, error) {
+	ctx, span := n.startSpan(ctx, "t4.lease_keys", "")
+	defer span.End()
+	if err := n.syncWithLeader(ctx); err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return n.LeaseKeys(lease)
+}
+
 // observeRead records one local read operation, mirroring the write-side
 // instrumentation in await: errors increment only the error counter; a
 // successful read increments the op counter and observes latency.
@@ -1309,6 +1321,20 @@ func (n *Node) List(prefix string, opts ...ReadOption) (list []*KeyValue, err er
 		out[i] = toKV(sv)
 	}
 	return out, nil
+}
+
+// LeaseKeys returns the live keys attached to lease, in key order. It reads a
+// per-lease index, so its cost grows with the lease's keys, not the store's.
+func (n *Node) LeaseKeys(lease int64) ([]string, error) {
+	if n.closed.Load() {
+		return nil, ErrClosed
+	}
+	n.readMu.RLock()
+	defer n.readMu.RUnlock()
+	if n.closed.Load() {
+		return nil, ErrClosed
+	}
+	return n.db.Load().LeaseKeys(lease)
 }
 
 func (n *Node) Count(prefix string, opts ...ReadOption) (count int64, err error) {
