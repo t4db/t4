@@ -242,6 +242,9 @@ func (w *WAL) ReplayLocal(db RecoveryStore, afterSeq int64) error {
 		}
 		entries, readErr := sr.ReadAll()
 		closer()
+		if errors.Is(readErr, ErrUnknownOp) {
+			return fmt.Errorf("wal: replay local segment %q: %w", path, readErr)
+		}
 		if readErr != nil {
 			w.log.Warnf("wal: partial local segment %q: %v", path, readErr)
 		}
@@ -403,8 +406,7 @@ func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 	if err := w.ensureActiveLocked(entries[0].Sequence()); err != nil {
 		return err
 	}
-	rollbackSize := w.active.Size()
-	rollbackEntryCount := w.active.EntryCount()
+	before := w.active.mark()
 	for _, e := range entries {
 		if err := w.active.AppendNoSync(e); err != nil {
 			return err
@@ -414,7 +416,7 @@ func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 		return err
 	}
 	if w.syncUpload && w.uploader != nil {
-		if err := w.rotateSyncLocked(rollbackSize, rollbackEntryCount); err != nil {
+		if err := w.rotateSyncLocked(before); err != nil {
 			return err
 		}
 	} else if w.active.Size() >= w.segMaxSize {
@@ -433,13 +435,13 @@ func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 // upload mid-way.
 //
 // Must be called with w.mu held; returns with w.mu held.
-func (w *WAL) rotateSyncLocked(rollbackSize int64, rollbackEntryCount int) error {
+func (w *WAL) rotateSyncLocked(before segMark) error {
 	seg := w.active
 	if seg == nil || seg.EntryCount() == 0 {
 		return nil
 	}
 	if err := w.uploadPendingLocked(); err != nil {
-		if rollbackErr := seg.rollback(rollbackSize, rollbackEntryCount); rollbackErr != nil {
+		if rollbackErr := seg.rollback(before); rollbackErr != nil {
 			return fmt.Errorf("wal: upload of earlier segments failed and rollback failed: upload: %w; rollback: %v", err, rollbackErr)
 		}
 		w.discardEmptyActiveLocked()
@@ -451,7 +453,7 @@ func (w *WAL) rotateSyncLocked(rollbackSize int64, rollbackEntryCount int) error
 	uploadErr := w.uploader(w.uploadCtx, localPath, objKey)
 	if uploadErr != nil {
 		w.log.Errorf("wal: sync upload %q → %q: %v", localPath, objKey, uploadErr)
-		if rollbackErr := seg.rollback(rollbackSize, rollbackEntryCount); rollbackErr != nil {
+		if rollbackErr := seg.rollback(before); rollbackErr != nil {
 			return fmt.Errorf("wal: sync upload failed and rollback failed: upload: %w; rollback: %v", uploadErr, rollbackErr)
 		}
 		w.discardEmptyActiveLocked()

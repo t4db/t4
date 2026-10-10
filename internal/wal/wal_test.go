@@ -246,3 +246,43 @@ func TestWALSyncUploadFailureDoesNotReplayFailedBatch(t *testing.T) {
 		t.Fatalf("ReplayLocal recovered %d entries from failed sync upload, want 0", got)
 	}
 }
+
+// A batch rolled back after a failed sync upload also takes back the header
+// format it raised: the segment keeps only data entries, which earlier
+// releases can read.
+func TestWALSyncUploadRollbackRestoresFormat(t *testing.T) {
+	dir := t.TempDir()
+	uploadErr := errors.New("injected sync upload failure")
+	uploader := func(_ context.Context, _, _ string) error { return uploadErr }
+
+	w, err := Open(dir, 1, 1, WithUploader(uploader))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Start(ctx)
+	defer func() { _ = w.Close() }()
+
+	if err := w.AppendBatch(ctx, makeEntries(1, 1, 1)); err != nil {
+		t.Fatalf("AppendBatch data: %v", err)
+	}
+	w.SetSyncUpload(true)
+	meta := &Entry{ID: 2, Revision: 1, Term: 1, Op: OpMetaPut, Key: "m", Value: []byte("v")}
+	if err := w.AppendBatch(ctx, []*Entry{meta}); !errors.Is(err, uploadErr) {
+		t.Fatalf("AppendBatch meta: want upload error, got %v", err)
+	}
+
+	hdr := make([]byte, segHeaderLen)
+	f, err := os.Open(filepath.Join(dir, SegmentName(1, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.ReadAt(hdr, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(hdr[:4]), segMagic(formatBase); got != want {
+		t.Fatalf("segment header after rollback = %q, want %q", got, want)
+	}
+}

@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/t4db/t4"
 	"github.com/t4db/t4/etcd/auth"
+	"github.com/t4db/t4/internal/sysstate"
+	"github.com/t4db/t4/internal/testhook"
 )
 
 const tokensPrefix = "\x00auth/tokens/"
@@ -19,20 +22,41 @@ func hashedTokenKey(token string) string {
 	return tokensPrefix + "sha256/" + hex.EncodeToString(sum[:])
 }
 
+// inEachMode runs f against a database keeping auth state in data keys, as
+// databases created before the meta keyspace do, and against one keeping it
+// in the meta keyspace.
+func inEachMode(t *testing.T, f func(t *testing.T, node *t4.Node)) {
+	for _, legacy := range []bool{true, false} {
+		name := "meta"
+		if legacy {
+			name = "legacy"
+		}
+		t.Run(name, func(t *testing.T) {
+			testhook.LegacyNewDatabases.Store(legacy)
+			node := newNode(t)
+			testhook.LegacyNewDatabases.Store(false)
+			f(t, node)
+		})
+	}
+}
+
 // TestTokenStore_PersistsOnlyHashes pins that a token itself is never written
 // to storage, which also reaches the WAL, checkpoints and object store: only
 // its hash, under a key naming the hash algorithm.
 func TestTokenStore_PersistsOnlyHashes(t *testing.T) {
+	inEachMode(t, testTokenStorePersistsOnlyHashes)
+}
+
+func testTokenStorePersistsOnlyHashes(t *testing.T, node *t4.Node) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	node := newNode(t)
 	ts := auth.NewTokenStore(ctx, 5*time.Minute, node)
 
 	tok, err := ts.Generate("alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	kvs, err := node.List(tokensPrefix)
+	kvs, err := sysstate.List(node, tokensPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,16 +75,19 @@ func TestTokenStore_PersistsOnlyHashes(t *testing.T) {
 // each token itself as the key. Such a token must stay valid after the
 // upgrade, and its key is rewritten to the hashed form.
 func TestTokenStore_UpgradesUnhashedTokens(t *testing.T) {
+	inEachMode(t, testTokenStoreUpgradesUnhashedTokens)
+}
+
+func testTokenStoreUpgradesUnhashedTokens(t *testing.T, node *t4.Node) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	node := newNode(t)
 
 	const tok = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	value, err := json.Marshal(map[string]any{"username": "alice", "expiry": time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := node.Put(ctx, tokensPrefix+tok, value, 0); err != nil {
+	if err := sysstate.Put(ctx, node, tokensPrefix+tok, value); err != nil {
 		t.Fatal(err)
 	}
 
@@ -70,7 +97,7 @@ func TestTokenStore_UpgradesUnhashedTokens(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		kvs, err := node.List(tokensPrefix)
+		kvs, err := sysstate.List(node, tokensPrefix)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,23 +123,26 @@ func TestTokenStore_UpgradesUnhashedTokens(t *testing.T) {
 // TestTokenStore_SkipsUnknownHashAlgorithm: a key hashed with an algorithm
 // this release does not know (written by a newer one) is left alone.
 func TestTokenStore_SkipsUnknownHashAlgorithm(t *testing.T) {
+	inEachMode(t, testTokenStoreSkipsUnknownHashAlgorithm)
+}
+
+func testTokenStoreSkipsUnknownHashAlgorithm(t *testing.T, node *t4.Node) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	node := newNode(t)
 
 	value, err := json.Marshal(map[string]any{"username": "alice", "expiry": time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	const key = tokensPrefix + "sha3-256/abcdef"
-	if _, err := node.Put(ctx, key, value, 0); err != nil {
+	if err := sysstate.Put(ctx, node, key, value); err != nil {
 		t.Fatal(err)
 	}
 	ts := auth.NewTokenStore(ctx, 5*time.Minute, node)
 	if _, ok := ts.Lookup("sha3-256/abcdef"); ok {
 		t.Error("a key hashed with an unknown algorithm was taken as a token")
 	}
-	if kv, err := node.Get(key); err != nil || kv == nil {
+	if _, found, err := sysstate.Get(node, key); err != nil || !found {
 		t.Errorf("key hashed with an unknown algorithm was removed (err=%v)", err)
 	}
 }

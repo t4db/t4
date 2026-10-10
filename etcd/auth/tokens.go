@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/t4db/t4/internal/sysstate"
 )
 
 // TokenStore manages short-lived bearer tokens backed by Pebble for persistence
@@ -71,7 +73,7 @@ func NewTokenStore(ctx context.Context, ttl time.Duration, n node) *TokenStore {
 // such keys are hashed and rewritten in the background, so their tokens stay
 // valid across the upgrade.
 func (ts *TokenStore) load() {
-	kvs, err := ts.n.List(tokensPrefix)
+	kvs, err := sysstate.List(ts.n, tokensPrefix)
 	if err != nil {
 		logrus.WithError(err).Warn("auth: failed to load persisted tokens")
 		return
@@ -95,7 +97,7 @@ func (ts *TokenStore) load() {
 		}
 		if now.After(st.Expiry) {
 			// Clean up expired token from Pebble in the background.
-			go ts.n.Delete(context.Background(), kv.Key) //nolint:errcheck
+			go sysstate.Delete(context.Background(), ts.n, kv.Key) //nolint:errcheck
 			continue
 		}
 		ts.tokens[hash] = tokenEntry{username: st.Username, expiry: st.Expiry}
@@ -108,11 +110,11 @@ func (ts *TokenStore) load() {
 // rehash moves a token stored by an earlier release under its hashed key.
 func (ts *TokenStore) rehash(legacyKey, hash string, value []byte) {
 	ctx := context.Background()
-	if _, err := ts.n.Put(ctx, tokenKey(hash), value, 0); err != nil {
+	if err := sysstate.Put(ctx, ts.n, tokenKey(hash), value); err != nil {
 		logrus.WithError(err).Warn("auth: failed to rehash persisted token")
 		return
 	}
-	if _, err := ts.n.Delete(ctx, legacyKey); err != nil {
+	if err := sysstate.Delete(ctx, ts.n, legacyKey); err != nil {
 		logrus.WithError(err).Warn("auth: failed to delete unhashed persisted token")
 	}
 }
@@ -135,7 +137,7 @@ func (ts *TokenStore) Generate(username string) (string, error) {
 	if ts.n != nil {
 		data, err := json.Marshal(storedToken{Username: entry.username, Expiry: entry.expiry})
 		if err == nil {
-			if _, err := ts.n.Put(context.Background(), tokenKey(hash), data, 0); err != nil {
+			if err := sysstate.Put(context.Background(), ts.n, tokenKey(hash), data); err != nil {
 				logrus.WithError(err).Warn("auth: failed to persist token")
 			}
 		}
@@ -165,7 +167,7 @@ func (ts *TokenStore) Revoke(token string) {
 	ts.mu.Unlock()
 
 	if ts.n != nil {
-		if _, err := ts.n.Delete(context.Background(), tokenKey(hash)); err != nil {
+		if err := sysstate.Delete(context.Background(), ts.n, tokenKey(hash)); err != nil {
 			logrus.WithError(err).Warn("auth: failed to delete revoked token from store")
 		}
 	}
@@ -200,7 +202,7 @@ func (ts *TokenStore) evict() {
 		return
 	}
 	for _, hash := range expired {
-		if _, err := ts.n.Delete(context.Background(), tokenKey(hash)); err != nil {
+		if err := sysstate.Delete(context.Background(), ts.n, tokenKey(hash)); err != nil {
 			logrus.WithError(err).Warn("auth: failed to delete expired token from store")
 		}
 	}

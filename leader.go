@@ -12,9 +12,11 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
+	"github.com/t4db/t4/internal/testhook"
 	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
 )
@@ -24,8 +26,10 @@ import (
 // and launches the watchLoop. Must NOT be called with n.mu held.
 //
 // lockWriteStart is when the lock write that won leadership started; the
-// first lease runs from then.
-func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord, lockWriteStart time.Time) error {
+// first lease runs from then. opening is true when called from Open, which
+// may then create the database with the meta keyspace (see
+// initMetaAtGenesis); a promotion never does.
+func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord, lockWriteStart time.Time, opening bool) error {
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	if err := n.recoverLocalWALBeforeLeadership(walDir); err != nil {
 		return err
@@ -82,6 +86,15 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 
 	peerSrv := peer.NewServer(n.cfg.PeerBufferSize, n.log)
 	peerSrv.SetTerm(rec.Term)
+	// A database with the meta keyspace, or one Open is about to create with
+	// it (see initMetaAtGenesis), has WAL entries that followers below format
+	// 3 would misapply: refuse them before serving.
+	if metaOn, err := n.db.Load().MetaHas(metaFormatKey); err != nil {
+		_ = w2.Close()
+		return fmt.Errorf("t4: read meta format: %w", err)
+	} else if metaOn || (opening && n.db.Load().LastSequence() == 0 && !testhook.LegacyNewDatabases.Load()) {
+		peerSrv.SetMinFollowerWALFormat(wal.WALFormatVersion)
+	}
 	lis, err := net.Listen("tcp", n.cfg.PeerListenAddr)
 	if err != nil {
 		_ = w2.Close()
@@ -114,6 +127,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.nextSeq = nextSeq
 	n.pending = make(map[string]pendingKV)
+	n.pendingMeta = make(map[string]pendingMeta)
 	n.mu.Unlock()
 
 	// Install the forward handler after role is set to leader so that
@@ -313,6 +327,11 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 // when a follower forwards a write. Dispatches to the appropriate Node method.
 // Since HandleForward runs on the leader, all write methods execute directly.
 func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*peer.ForwardResponse, error) {
+	if testhook.V1Leader.Load() {
+		if err := v1ForwardSupported(req); err != nil {
+			return nil, err
+		}
+	}
 	switch req.Op {
 	case peer.ForwardPut:
 		rev, err := n.Put(ctx, req.Key, req.Value, req.Lease)
@@ -360,6 +379,30 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		n.mu.Unlock()
 		return &peer.ForwardResponse{Revision: rev, Succeeded: true}, nil
 
+	case peer.ForwardMetaPut:
+		err := n.MetaPut(ctx, req.Key, req.Value)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardMetaDelete:
+		err := n.MetaDelete(ctx, req.Key)
+		code, msg := encodeErr(err)
+		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardGetSequence:
+		// The ReadIndex of a follower's meta read: like ForwardGetRevision
+		// it needs the lease.
+		if err := n.checkLease(); err != nil {
+			return nil, err
+		}
+		// Every acknowledged write has been applied before its caller is
+		// released, so the applied sequence covers all of them; writes still
+		// pending (pendingMeta) are not acknowledged yet and need not be
+		// seen. A bare sequence suffices: followers apply only committed
+		// entries, which every later leader holds, so a follower's applied
+		// sequence never covers entries the leader lacks.
+		return &peer.ForwardResponse{Revision: n.db.Load().LastSequence(), Succeeded: true}, nil
+
 	case peer.ForwardTxn:
 		if req.TxnReq == nil {
 			return nil, fmt.Errorf("t4: ForwardTxn missing TxnReq")
@@ -381,6 +424,32 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		}, nil
 	}
 	return nil, fmt.Errorf("t4: unknown forward op %d", req.Op)
+}
+
+// v1ForwardSupported reports whether a v1.1 leader understands req: it had no
+// meta forward ops, txn conditions up to TxnCondLease, and txn ops up to
+// TxnDelete. It ignored anything newer instead of rejecting it.
+func v1ForwardSupported(req *peer.ForwardRequest) error {
+	if req.Op > peer.ForwardTxn {
+		// A v1.1 leader's HandleForward rejects unknown ops with exactly this.
+		return fmt.Errorf("t4: unknown forward op %d", req.Op)
+	}
+	if req.TxnReq == nil {
+		return nil
+	}
+	for _, c := range req.TxnReq.Conditions {
+		if TxnCondTarget(c.Target) > TxnCondLease {
+			return fmt.Errorf("t4: txn condition target %d is unknown to a v1.1 leader", c.Target)
+		}
+	}
+	for _, ops := range [][]peer.TxnOpMsg{req.TxnReq.Success, req.TxnReq.Failure} {
+		for _, op := range ops {
+			if TxnOpType(op.Type) > TxnDelete {
+				return fmt.Errorf("t4: txn op type %d is unknown to a v1.1 leader", op.Type)
+			}
+		}
+	}
+	return nil
 }
 
 // commitLoop is the group-commit pipeline for leader/single-node writes.
@@ -810,6 +879,13 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 		n.log.Errorf("t4: checkpoint flush pebble: %v", err)
 		return 0, false
 	}
+	// Decided under the fence, so it matches the pinned copy below.
+	cpFormat, err := n.checkpointFormat()
+	if err != nil {
+		n.fenceMu.Unlock()
+		n.log.Errorf("t4: checkpoint format: %v", err)
+		return 0, false
+	}
 	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
 	if err != nil {
 		n.fenceMu.Unlock()
@@ -831,11 +907,11 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := n.cp.WriteDirWithRegistry(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := n.cp.WriteDirWithRegistry(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry(), cpFormat); err != nil {
 			n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 			return 0, false
 		}
-	} else if err := n.cp.WriteDir(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
+	} else if err := n.cp.WriteDir(ctx, cpDir, n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore, cpFormat); err != nil {
 		n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 		return 0, false
 	}
@@ -867,6 +943,20 @@ func (n *Node) gcContext(ctx context.Context) (context.Context, context.CancelFu
 	}
 	gcCtx, cancel := context.WithDeadline(ctx, limit)
 	return gcCtx, cancel, true
+}
+
+// checkpointFormat returns the checkpoint format needed to represent the
+// current store: the meta keyspace requires FormatVersionMeta so that binaries
+// predating it refuse the checkpoint rather than restore without that state.
+func (n *Node) checkpointFormat() (uint32, error) {
+	hasMeta, err := n.db.Load().HasMeta()
+	if err != nil {
+		return 0, err
+	}
+	if hasMeta {
+		return checkpoint.FormatVersionMeta, nil
+	}
+	return checkpoint.FormatVersionBase, nil
 }
 
 func (n *Node) maybeCheckpoint(ctx context.Context) {

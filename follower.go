@@ -2,6 +2,7 @@ package t4
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,6 +107,12 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				n.log.Infof("t4: follower resync complete (now at rev=%d)", n.db.Load().CurrentRevision())
 			}
 			continue
+		}
+
+		if errors.Is(err, wal.ErrUnknownOp) {
+			n.log.Errorf("t4: leader sent a WAL entry this binary cannot apply — upgrade this node; stopping: %v", err)
+			n.cancelBg()
+			return
 		}
 
 		if peer.IsLeaderUnreachable(err) || peer.IsLeaderShutdown(err) {
@@ -275,7 +282,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	}
 
 	if won {
-		if err := n.becomeLeader(bgCtx, lock, rec, takeoverStart); err != nil {
+		if err := n.becomeLeader(bgCtx, lock, rec, takeoverStart, false); err != nil {
 			n.log.Errorf("t4: promotion failed: %v", err)
 			return nil, false
 		}
@@ -352,6 +359,12 @@ func fwdOpLabel(op peer.ForwardOp) string {
 		return "get_revision"
 	case peer.ForwardTxn:
 		return "txn"
+	case peer.ForwardMetaPut:
+		return "meta_put"
+	case peer.ForwardMetaDelete:
+		return "meta_delete"
+	case peer.ForwardGetSequence:
+		return "get_sequence"
 	default:
 		return "unknown"
 	}
