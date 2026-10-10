@@ -1,0 +1,9 @@
+{
+  "baseline": "v1.1.11",
+  "checkpoint_revision": 11,
+  "lease_in_wal": 8204107410892931588,
+  "lease_no_keys": 7853287472820679588,
+  "lease_with_keys": 9133349396851237574,
+  "revision": 15,
+  "token": "2563110864feb01dbaab08df1ed420f9de5cb0860e42e345cf49a34ead7d0625"
+}
