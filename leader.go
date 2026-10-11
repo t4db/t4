@@ -150,7 +150,7 @@ func (n *Node) recoverLocalWALBeforeLeadership(walDir string) error {
 	if err := n.wal.Close(); err != nil {
 		return fmt.Errorf("t4: close follower WAL before leadership: %w", err)
 	}
-	if err := n.wal.ReplayLocal(n.db.Load(), n.db.Load().LastSequence()); err != nil {
+	if err := n.wal.ReplayLocal(contiguousRecovery{n.db.Load()}, n.db.Load().LastSequence()); err != nil {
 		return fmt.Errorf("t4: replay committed local WAL before leadership: %w", err)
 	}
 	maxSeq, err := wal.MaxSequence(walDir)
