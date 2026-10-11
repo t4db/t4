@@ -191,10 +191,9 @@ func TestDrainWatchHoldsIncompleteRevision(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("drainWatch did not exit after events channel closed")
 	}
-	select {
-	case run := <-sendCh:
-		t.Fatalf("sent an incomplete revision on close: %+v", run[0])
-	default:
+	// The only thing sent is the watch's cancellation, without events.
+	if resp := recvOne(t, sendCh); !resp.Canceled || len(resp.Events) != 0 {
+		t.Fatalf("sent an incomplete revision on close: %+v", resp)
 	}
 }
 
@@ -210,4 +209,52 @@ func recvOne(t *testing.T, sendCh <-chan []*etcdserverpb.WatchResponse) *etcdser
 		t.Fatal("timeout waiting for a WatchResponse")
 		return nil
 	}
+}
+
+// TestDrainWatchCancelsWhenEventsEnd pins that a watch whose events end while
+// it is live, as when a follower replaces its store, is canceled to the client
+// rather than left open with nothing more to deliver, and that a watch the
+// client canceled itself gets nothing more.
+func TestDrainWatchCancelsWhenEventsEnd(t *testing.T) {
+	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("t4.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = node.Close() })
+	srv := New(node, nil, nil)
+
+	t.Run("ended", func(t *testing.T) {
+		events := make(chan t4.Event)
+		sendCh := make(chan []*etcdserverpb.WatchResponse, 4)
+		wctx, wcancel := context.WithCancel(context.Background())
+		defer wcancel()
+		done := make(chan struct{})
+		go func() {
+			srv.drainWatch(wctx, 3, testSubscription(wcancel, events), sendCh)
+			close(done)
+		}()
+		close(events)
+		<-done
+		resp := recvOne(t, sendCh)
+		if resp.WatchId != 3 || !resp.Canceled || resp.CancelReason == "" {
+			t.Fatalf("got %+v, want watch 3 canceled with a reason", resp)
+		}
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		events := make(chan t4.Event)
+		sendCh := make(chan []*etcdserverpb.WatchResponse, 4)
+		wctx, wcancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			srv.drainWatch(wctx, 4, testSubscription(wcancel, events), sendCh)
+			close(done)
+		}()
+		wcancel()
+		close(events)
+		<-done
+		if len(sendCh) != 0 {
+			t.Fatalf("a watch the client canceled got %+v", <-sendCh)
+		}
+	})
 }

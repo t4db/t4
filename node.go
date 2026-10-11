@@ -1444,6 +1444,10 @@ func WithProgressNotify() WatchOption {
 // Watch streams prefix-matching events using etcd revision semantics:
 // startRev=0 means "from now"; startRev=N means replay from revision N (inclusive).
 //
+// The channel is closed when ctx is cancelled or the node shuts down, and also
+// when a follower replaces its local store from a checkpoint to catch up. A
+// consumer can then watch again from the revision after the last one received.
+//
 // Compaction boundary: etcd guarantees that any revision >= the compact
 // revision is watchable, so only startRev strictly below CompactRevision is
 // rejected with ErrCompacted. Events at the compact revision itself survive

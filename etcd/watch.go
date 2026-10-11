@@ -365,6 +365,26 @@ func (s *Server) sendOrCancelSlow(wctx context.Context, sendCh chan<- []*etcdser
 	}
 }
 
+// cancelEnded tells the client a watch whose events ended without being
+// canceled will get no more, as when the node replaced its store resyncing
+// from a checkpoint. Like any canceled watch, the client can watch again from
+// the revision after the last one it received. Without it the watch would
+// stay open with nothing more to deliver.
+func (s *Server) cancelEnded(wctx context.Context, sendCh chan<- []*etcdserverpb.WatchResponse, watchID int64) {
+	if wctx.Err() != nil {
+		return
+	}
+	select {
+	case sendCh <- []*etcdserverpb.WatchResponse{{
+		Header:       s.header(),
+		WatchId:      watchID,
+		Canceled:     true,
+		CancelReason: "t4: watch ended on this node; watch again from the last revision received",
+	}}:
+	case <-wctx.Done():
+	}
+}
+
 // drainWatch reads events, coalesces them into a single WatchResponse per
 // burst, and forwards through sendCh until wctx is done or events closes.
 //
@@ -468,7 +488,9 @@ func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubsc
 			if !ok {
 				// Events of an unsealed revision are dropped rather than sent
 				// as part of a revision; the client resumes before them.
-				flush()
+				if flush() {
+					s.cancelEnded(wctx, sendCh, watchID)
+				}
 				return
 			}
 			appendEvent(e)
@@ -479,7 +501,9 @@ func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubsc
 				select {
 				case e2, ok2 := <-events:
 					if !ok2 {
-						flush()
+						if flush() {
+							s.cancelEnded(wctx, sendCh, watchID)
+						}
 						return
 					}
 					appendEvent(e2)
