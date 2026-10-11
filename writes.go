@@ -504,7 +504,11 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		// Use the committed revision, not nextRev which may be ahead of what
 		// the commit loop has fsynced if concurrent writes are in flight.
 		curRev := n.db.Load().CurrentRevision()
-		if observedRev <= curRev {
+		// Followers may already serve revisions this leader has not applied
+		// (see sharedRev). Answering below them would order the txn before a
+		// read a client may already have, so only wait in that case.
+		current := curRev >= n.sharedRev.Load()
+		if current && observedRev <= curRev {
 			n.mu.Unlock()
 			observeTxnPreparation(lockWait, prepareDuration, kind)
 			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
@@ -514,12 +518,15 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		// fail. No client has seen that write, so if the committed state alone
 		// also leads to a branch that writes nothing, the txn is ordered before
 		// it and answered now.
-		committedNoop, committedSucceeded, err := n.evalCommittedNoop(req, curRev)
-		if err != nil {
-			n.mu.Unlock()
-			observeTxnPreparation(lockWait, prepareDuration, kind)
-			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
-			return TxnResponse{}, err
+		var committedNoop, committedSucceeded bool
+		if current {
+			committedNoop, committedSucceeded, err = n.evalCommittedNoop(req, curRev)
+			if err != nil {
+				n.mu.Unlock()
+				observeTxnPreparation(lockWait, prepareDuration, kind)
+				metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
+				return TxnResponse{}, err
+			}
 		}
 		if committedNoop {
 			n.mu.Unlock()
