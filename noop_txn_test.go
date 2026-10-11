@@ -196,3 +196,34 @@ func TestNoopTxnRevisionUnderWrites(t *testing.T) {
 		}
 	}
 }
+
+// TestEvalCommittedNoopAtRevisionZero checks the committed-state evaluation
+// of a txn at revision 0, before any write committed: no key existed there,
+// even once an in-flight write to the key has reached the store.
+func TestEvalCommittedNoopAtRevisionZero(t *testing.T) {
+	n, err := Open(Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+	if _, err := n.Put(context.Background(), "/k", []byte("v"), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// /k absent: create it, else write nothing.
+	req := TxnRequest{
+		Conditions: []TxnCondition{{Key: "/k", Target: TxnCondMod, Result: TxnCondEqual, ModRevision: 0}},
+		Success:    []TxnOp{{Type: TxnPut, Key: "/k", Value: []byte("w")}},
+	}
+	n.mu.Lock()
+	n.pending["/k"] = pendingKV{rev: 2, deleted: true}
+	noop, succeeded, err := n.evalCommittedNoop(req, 0)
+	delete(n.pending, "/k")
+	n.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noop || !succeeded {
+		t.Fatalf("evalCommittedNoop at revision 0 = noop %v, succeeded %v; want the create branch, as /k was absent", noop, succeeded)
+	}
+}

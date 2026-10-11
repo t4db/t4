@@ -1073,6 +1073,11 @@ func (n *Node) evalCommittedNoop(req TxnRequest, rev int64) (noop, succeeded boo
 			return nil, err
 		}
 		if _, inFlight := n.pending[key]; inFlight && (kv == nil || kv.Revision > rev) {
+			if rev == 0 {
+				// Nothing existed before the first write, and GetAt
+				// would read revision 0 as HEAD.
+				return nil, nil
+			}
 			return db.GetAt(key, rev)
 		}
 		return kv, nil
