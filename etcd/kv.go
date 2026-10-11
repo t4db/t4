@@ -20,12 +20,52 @@ import (
 
 // Range implements KVServer.Range (Get / List).
 func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
+	// A read at HEAD is pinned to the revision current when it starts, and
+	// reports that revision. Reading HEAD and then CurrentRevision would let
+	// a write land in between, and a client that watches from the reported
+	// revision onwards would never see it. Compaction can pass the pinned
+	// revision before the read gets to it; resolving HEAD again then finds a
+	// revision it has not passed.
+	for {
+		resp, err := s.rangeOnce(ctx, r)
+		if r.Revision == 0 && errors.Is(err, rpctypes.ErrGRPCCompacted) {
+			continue
+		}
+		return resp, err
+	}
+}
+
+func (s *Server) rangeOnce(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
 	key := string(r.Key)
 	rangeEnd := string(r.RangeEnd)
 	readRev := fromEtcdRevision(r.Revision)
 	// Like etcd, the header reports the current revision even for a read at
 	// an older one; clients that asked for a revision already know it.
 	header := s.header
+
+	// A read is linearizable when the client requests it AND the server is not
+	// configured to force serializable reads.
+	linearizable := !r.Serializable && s.node.ReadConsistency() != t4.ReadConsistencySerializable
+
+	if r.Revision == 0 {
+		headRev := s.node.CurrentRevision()
+		if linearizable {
+			rev, err := s.node.LinearizableRevision(ctx)
+			if err != nil {
+				return nil, kvError(err)
+			}
+			headRev = rev
+			// The sync is done; the pinned read itself can be local.
+			linearizable = false
+		}
+		header = func() *etcdserverpb.ResponseHeader { return s.headerAt(headRev) }
+		if headRev == 0 {
+			// Nothing has been written yet, and pinning to revision 0 would
+			// read HEAD.
+			return &etcdserverpb.RangeResponse{Header: header()}, nil
+		}
+		readRev = headRev
+	}
 
 	if r.Revision > 0 {
 		if compactRev := s.node.CompactRevision(); compactRev > 0 && readRev < compactRev {
@@ -36,10 +76,6 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			return &etcdserverpb.RangeResponse{Header: header()}, nil
 		}
 	}
-
-	// A read is linearizable when the client requests it AND the server is not
-	// configured to force serializable reads.
-	linearizable := !r.Serializable && s.node.ReadConsistency() != t4.ReadConsistencySerializable
 
 	if needsFullRead(r) && !r.CountOnly {
 		return s.fullRange(ctx, r)

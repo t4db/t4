@@ -1175,6 +1175,22 @@ func WithKeysOnly() ReadOption {
 	return func(o *readOpts) { o.keysOnly = true }
 }
 
+// LinearizableRevision returns a revision that reads pinned to it with
+// WithRevision observe every write committed before the call, as a
+// linearizable read would. On a follower it syncs to the leader's revision.
+// Pinning a read to it lets the caller report the revision the read's data
+// is from, which a read at HEAD cannot: a write may land between the read
+// and a later look at CurrentRevision.
+func (n *Node) LinearizableRevision(ctx context.Context) (int64, error) {
+	ctx, span := n.startSpan(ctx, "t4.revision", "")
+	defer span.End()
+	if err := n.syncWithLeader(ctx); err != nil {
+		span.RecordError(err)
+		return 0, err
+	}
+	return n.CurrentRevision(), nil
+}
+
 // LinearizableGet returns the value for key with linearizability guaranteed.
 // On a follower it syncs to the leader's revision before serving locally.
 func (n *Node) LinearizableGet(ctx context.Context, key string, opts ...ReadOption) (*KeyValue, error) {
