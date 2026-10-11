@@ -34,8 +34,11 @@ T4_ROBUSTNESS_S3=1 make test-robustness
 override the defaults, which match the command above.
 `T4_ROBUSTNESS_SCENARIO` and `T4_ROBUSTNESS_FAILPOINT` narrow a run to one
 traffic scenario or failpoint. A failed run keeps its report, with client
-histories and node data directories, under `RESULTS_DIR` (default: the system
-temp dir); `PERSIST_RESULTS=1` keeps passing runs' reports too.
+histories and node data directories, under `RESULTS_DIR`;
+`PERSIST_RESULTS=1` keeps passing runs' reports too. `make test-robustness`
+puts node data and reports under `.tmp/robustness` rather than `/tmp`, which
+may be RAM-backed; `go test` on its own uses `TMPDIR` and, for reports, the
+system temp dir.
 
 ## Differences from upstream
 
