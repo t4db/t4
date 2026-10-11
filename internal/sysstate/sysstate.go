@@ -105,24 +105,24 @@ func Delete(ctx context.Context, n Node, key string) error {
 }
 
 // Create stores value under key only if key does not exist yet. It reports
-// whether the value was stored.
-func Create(ctx context.Context, n Node, key string, value []byte) (bool, error) {
+// whether the value was stored, and the revision the attempt is ordered at.
+func Create(ctx context.Context, n Node, key string, value []byte) (bool, int64, error) {
 	on, err := n.MetaEnabledSync(ctx)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if !on {
-		_, err := n.Create(ctx, key, value, 0)
+		rev, err := n.Create(ctx, key, value, 0)
 		if errors.Is(err, t4.ErrKeyExists) {
-			return false, nil
+			return false, rev, nil
 		}
-		return err == nil, err
+		return err == nil, rev, err
 	}
 	resp, err := n.Txn(ctx, t4.TxnRequest{
 		Conditions: []t4.TxnCondition{{Key: key, Target: t4.TxnCondMetaExists, Result: t4.TxnCondEqual, Version: 0}},
 		Success:    []t4.TxnOp{{Type: t4.TxnMetaPut, Key: key, Value: value}},
 	})
-	return resp.Succeeded, err
+	return resp.Succeeded, resp.Revision, err
 }
 
 // Get returns key's value from local state.

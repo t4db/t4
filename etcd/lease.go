@@ -35,9 +35,9 @@ func (s *Server) LeaseGrant(ctx context.Context, r *etcdserverpb.LeaseGrantReque
 				GrantedTTL:   r.TTL,
 				ExpiryUnixNs: time.Now().Add(time.Duration(r.TTL) * time.Second).UnixNano(),
 			}
-			err = s.createLease(ctx, rec)
+			rev, err := s.createLease(ctx, rec)
 			if err == nil {
-				return &etcdserverpb.LeaseGrantResponse{Header: s.header(), ID: rec.ID, TTL: rec.GrantedTTL}, nil
+				return &etcdserverpb.LeaseGrantResponse{Header: s.headerAt(rev), ID: rec.ID, TTL: rec.GrantedTTL}, nil
 			}
 			if status.Code(err) != codes.AlreadyExists {
 				return nil, err
@@ -54,27 +54,31 @@ func (s *Server) LeaseGrant(ctx context.Context, r *etcdserverpb.LeaseGrantReque
 		GrantedTTL:   r.TTL,
 		ExpiryUnixNs: time.Now().Add(time.Duration(r.TTL) * time.Second).UnixNano(),
 	}
-	if err := s.createLease(ctx, rec); err != nil {
+	rev, err := s.createLease(ctx, rec)
+	if err != nil {
 		return nil, err
 	}
-	return &etcdserverpb.LeaseGrantResponse{Header: s.header(), ID: rec.ID, TTL: rec.GrantedTTL}, nil
+	// Like the rest of the grant, the header comes from the leader: this
+	// node's own revision may lag writes the leader already acknowledged.
+	return &etcdserverpb.LeaseGrantResponse{Header: s.headerAt(rev), ID: rec.ID, TTL: rec.GrantedTTL}, nil
 }
 
-// createLease writes a fresh lease record using an atomic create. It returns
-// AlreadyExists if another caller has already committed the key.
-func (s *Server) createLease(ctx context.Context, rec *leaseRecord) error {
+// createLease writes a fresh lease record using an atomic create, and returns
+// the revision the grant is ordered at. It returns AlreadyExists if another
+// caller has already committed the key.
+func (s *Server) createLease(ctx context.Context, rec *leaseRecord) (int64, error) {
 	data, err := json.Marshal(rec)
 	if err != nil {
-		return status.Errorf(codes.Internal, "marshal lease: %v", err)
+		return 0, status.Errorf(codes.Internal, "marshal lease: %v", err)
 	}
-	created, err := sysstate.Create(ctx, s.node, leaseKey(rec.ID), data)
+	created, rev, err := sysstate.Create(ctx, s.node, leaseKey(rec.ID), data)
 	if err != nil {
-		return status.Errorf(codes.Internal, "create lease: %v", err)
+		return 0, status.Errorf(codes.Internal, "create lease: %v", err)
 	}
 	if !created {
-		return status.Errorf(codes.AlreadyExists, "lease %d already exists", rec.ID)
+		return 0, status.Errorf(codes.AlreadyExists, "lease %d already exists", rec.ID)
 	}
-	return nil
+	return rev, nil
 }
 
 func (s *Server) LeaseRevoke(ctx context.Context, r *etcdserverpb.LeaseRevokeRequest) (*etcdserverpb.LeaseRevokeResponse, error) {

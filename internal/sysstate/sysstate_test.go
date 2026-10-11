@@ -63,7 +63,7 @@ func exercise(t *testing.T, n Node) {
 	if err := Delete(ctx, n, "k"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Create(ctx, n, "k", []byte("v")); err != nil {
+	if _, _, err := Create(ctx, n, "k", []byte("v")); err != nil {
 		t.Fatal(err)
 	}
 	if err := Apply(ctx, n, []t4.TxnOp{{Type: t4.TxnDelete, Key: "attached"}}, Change{Key: "k", Delete: true}); err != nil {
@@ -114,7 +114,7 @@ func TestWritesUseTheLeadersMode(t *testing.T) {
 	if err := Put(ctx, r, "k", []byte("v")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Create(ctx, r, "k", []byte("v")); err != nil {
+	if _, _, err := Create(ctx, r, "k", []byte("v")); err != nil {
 		t.Fatal(err)
 	}
 	if err := Delete(ctx, r, "k"); err != nil {
