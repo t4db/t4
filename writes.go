@@ -527,8 +527,12 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 			metrics.TxnRequestsTotal.WithLabelValues(kind, txnCompareLabel(committedSucceeded), "noop").Inc()
 			return TxnResponse{Succeeded: committedSucceeded, Revision: curRev}, nil
 		}
-		// Otherwise its write must follow the in-flight one: answer once that
-		// commits, at its revision, and evaluate again if it fails.
+		// Otherwise answer once the in-flight writes commit, and evaluate
+		// again if one fails. The answer holds at the last revision assigned
+		// so far: an earlier write to a key the txn read was observed, and
+		// later ones come after it. A later revision would not do, as a write
+		// committed meanwhile may change what the txn read.
+		observedRev = n.nextRev
 		aborted := n.abortedBatches
 		n.mu.Unlock()
 		observeTxnPreparation(lockWait, prepareDuration, kind)
