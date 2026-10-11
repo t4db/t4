@@ -768,8 +768,8 @@ func Open(cfg Config) (*Node, error) {
 
 	if localGap {
 		if err := w.ReplayLocal(contiguousRecovery{db}, db.LastSequence()); err != nil {
-			w.Close()
-			db.Close()
+			_ = w.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("t4: local WAL replay after object store replay: %w", err)
 		}
 	}
