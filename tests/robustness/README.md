@@ -33,8 +33,9 @@ T4_ROBUSTNESS_S3=1 make test-robustness
 `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY` and `S3_SECRET_KEY`
 override the defaults, which match the command above.
 `T4_ROBUSTNESS_SCENARIO` and `T4_ROBUSTNESS_FAILPOINT` narrow a run to one
-traffic scenario or failpoint. A failed run keeps its report, with client
-histories and node data directories, under `RESULTS_DIR`;
+traffic scenario or failpoint, and `T4_ROBUSTNESS_SKIP` leaves out a
+comma-separated list of `Scenario/Failpoint` pairs. A failed run keeps its report, with client
+histories and each node's data directory and log, under `RESULTS_DIR`;
 `PERSIST_RESULTS=1` keeps passing runs' reports too. `make test-robustness`
 puts node data and reports under `.tmp/robustness` rather than `/tmp`, which
 may be RAM-backed; `go test` on its own uses `TMPDIR` and, for reports, the
@@ -59,3 +60,11 @@ restarting the leader gracefully.
 T4 does not implement etcd 3.7's `RangeStream`, which the etcd traffic uses
 for some reads. Those reads fail and, like any failed read, are left out of
 validation.
+
+## CI
+
+Pull requests run the single-node scenarios. The nightly workflow runs the
+three-node ones against RustFS, except `EtcdPutDeleteLease/KillAllNodes`:
+killing every node leaves enough writes with unknown outcomes, deletes and
+lease revokes among them, that the linearizability check runs out of time
+before reaching a verdict.

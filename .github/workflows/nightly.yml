@@ -34,3 +34,53 @@ jobs:
           go test -run TestLongRunningConsistency -v -timeout 35m -count=1 ./tests/integration
         env:
           TEST_DURATION: 30m
+
+  robustness:
+    name: etcd robustness tests (3 nodes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tests/robustness/go.mod
+          cache: true
+          cache-dependency-path: tests/robustness/go.sum
+
+      - name: Start S3 server
+        run: |
+          docker run -d --name t4-robustness-s3 \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=t4testadmin \
+            -e RUSTFS_SECRET_KEY=t4testadmin \
+            rustfs/rustfs:1.0.0
+
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:9000/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs t4-robustness-s3
+          exit 1
+
+      # Killing every node under EtcdPutDeleteLease traffic leaves too many
+      # writes with unknown outcomes for the linearizability check to finish;
+      # see tests/robustness/README.md.
+      - name: Test with etcd's robustness tests
+        run: make test-robustness
+        env:
+          T4_ROBUSTNESS_S3: "1"
+          T4_ROBUSTNESS_SKIP: EtcdPutDeleteLease/KillAllNodes
+
+      - name: Upload failure reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: robustness-reports-${{ github.sha }}
+          path: .tmp/robustness/results/
+          retention-days: 30
+          if-no-files-found: ignore

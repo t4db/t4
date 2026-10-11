@@ -179,11 +179,12 @@ func (c *cluster) endpoints() []string {
 	return eps
 }
 
-// dataDirs maps node names to data dirs, for the failure report.
+// dataDirs maps node names to the directories a failure report keeps: each
+// node's data and its log.
 func (c *cluster) dataDirs() map[string]string {
 	dirs := make(map[string]string, len(c.nodes))
 	for _, n := range c.nodes {
-		dirs[n.name] = n.dataDir
+		dirs[n.name] = filepath.Dir(n.logPath)
 	}
 	return dirs
 }

@@ -92,7 +92,9 @@ var scenarios = []scenario{
 // TestRobustness runs every scenario under every failpoint: on a single node
 // without S3 always, and on a three-node cluster when T4_ROBUSTNESS_S3 points
 // at an S3-compatible store. T4_ROBUSTNESS_FAILPOINT and
-// T4_ROBUSTNESS_SCENARIO narrow the run to one of each.
+// T4_ROBUSTNESS_SCENARIO narrow the run to one of each, and
+// T4_ROBUSTNESS_SKIP leaves out a comma-separated list of Scenario/Failpoint
+// pairs.
 func TestRobustness(t *testing.T) {
 	sizes := []int{1}
 	s3, haveS3 := s3FromEnv()
@@ -106,6 +108,12 @@ func TestRobustness(t *testing.T) {
 	}
 	onlyFailpoint := os.Getenv("T4_ROBUSTNESS_FAILPOINT")
 	onlyScenario := os.Getenv("T4_ROBUSTNESS_SCENARIO")
+	skip := map[string]bool{}
+	for _, name := range strings.Split(os.Getenv("T4_ROBUSTNESS_SKIP"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			skip[name] = true
+		}
+	}
 	if onlyFailpoint != "" {
 		if _, err := failpointByName(onlyFailpoint); err != nil {
 			t.Fatal(err)
@@ -121,6 +129,10 @@ func TestRobustness(t *testing.T) {
 				t.Run(s.name, func(t *testing.T) {
 					for _, fp := range failpoints {
 						if !fp.Available(size) || (onlyFailpoint != "" && fp.Name() != onlyFailpoint) {
+							continue
+						}
+						if skip[s.name+"/"+fp.Name()] {
+							t.Logf("skipping %s/%s: T4_ROBUSTNESS_SKIP", s.name, fp.Name())
 							continue
 						}
 						t.Run(fp.Name(), func(t *testing.T) {
