@@ -156,3 +156,43 @@ func TestNoopTxnReevaluatesAfterAbandonedWrite(t *testing.T) {
 		t.Fatalf("Get /other = %+v, %v; want the txn's write", kv, err)
 	}
 }
+
+// TestNoopTxnRevisionUnderWrites checks that a txn writing nothing because a
+// write still in flight deleted its key reports a revision where the key is
+// absent, not one a later write recreated it at.
+func TestNoopTxnRevisionUnderWrites(t *testing.T) {
+	n, err := Open(Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ctx.Err() == nil {
+			_, _ = n.Put(ctx, "/k", []byte("v"), 0)
+			_, _ = n.Delete(ctx, "/k")
+		}
+	}()
+	defer func() { cancel(); <-done }()
+
+	for range 2000 {
+		resp, err := n.Txn(ctx, TxnRequest{Success: []TxnOp{{Type: TxnDelete, Key: "/k"}}})
+		if err != nil {
+			t.Fatalf("Txn: %v", err)
+		}
+		if len(resp.DeletedKeys) != 0 {
+			continue
+		}
+		kv, err := n.Get("/k", WithRevision(resp.Revision))
+		if err != nil {
+			t.Fatalf("Get at %d: %v", resp.Revision, err)
+		}
+		if kv != nil {
+			t.Fatalf("txn deleted nothing at revision %d, but /k exists there: %+v", resp.Revision, kv)
+		}
+	}
+}
