@@ -617,10 +617,17 @@ func Open(cfg Config) (*Node, error) {
 	// post-compact checkpoint LastSequence > CurrentRevision and entries with
 	// Sequence in (CurrentRevision, LastSequence] would otherwise be replayed
 	// again (idempotent today, but inconsistent with the seq/rev split).
-	if err := w.ReplayLocal(db, db.LastSequence()); err != nil {
+	//
+	// The local WAL may not continue from Pebble: it drops segments once they
+	// are uploaded, and Pebble writes without syncing, so a crash can lose
+	// entries that now exist only in the object store. Replay stops at such a
+	// gap and finishes after the object store replay below has filled it.
+	localErr := w.ReplayLocal(contiguousRecovery{db}, db.LastSequence())
+	localGap := errors.Is(localErr, errReplayGap)
+	if localErr != nil && !localGap {
 		w.Close()
 		db.Close()
-		return nil, fmt.Errorf("t4: local WAL replay: %w", err)
+		return nil, fmt.Errorf("t4: local WAL replay: %w", localErr)
 	}
 	// Re-read pebble's revision: local WAL replay may have advanced it.
 	startRev = db.CurrentRevision()
@@ -756,6 +763,14 @@ func Open(cfg Config) (*Node, error) {
 			}
 			db, term, startRev, nextSeq = freshDB, newTerm, freshDB.CurrentRevision(), reopenSeq
 			log.Infof("t4: checkpoint refreshed to rev=%d (term=%d)", startRev, term)
+		}
+	}
+
+	if localGap {
+		if err := w.ReplayLocal(contiguousRecovery{db}, db.LastSequence()); err != nil {
+			w.Close()
+			db.Close()
+			return nil, fmt.Errorf("t4: local WAL replay after object store replay: %w", err)
 		}
 	}
 
@@ -1599,6 +1614,25 @@ func (n *Node) Watch(ctx context.Context, prefix string, startRev int64, opts ..
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// errReplayGap reports WAL entries that do not continue from the store's last
+// applied sequence.
+var errReplayGap = errors.New("t4: WAL replay gap")
+
+// contiguousRecovery recovers entries into a store only when they continue
+// from its last applied sequence, so a replay cannot apply entries past ones
+// it has not got: recovering them would leave the store with a hole that no
+// later replay fills, as each replays only after the store's last sequence.
+type contiguousRecovery struct{ db *istore.Store }
+
+func (c contiguousRecovery) Recover(entries []wal.Entry) error {
+	if len(entries) > 0 {
+		if next := c.db.LastSequence() + 1; entries[0].Sequence() > next {
+			return fmt.Errorf("%w: next entry has sequence %d, store needs %d", errReplayGap, entries[0].Sequence(), next)
+		}
+	}
+	return c.db.Recover(entries)
+}
 
 // toKV is now identity since t4.KeyValue is an alias of istore.KeyValue.
 // Kept as a thin shim to preserve existing call sites.

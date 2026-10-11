@@ -2,6 +2,7 @@ package t4
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -25,12 +26,12 @@ func TestRecoverLocalWALBeforeLeadership(t *testing.T) {
 
 	walDir := filepath.Join(root, "wal")
 	w := wal.New(wal.WithLogger(NoopLogger))
-	if err := w.Open(walDir, 7, 42); err != nil {
+	if err := w.Open(walDir, 7, 1); err != nil {
 		t.Fatal(err)
 	}
 	w.Start(context.Background())
 	entry := &wal.Entry{
-		ID:             42,
+		ID:             1,
 		Revision:       11,
 		Term:           7,
 		Op:             wal.OpCreate,
@@ -51,8 +52,8 @@ func TestRecoverLocalWALBeforeLeadership(t *testing.T) {
 	if err := n.recoverLocalWALBeforeLeadership(walDir); err != nil {
 		t.Fatal(err)
 	}
-	if got := db.LastSequence(); got != 42 {
-		t.Fatalf("Pebble sequence after recovery = %d, want 42", got)
+	if got := db.LastSequence(); got != 1 {
+		t.Fatalf("Pebble sequence after recovery = %d, want 1", got)
 	}
 	kv, err := db.Get(entry.Key)
 	if err != nil {
@@ -112,5 +113,38 @@ func TestRecoverLocalWALBeforeLeadershipNoopWhenCaughtUp(t *testing.T) {
 	}
 	if got := db.LastSequence(); got != 42 {
 		t.Fatalf("Pebble sequence after no-op recovery = %d, want 42", got)
+	}
+}
+
+// TestRecoverLocalWALBeforeLeadershipRefusesGap checks that a follower whose
+// local WAL does not continue from Pebble refuses leadership instead of
+// applying its entries past the missing ones.
+func TestRecoverLocalWALBeforeLeadershipRefusesGap(t *testing.T) {
+	root := t.TempDir()
+	db, err := istore.Open(filepath.Join(root, "db"), NoopLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	walDir := filepath.Join(root, "wal")
+	w := wal.New(wal.WithLogger(NoopLogger))
+	if err := w.Open(walDir, 7, 42); err != nil {
+		t.Fatal(err)
+	}
+	w.Start(context.Background())
+	if err := w.Append(&wal.Entry{ID: 42, Revision: 11, Term: 7, Op: wal.OpCreate, Key: "/k", Value: []byte("v"), CreateRevision: 11, Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	n := &Node{wal: w}
+	n.db.Store(db)
+	if err := n.recoverLocalWALBeforeLeadership(walDir); !errors.Is(err, errReplayGap) {
+		t.Fatalf("recoverLocalWALBeforeLeadership: %v, want errReplayGap", err)
+	}
+	if got := db.LastSequence(); got != 0 {
+		t.Fatalf("Pebble sequence = %d after a refused replay, want 0", got)
 	}
 }
