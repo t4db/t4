@@ -42,6 +42,35 @@ func newHistoryRing(cap int) *historyRing {
 	return &historyRing{cap: cap}
 }
 
+// histBatch groups one store batch's changes by revision for the ring.
+type histBatch struct {
+	revs []histRev
+	cur  histRev
+}
+
+// add records changes at rev; consecutive changes at one revision (a txn's
+// sub-ops) join the same entry.
+func (hb *histBatch) add(rev int64, changes []histChange) {
+	if rev != hb.cur.rev {
+		hb.flush()
+		hb.cur.rev = rev
+	}
+	hb.cur.changes = append(hb.cur.changes, changes...)
+}
+
+func (hb *histBatch) flush() {
+	if len(hb.cur.changes) > 0 {
+		hb.revs = append(hb.revs, hb.cur)
+	}
+	hb.cur = histRev{}
+}
+
+// done returns the batch's revisions in order.
+func (hb *histBatch) done() []histRev {
+	hb.flush()
+	return hb.revs
+}
+
 // append records a revision's changes. Revisions arrive in apply order; a
 // repeat of the newest revision is a WAL term-rewrite during replay and
 // replaces it. Revisions the cap evicts are dropped from the front.
@@ -110,6 +139,16 @@ func (h *historyRing) reset() {
 	h.mu.Lock()
 	h.revs = nil
 	h.mu.Unlock()
+}
+
+// newest returns the newest retained revision.
+func (h *historyRing) newest() (int64, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.revs) == 0 {
+		return 0, false
+	}
+	return h.revs[len(h.revs)-1].rev, true
 }
 
 // floor returns the oldest retained revision, for tests and diagnostics.

@@ -453,14 +453,10 @@ func (s *Store) Apply(entries []wal.Entry) error {
 	b := s.db.NewBatch()
 	var maxRev, maxSeq int64
 	var tip Position
-	// Changes for the history ring, grouped by revision. The ring is fed
-	// only from here — Recover's replay, whose term-conflict rewrites would
-	// leave stale anchors, clears it instead. An empty ring is fine: pinned
-	// reads fall back to the Pebble paths until it warms.
+	// Changes for the history ring, grouped by revision. An empty ring is
+	// fine: pinned reads fall back to the Pebble paths until it warms.
 	ring := s.hist.Load()
-	var histChanges []histRev
-	var curRev int64
-	var curChanges []histChange
+	var hist histBatch
 	var la leaseApply
 	for i := range entries {
 		e := &entries[i]
@@ -489,14 +485,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 				_ = b.Close()
 				return err
 			}
-			if e.Revision != curRev {
-				if len(curChanges) > 0 {
-					histChanges = append(histChanges, histRev{rev: curRev, changes: curChanges})
-					curChanges = nil
-				}
-				curRev = e.Revision
-			}
-			curChanges = append(curChanges, cs...)
+			hist.add(e.Revision, cs)
 		}
 		if consumesRev && e.Revision > maxRev {
 			maxRev = e.Revision
@@ -505,10 +494,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			maxSeq = seq
 		}
 	}
-	if len(curChanges) > 0 {
-		histChanges = append(histChanges, histRev{rev: curRev, changes: curChanges})
-	}
-	if err := s.commitBatch(b, maxRev, maxSeq, tip, true, false, histChanges); err != nil {
+	if err := s.commitBatch(b, maxRev, maxSeq, tip, true, false, hist.done()); err != nil {
 		return err
 	}
 	s.broadcast()
@@ -611,21 +597,28 @@ func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, tip Position,
 
 // Recover applies entries without broadcasting to watchers. Used during
 // startup replay and by follower resync and leader catch-up, which run on the
-// live store. Its revisions bypass the history ring, so the ring is cleared
-// first: a ring that skipped them would still claim to cover pins below them.
-// Clearing before the commit keeps any snapshot holding these revisions from
-// meeting a ring that predates them.
+// live store, so it feeds the history ring like Apply: a ring that skipped
+// these revisions would still claim to cover pins below them.
+//
+// A term-conflict rewrite invalidates what the ring knows from the revision
+// it rewrites on. A batch rewriting a revision the ring holds clears the ring
+// and refills it from the batch; a batch rewriting one of its own revisions
+// cannot be ordered and leaves the ring empty. Either way the ring changes
+// before the commit, so no snapshot holding the batch meets a stale ring.
 func (s *Store) Recover(entries []wal.Entry) error {
 	if len(entries) == 0 {
 		return nil
-	}
-	if ring := s.hist.Load(); ring != nil {
-		ring.reset()
 	}
 	b := s.db.NewBatch()
 	var maxRev, maxSeq int64
 	var tip Position
 	var la leaseApply
+	ring := s.hist.Load()
+	var hist histBatch
+	// histTip is the newest data revision fed to hist; ordered stays true
+	// while the batch's revisions strictly increase.
+	var histTip int64
+	ordered := true
 	for i := range entries {
 		e := &entries[i]
 		if seq := e.Sequence(); seq > maxSeq {
@@ -689,12 +682,37 @@ func (s *Store) Recover(entries []wal.Entry) error {
 				b.Close()
 				return err
 			}
+			if ring != nil && ordered {
+				if e.Revision <= histTip {
+					ordered = false
+				} else {
+					cs, err := histChangesOf(e)
+					if err != nil {
+						_ = b.Close()
+						return err
+					}
+					hist.add(e.Revision, cs)
+					histTip = e.Revision
+				}
+			}
 		}
 		if consumesRev && e.Revision > maxRev {
 			maxRev = e.Revision
 		}
 	}
-	return s.commitBatch(b, maxRev, maxSeq, tip, false, true, nil)
+	var histChanges []histRev
+	if ring != nil {
+		histChanges = hist.done()
+		newest, ok := ring.newest()
+		switch {
+		case !ordered:
+			ring.reset()
+			histChanges = nil
+		case ok && len(histChanges) > 0 && histChanges[0].rev <= newest:
+			ring.reset()
+		}
+	}
+	return s.commitBatch(b, maxRev, maxSeq, tip, false, true, histChanges)
 }
 
 // applyEntry writes e into b.

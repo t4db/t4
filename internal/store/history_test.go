@@ -302,8 +302,8 @@ func TestReadAtHistoryConcurrentApply(t *testing.T) {
 }
 
 // TestReadAtHistoryAfterRecover feeds part of the history through Recover,
-// as a follower resync does on a live store: pins on either side of that
-// stretch must not be served from a ring that never saw it.
+// as a follower resync does on a live store: the ring must keep covering pins
+// on either side of that stretch and serve them as replay does.
 func TestReadAtHistoryAfterRecover(t *testing.T) {
 	s := openMem(t)
 	s.SetHistoryRingSize(100)
@@ -320,7 +320,65 @@ func TestReadAtHistoryAfterRecover(t *testing.T) {
 	}
 	apply(t, s, updateEntry(6, "/z", []byte("z2"), 3, 3))
 
-	for r := int64(1); r <= s.CurrentRevision(); r++ {
+	if f, ok := s.hist.Load().floor(); !ok || f != 1 {
+		t.Fatalf("ring floor = %d, %v; want 1, true: Recover dropped the ring", f, ok)
+	}
+	checkPinnedReadsMatchReplay(t, s, "/x", "/y", "/z")
+}
+
+// TestReadAtHistoryRecoverRewritesRing replays a newer term over revisions
+// the ring already holds: the ring must start over from the rewrite rather
+// than keep the old term's changes.
+func TestReadAtHistoryRecoverRewritesRing(t *testing.T) {
+	s := openMem(t)
+	s.SetHistoryRingSize(100)
+	apply(t, s, createEntry(1, "/a", []byte("a1")))
+	apply(t, s, createEntry(2, "/b", []byte("b1")))
+	apply(t, s, createEntry(3, "/c", []byte("c1")))
+	apply(t, s, updateEntry(4, "/c", []byte("c2"), 3, 3))
+
+	// Term 2 rewrote revision 3 as an update of /b and created /c at 4. A
+	// ring still holding term 1's revisions would miss the /b change and
+	// serve /b@3 to a pin at 2.
+	rewrite := updateEntry(3, "/b", []byte("b2"), 2, 2)
+	rewrite.Term = 2
+	create := createEntry(4, "/c", []byte("c3"))
+	create.Term = 2
+	if err := s.Recover([]wal.Entry{rewrite, create}); err != nil {
+		t.Fatal(err)
+	}
+
+	if f, ok := s.hist.Load().floor(); !ok || f != 3 {
+		t.Fatalf("ring floor = %d, %v; want 3, true", f, ok)
+	}
+	checkPinnedReadsMatchReplay(t, s, "/a", "/b", "/c")
+}
+
+// TestReadAtHistoryRecoverRewriteInBatch replays a batch that rewrites one of
+// its own revisions: the ring cannot order those changes and is left empty.
+func TestReadAtHistoryRecoverRewriteInBatch(t *testing.T) {
+	s := openMem(t)
+	s.SetHistoryRingSize(100)
+	apply(t, s, createEntry(1, "/a", []byte("a1")))
+
+	old := createEntry(2, "/b", []byte("b1"))
+	rewrite := createEntry(2, "/b", []byte("b2"))
+	rewrite.Term = 2
+	if err := s.Recover([]wal.Entry{old, rewrite}); err != nil {
+		t.Fatal(err)
+	}
+
+	if f, ok := s.hist.Load().floor(); ok {
+		t.Fatalf("ring floor = %d; want an empty ring", f)
+	}
+	checkPinnedReadsMatchReplay(t, s, "/a", "/b")
+}
+
+// checkPinnedReadsMatchReplay checks ListRange over the whole keyspace and
+// GetAt of keys at every revision up to HEAD against the replay reference.
+func checkPinnedReadsMatchReplay(t *testing.T, s *Store, keys ...string) {
+	t.Helper()
+	for r := max(s.CompactRevision(), 1); r <= s.CurrentRevision(); r++ {
 		want, err := s.listAtByReplay("", ReadOptions{Revision: r}, r)
 		if err != nil {
 			t.Fatal(err)
@@ -332,7 +390,7 @@ func TestReadAtHistoryAfterRecover(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("ListRange rev=%d: %v, replay %v", r, kvKeys(got), kvKeys(want))
 		}
-		for _, key := range []string{"/x", "/y", "/z"} {
+		for _, key := range keys {
 			want, err := s.getAtRevision(key, r)
 			if err != nil {
 				t.Fatal(err)
