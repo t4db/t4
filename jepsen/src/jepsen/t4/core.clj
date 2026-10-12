@@ -24,7 +24,8 @@
 (def nemeses
   {:none
    {:nemesis  nemesis/noop
-    :gen      nil}
+    :gen      nil
+    :heal     nil}
 
    ;; Randomly bisects the 5 nodes into a 2/3 split and heals.
    :partition-halves
@@ -33,7 +34,8 @@
                 [(gen/sleep 10)
                  {:type :info :f :start}
                  (gen/sleep 20)
-                 {:type :info :f :stop}])}
+                 {:type :info :f :stop}])
+    :heal     {:type :info :f :stop}}
 
    ;; Kills and restarts the t4 process on a random node. node-start-stopper
    ;; runs its first fn on :start (the fault) and its second on :stop (heal).
@@ -46,7 +48,8 @@
                 [(gen/sleep 15)
                  {:type :info :f :start}
                  (gen/sleep 15)
-                 {:type :info :f :stop}])}
+                 {:type :info :f :stop}])
+    :heal     {:type :info :f :stop}}
 
    ;; Partition a random node away from the S3 server using iptables.
    ;; Tests S3-write failure handling; requires NET_ADMIN cap on node containers.
@@ -91,7 +94,8 @@
                 [(gen/sleep 10)
                  {:type :info :f :isolate-s3}
                  (gen/sleep 20)
-                 {:type :info :f :heal-s3}])}})
+                 {:type :info :f :heal-s3}])
+    :heal     {:type :info :f :heal-s3}}})
 
 ;; ── Workloads ─────────────────────────────────────────────────────────────────
 
@@ -206,8 +210,11 @@
                          (gen/stagger (:stagger workload 1.0)) ; register: ~1 op/s × 120 s ≈ 120 ops — low concurrency keeps Knossos WGL from OOMing during partitions
                          (gen/nemesis (:gen nem))
                          (gen/time-limit time-limit))
-                    ;; Recovery phase: let the cluster heal, then do a final read
-                    ;; (or the workload's own final ops).
+                    ;; Recovery phase: end any fault still in place (the time
+                    ;; limit can cut a cycle between its fault and its heal),
+                    ;; let the cluster heal, then do a final read (or the
+                    ;; workload's own final ops).
+                    (gen/nemesis (:heal nem))
                     (gen/log "waiting for recovery")
                     (gen/sleep 15)
                     (gen/clients final-gen))}
