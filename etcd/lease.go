@@ -81,10 +81,11 @@ func (s *Server) LeaseRevoke(ctx context.Context, r *etcdserverpb.LeaseRevokeReq
 	if _, err := s.getLease(ctx, r.ID, true); err != nil {
 		return nil, err
 	}
-	if err := s.revokeLease(ctx, r.ID); err != nil {
+	rev, err := s.revokeLease(ctx, r.ID)
+	if err != nil {
 		return nil, err
 	}
-	return &etcdserverpb.LeaseRevokeResponse{Header: s.header()}, nil
+	return &etcdserverpb.LeaseRevokeResponse{Header: s.headerAt(rev)}, nil
 }
 
 func (s *Server) LeaseKeepAlive(stream etcdserverpb.Lease_LeaseKeepAliveServer) error {

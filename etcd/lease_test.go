@@ -10,6 +10,8 @@ import (
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	t4etcd "github.com/t4db/t4/etcd"
 )
 
 // TestLeaseGrantConcurrentExplicitSameIDRejected exercises the v1 contract
@@ -66,4 +68,60 @@ func TestLeaseGrantConcurrentExplicitSameIDRejected(t *testing.T) {
 	if got := unexpectedErrs.Load(); got != 0 {
 		t.Errorf("unexpected errors: %d", got)
 	}
+}
+
+// raceRevoke revokes a fresh lease concurrently with write, rounds times.
+// setup attaches whatever the round needs to the lease first.
+func raceRevoke(t *testing.T, srv *t4etcd.Server, rounds int, setup func(lease int64), write func(lease int64), check func(lease int64)) {
+	t.Helper()
+	ctx := context.Background()
+	for range rounds {
+		g, err := srv.LeaseGrant(ctx, &etcdserverpb.LeaseGrantRequest{TTL: 60})
+		if err != nil {
+			t.Fatal(err)
+		}
+		setup(g.ID)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := srv.LeaseRevoke(ctx, &etcdserverpb.LeaseRevokeRequest{ID: g.ID}); err != nil {
+				t.Errorf("revoke: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			write(g.ID)
+		}()
+		wg.Wait()
+		check(g.ID)
+	}
+}
+
+// TestLeaseRevokeRacesDetachingPut pins that a revoke deletes only keys still
+// attached to the lease when it commits: a key re-put without the lease
+// concurrently must exist afterwards, whichever went first.
+func TestLeaseRevokeRacesDetachingPut(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+	raceRevoke(t, srv, 200,
+		func(lease int64) {
+			if _, err := srv.Put(ctx, &etcdserverpb.PutRequest{Key: []byte("/k"), Value: []byte("leased"), Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(int64) {
+			if _, err := srv.Put(ctx, &etcdserverpb.PutRequest{Key: []byte("/k"), Value: []byte("plain")}); err != nil {
+				t.Errorf("put: %v", err)
+			}
+		},
+		func(int64) {
+			r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/k")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(r.Kvs) != 1 || r.Kvs[0].Lease != 0 {
+				t.Fatalf("after revoke raced an unleased put, /k = %v, want the unleased value", r.Kvs)
+			}
+		})
 }
