@@ -734,6 +734,8 @@ func kvError(err error) error {
 	switch {
 	case errors.Is(err, t4.ErrNoLeader):
 		return rpctypes.ErrGRPCNoLeader
+	case errors.Is(err, t4.ErrClosed):
+		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, t4.ErrCompacted):
 		return rpctypes.ErrGRPCCompacted
 	case errors.Is(err, t4.ErrFutureRevision):

@@ -89,12 +89,22 @@ Any write that completed quorum ACK before the cluster went down exists on all n
 - The leader cannot renew its lock. While its followers still hear it, none of them may take over, and the leader keeps serving on its last renewal: until 2 s before that renewal's validity ends, at most about a minute. After that it stops acknowledging writes and serving linearizable reads, and returns `ErrNoLeader` (etcd: `Unavailable`), because it can no longer rule out that another node has taken over.
 - Writes that need the election fence moved (after a follower leaves or falls behind) fail with the same error while S3 is down.
 - Followers cannot write a new lock either, so no election succeeds and there is no split brain. Serializable reads keep working on every node.
+- 2 s after its lease ended, if it still cannot renew, the leader steps down: it stops its peer server and `t4 run` exits with status 1, for its supervisor to restart it as a follower.
 
 **Recovery:**
-- When S3 becomes reachable again, the next renewal restores the lease and writes resume. Queued uploads resume automatically.
-- No manual intervention is needed.
+- An outage shorter than the lease: the next renewal restores the lease and writes resume. Queued uploads resume automatically.
+- A longer outage: once S3 is back, a follower takes over (about 7 s after the old leader stepped down) and the restarted old leader follows it.
+- No manual intervention is needed, provided a supervisor restarts `t4 run` when it exits.
 
 **Tested by:** `TestObjectStoreUnavailableWritesSucceed`, `TestObjectStoreUnavailableRecovery`
+
+### Only the leader loses S3
+
+**Scenario:** the leader cannot reach S3, while its followers can, for example a network fault on the leader's path to S3.
+
+**Outcome:** as in a full outage, the leader keeps serving until its lease ends, then stops serving and, 2 s later, steps down. Its followers no longer hear it, and about 7 s later one of them takes over through S3 and serves. An outage of the leader's path to S3 that outlasts its lease costs a failover, not an outage of the cluster.
+
+**Tested by:** `TestLeaderStepsDownWithoutObjectStorage`
 
 ---
 
@@ -137,7 +147,7 @@ A restart during the outage is also safe: with local data present, the node star
 
 1. The leader's lock renewals fail and it stops hearing its followers. Its lease falls back to 4 s after its last renewal, and it stops acknowledging writes and serving linearizable reads.
 2. 7 s after they last heard the leader, and once the lock has not been renewed for 6 s, followers race to write a new lock with `If-Match: <etag>`. Only one wins.
-3. The new leader begins serving. By then the old leader has already stopped serving. When it reaches S3 again, it sees the new lock and steps down.
+3. The new leader begins serving. By then the old leader has already stopped serving, and 2 s after its lease ended it steps down.
 4. The old leader's writes that were not acknowledged are dropped. A client retrying them gets an error, never a false success.
 
 The lease relies on clocks: any two nodes' clocks must differ by less than 2 s. NTP keeps them far closer.
