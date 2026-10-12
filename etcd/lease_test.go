@@ -2,6 +2,7 @@ package etcd_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,7 +12,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/t4db/t4"
 	t4etcd "github.com/t4db/t4/etcd"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // TestLeaseGrantConcurrentExplicitSameIDRejected exercises the v1 contract
@@ -124,4 +127,51 @@ func TestLeaseRevokeRacesDetachingPut(t *testing.T) {
 				t.Fatalf("after revoke raced an unleased put, /k = %v, want the unleased value", r.Kvs)
 			}
 		})
+}
+
+// TestLeaseGrantHeaderNotBehindLeader pins that a lease granted through a
+// follower reports a revision no older than writes the leader had already
+// acknowledged: a grant is ordered on the leader, and a header from the
+// follower's own, lagging state would place it before them.
+func TestLeaseGrantHeaderNotBehindLeader(t *testing.T) {
+	store := object.NewMem()
+	nodes := make([]*t4.Node, 2)
+	for i := range nodes {
+		peerAddr := freeAddr(t)
+		node, err := t4.Open(t4.Config{
+			DataDir:           t.TempDir(),
+			ObjectStore:       store,
+			NodeID:            fmt.Sprintf("node-%d", i),
+			PeerListenAddr:    peerAddr,
+			AdvertisePeerAddr: peerAddr,
+			// The leader acknowledges without the follower, which can lag.
+			FollowerWaitMode: "none",
+		})
+		if err != nil {
+			t.Fatalf("node %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = node.Close() })
+		nodes[i] = node
+	}
+	leader := waitForLeader(t, nodes, 10*time.Second)
+	follower := nodes[0]
+	if follower == leader {
+		follower = nodes[1]
+	}
+	srv := t4etcd.New(follower, nil, nil)
+	ctx := context.Background()
+	for i := range 200 {
+		rev, err := leader.Put(ctx, "/k", []byte(fmt.Sprint(i)), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := srv.LeaseGrant(ctx, &etcdserverpb.LeaseGrantRequest{TTL: 60})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Wire revisions are one above internal ones.
+		if g.Header.Revision < rev+1 {
+			t.Fatalf("LeaseGrant header revision %d is behind the acknowledged write at %d", g.Header.Revision, rev+1)
+		}
+	}
 }
