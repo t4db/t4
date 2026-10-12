@@ -9,6 +9,7 @@ import (
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 
 	"github.com/t4db/t4"
 )
@@ -89,6 +90,23 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 					WatchId:      -1,
 					Canceled:     true,
 					CancelReason: "reserved internal prefix is not watchable",
+				}}:
+				case <-ctx.Done():
+					return nil
+				}
+				continue
+			}
+			if cr.StartRevision < 0 {
+				// As etcd does: no revision below the first one exists, so
+				// the history asked for is reported as compacted rather than
+				// read as a watch from now.
+				select {
+				case sendCh <- []*etcdserverpb.WatchResponse{{
+					Header:       s.header(),
+					WatchId:      -1,
+					Created:      true,
+					Canceled:     true,
+					CancelReason: rpctypes.ErrCompacted.Error(),
 				}}:
 				case <-ctx.Done():
 					return nil

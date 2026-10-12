@@ -2,6 +2,7 @@ package etcd_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -610,6 +611,34 @@ func TestWatchAtCompactRevision(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for compacted signal below compact revision")
+	}
+}
+
+// TestWatchNegativeStartRevision pins etcd's answer to a watch from a
+// negative revision: it is created and canceled at once as compacted, not
+// turned into a watch from now that silently skips the history it asked for.
+func TestWatchNegativeStartRevision(t *testing.T) {
+	node, cli := newWatchNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := node.Put(ctx, "/k", []byte("v1"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	wch := cli.Watch(ctx, "/k", clientv3.WithRev(-5))
+	if _, err := node.Put(ctx, "/k", []byte("v2"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	select {
+	case wr, ok := <-wch:
+		if !ok {
+			t.Fatal("watch channel closed without a response")
+		}
+		if !wr.Canceled || len(wr.Events) != 0 || !errors.Is(wr.Err(), rpctypes.ErrCompacted) {
+			t.Fatalf("watch from revision -5: got %+v (err %v), want canceled as compacted", wr, wr.Err())
+		}
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for the watch to be canceled")
 	}
 }
 
