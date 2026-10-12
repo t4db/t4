@@ -288,3 +288,30 @@ func TestApplyRejectsUnknownOp(t *testing.T) {
 		}
 	}
 }
+
+// TestCompactNeverMovesBack checks that the compaction revision only grows. A
+// compaction to an earlier revision than the store is compacted to must change
+// nothing: the history below the current compaction revision is gone, and a
+// read there must fail rather than see what is left of it.
+func TestCompactNeverMovesBack(t *testing.T) {
+	s := openMem(t)
+	apply(t, s,
+		createEntry(1, "k", []byte("v1")),
+		updateEntry(2, "k", []byte("v2"), 1, 1),
+		updateEntry(3, "k", []byte("v3"), 1, 2),
+		updateEntry(4, "k", []byte("v4"), 1, 3),
+	)
+	apply(t, s, wal.Entry{Revision: 4, Term: 1, Op: wal.OpCompact, PrevRevision: 3})
+	apply(t, s, wal.Entry{Revision: 4, Term: 1, Op: wal.OpCompact, PrevRevision: 2})
+
+	if got := s.CompactRevision(); got != 3 {
+		t.Fatalf("CompactRevision after compacting to 3 then 2 = %d, want 3", got)
+	}
+	if _, err := s.GetAt("k", 2); !errors.Is(err, ErrCompacted) {
+		t.Fatalf("GetAt(k, 2) = %v, want ErrCompacted", err)
+	}
+	kv, err := s.GetAt("k", 3)
+	if err != nil || kv == nil || string(kv.Value) != "v3" {
+		t.Fatalf("GetAt(k, 3) = %v, %v, want v3", kv, err)
+	}
+}

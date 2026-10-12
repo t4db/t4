@@ -305,6 +305,7 @@ type Node struct {
 	sstSweepTerm           uint64                // term sstSweepMarks was collected under; guarded by checkpointMu
 	checkpointShutdownWait time.Duration         // how long graceful shutdown waits for an in-flight checkpoint
 	sstUploader            *istore.SSTUploader   // non-nil when ObjectStore is set; streams SSTs to S3
+	compactSubmitted       int64                 // highest compaction this leader submitted; guarded by mu
 	pebbleOpts             []istore.PebbleOption // options every Pebble this node opens uses
 	lastRevisionSampleUnix int64                 // unix nano timestamp of newest local revision/time sample
 	tracer                 trace.Tracer

@@ -783,6 +783,11 @@ func applyMetaOp(b *pebble.Batch, op wal.Op, key string, value []byte) error {
 }
 
 func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) error {
+	// The compaction revision only grows: the history below the current one
+	// is gone, so moving it back would let reads there see what is left of it.
+	if compactRev <= atomic.LoadInt64(&s.compactRev) {
+		return nil
+	}
 	if err := b.Set(metaCompactKey, encodeRev(compactRev), pebble.NoSync); err != nil {
 		return err
 	}

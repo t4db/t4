@@ -73,7 +73,8 @@ func TestConcurrentCompactPutRevisionUniqueness(t *testing.T) {
 					t.Errorf("compact-seed worker %d: %v", w, err)
 					return
 				}
-				if err := n.Compact(ctx, rev-1); err != nil {
+				// Another worker may have compacted past rev-1 already.
+				if err := n.Compact(ctx, rev-1); err != nil && !errors.Is(err, ErrCompacted) {
 					t.Errorf("Compact worker %d: %v", w, err)
 					return
 				}

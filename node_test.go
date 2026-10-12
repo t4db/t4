@@ -611,7 +611,9 @@ func TestNodeFlushAfterCompactDoesNotReuseWALSequence(t *testing.T) {
 	if _, err := n.Put(c, "k", []byte("v1"), 0); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if err := n.Compact(c, 1); err != nil {
+	// Two compactions in a row, each taking a WAL sequence but no
+	// revision. A compaction to 0 changes nothing, but etcd accepts it.
+	if err := n.Compact(c, 0); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
 	if err := n.Flush(); err != nil {
