@@ -138,7 +138,12 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 		case *etcdserverpb.WatchRequest_CancelRequest:
 			id := v.CancelRequest.WatchId
 			if w, ok := watches.LoadAndDelete(id); ok {
-				w.(*watchSubscription).cancel()
+				sub := w.(*watchSubscription)
+				sub.cancel()
+				// As etcd does, send nothing for the watch after Canceled:
+				// clientv3 closes the watch's channel on Canceled and panics
+				// on a later response. Its drain may be mid-send.
+				<-sub.drained
 				select {
 				case sendCh <- []*etcdserverpb.WatchResponse{{Header: s.header(), WatchId: id, Canceled: true}}:
 				case <-ctx.Done():
@@ -172,6 +177,10 @@ type watchSubscription struct {
 	// cancel tears down the drain goroutine and the upstream Node.Watch.
 	// Set by Watch once the subscription is registered on the stream.
 	cancel context.CancelFunc
+
+	// drained is closed when the drain goroutine exits, after which nothing
+	// more is sent for this watch.
+	drained chan struct{}
 
 	// progressReq carries on-demand progress requests from the stream's
 	// receive loop to the drain goroutine. Depth 1: a request already
@@ -231,6 +240,7 @@ func (s *Server) subscribeWatch(wctx context.Context, cr *etcdserverpb.WatchCrea
 		progressNotify: cr.ProgressNotify,
 		fragment:       cr.Fragment,
 		progressReq:    make(chan struct{}, 1),
+		drained:        make(chan struct{}),
 		startRev:       lastRev,
 	}, nil
 }
@@ -382,6 +392,7 @@ func (s *Server) sendOrCancelSlow(wctx context.Context, sendCh chan<- []*etcdser
 // WatchResponses sharing the same Header.Revision; all but the last carry
 // Fragment=true.
 func (s *Server) drainWatch(wctx context.Context, watchID int64, sub *watchSubscription, sendCh chan<- []*etcdserverpb.WatchResponse) {
+	defer close(sub.drained)
 	defer sub.cancel()
 	events, match, fragment := sub.events, sub.match, sub.fragment
 	var progressC <-chan time.Time

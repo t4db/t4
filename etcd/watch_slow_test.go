@@ -141,5 +141,6 @@ func testSubscription(cancel context.CancelFunc, events <-chan t4.Event) *watchS
 		match:       func(string) bool { return true },
 		cancel:      cancel,
 		progressReq: make(chan struct{}, 1),
+		drained:     make(chan struct{}),
 	}
 }

@@ -742,3 +742,73 @@ func TestWatchProgressAdvancesOnIdlePrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestWatchNothingAfterCancel pins that a canceled watch gets no response
+// after its Canceled one, as etcd guarantees. clientv3 closes the watch's
+// channel on Canceled and panics on a later response for it.
+func TestWatchNothingAfterCancel(t *testing.T) {
+	node, _ := newWatchNode(t)
+	conn, err := grpc.NewClient(startEtcdServer(t, node), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ctx.Err() == nil {
+			_, _ = node.Put(ctx, "/k", []byte("v"), 0)
+		}
+	}()
+	defer func() { cancel(); <-done }()
+
+	stream, err := etcdserverpb.NewWatchClient(conn).Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled := map[int64]bool{}
+	for range 200 {
+		if err := stream.Send(&etcdserverpb.WatchRequest{RequestUnion: &etcdserverpb.WatchRequest_CreateRequest{
+			CreateRequest: &etcdserverpb.WatchCreateRequest{Key: []byte("/k")},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		var id int64 = -1
+		for {
+			resp, err := stream.Recv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if canceled[resp.WatchId] {
+				t.Fatalf("watch %d got %+v after its Canceled response", resp.WatchId, resp)
+			}
+			if resp.Created {
+				id = resp.WatchId
+				continue
+			}
+			if resp.WatchId == id && len(resp.Events) > 0 {
+				break
+			}
+		}
+		if err := stream.Send(&etcdserverpb.WatchRequest{RequestUnion: &etcdserverpb.WatchRequest_CancelRequest{
+			CancelRequest: &etcdserverpb.WatchCancelRequest{WatchId: id},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		for !canceled[id] {
+			resp, err := stream.Recv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if canceled[resp.WatchId] {
+				t.Fatalf("watch %d got %+v after its Canceled response", resp.WatchId, resp)
+			}
+			if resp.Canceled {
+				canceled[resp.WatchId] = true
+			}
+		}
+	}
+}
