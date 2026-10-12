@@ -190,28 +190,36 @@ func (s *Server) collectLeaseKeys(ctx context.Context, leaseID int64, linearizab
 }
 
 // revokeLease deletes every key attached to leaseID and the lease record
-// itself in a single atomic transaction. Crash-safety: either every delete
-// commits to the WAL together or none of them do, so a leader crash during
-// revoke can never leave a "half-revoked" lease (record present but attached
-// keys missing, or vice versa).
+// itself in a single atomic transaction, and returns its revision.
+// Crash-safety: either every delete commits to the WAL together or none of
+// them do, so a leader crash during revoke can never leave a "half-revoked"
+// lease (record present but attached keys missing, or vice versa).
 //
-// Note: there is still a small race between collectLeaseKeys and the Txn
-// where a concurrent Put attaching a new key to leaseID could land. Etcd has
-// the same race; v1 accepts it.
-func (s *Server) revokeLease(ctx context.Context, leaseID int64) error {
-	keys, err := s.collectLeaseKeys(ctx, leaseID, true)
-	if err != nil {
-		return err
+// The keys are found before the transaction, so it deletes each only while
+// it is still attached, and retries otherwise: a key a concurrent write
+// detached from the lease survives. A key a concurrent Put attaches after the
+// keys were found is not deleted.
+func (s *Server) revokeLease(ctx context.Context, leaseID int64) (int64, error) {
+	for {
+		keys, err := s.collectLeaseKeys(ctx, leaseID, true)
+		if err != nil {
+			return 0, err
+		}
+		conds := make([]t4.TxnCondition, 0, len(keys))
+		ops := make([]t4.TxnOp, 0, len(keys)+1)
+		for _, key := range keys {
+			conds = append(conds, t4.TxnCondition{Key: key, Target: t4.TxnCondLease, Result: t4.TxnCondEqual, Lease: leaseID})
+			ops = append(ops, t4.TxnOp{Type: t4.TxnDelete, Key: key})
+		}
+		ops = append(ops, t4.TxnOp{Type: t4.TxnDelete, Key: leaseKey(leaseID)})
+		resp, err := s.node.Txn(ctx, t4.TxnRequest{Conditions: conds, Success: ops})
+		if err != nil {
+			return 0, err
+		}
+		if resp.Succeeded {
+			return resp.Revision, nil
+		}
 	}
-	ops := make([]t4.TxnOp, 0, len(keys)+1)
-	for _, key := range keys {
-		ops = append(ops, t4.TxnOp{Type: t4.TxnDelete, Key: key})
-	}
-	ops = append(ops, t4.TxnOp{Type: t4.TxnDelete, Key: leaseKey(leaseID)})
-	if _, err := s.node.Txn(ctx, t4.TxnRequest{Success: ops}); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (s *Server) maybeStartLeaseLoop() {
@@ -239,7 +247,7 @@ func (s *Server) leaseLoop() {
 		now := time.Now()
 		for _, rec := range leases {
 			if ttlRemaining(rec, now) == 0 {
-				_ = s.revokeLease(ctx, rec.ID)
+				_, _ = s.revokeLease(ctx, rec.ID)
 			}
 		}
 		cancel()
