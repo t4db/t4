@@ -73,29 +73,30 @@ The claim is **not** that every read is linearizable regardless of configuration
 
 ### Jepsen evidence
 
-The continuous evidence for the linearizability claim is the [Jepsen test suite](https://github.com/t4db/t4/tree/main/jepsen) (`jepsen/src/jepsen/t4/`).
-
-Two workloads, both defined in [`jepsen/src/jepsen/t4/core.clj`](https://github.com/t4db/t4/blob/main/jepsen/src/jepsen/t4/core.clj):
+The continuous evidence for the linearizability claim is the [Jepsen test suite](https://github.com/t4db/t4/tree/main/jepsen) (`jepsen/src/jepsen/t4/`), run against a five-node cluster sharing one S3 store. The workloads are defined in [`jepsen/src/jepsen/t4/core.clj`](https://github.com/t4db/t4/blob/main/jepsen/src/jepsen/t4/core.clj):
 
 - **`register`** — single-key CAS register (50% reads / 30% writes / 20% CAS). Knossos `cas-register` model.
 - **`multi-register`** — three keys driven through the etcd `Txn` API. Every write and CAS is a single Txn covering all three keys, committed in one WAL entry (one revision). The three-tuple `{:a v :b v :c v}` is modelled as a single `cas-register` value, so any non-atomic application would surface as a linearizability violation.
+- **`append`** and **`wr`** — Elle list-append and read-write register workloads over multi-key `Txn`s, checked for strict serializability.
+- **`watch`** — watchers served by different nodes resume short watches from the last revision they saw; all of them must observe the same sequence of values, with no event lost, duplicated or reordered.
+- **`set`** — CAS adds to a set in one key; every acknowledged add must be visible to every read that starts after it completes.
 
-Nemeses (the same for both workloads):
+Nemeses (the same for every workload):
 
 - `partition-halves` (random 2/3 split).
 - `kill` (kill+restart a random node).
 - `partition-s3` (isolate a node from S3 via iptables).
 
-Every PR that touches `jepsen/**` runs the smoke matrix (`partition-halves` × both workloads). The nightly workflow runs the full matrix (every nemesis × both workloads = 6 jobs). A release tag must cite the most recent green nightly Jepsen run — see [Releasing T4](releasing).
+Every PR runs a smoke matrix (`partition-halves` × `register`, `multi-register`, `append`). The nightly workflow and every release tag run the full matrix (every nemesis × every workload = 18 jobs); a release is not built until it passes.
+
+Jepsen is one of several suites. etcd's own robustness tests check linearizability and watch guarantees while nodes are killed, differential tests compare every response and revision with a real etcd, and Kubernetes' apiserver storage tests run against T4. See [Testing](/testing/) for what each suite covers and when it runs.
 
 ### What Jepsen does not prove (today)
 
-These are real properties of T4, but no Jepsen workload directly exercises them. They are covered by Go tests in this repo. Treat them as **claimed but Jepsen-untested**:
+- **Leases.** No Jepsen workload uses leases. Lease grant, revoke and expiry are exercised by etcd's robustness tests under process kills, by the differential tests against etcd, and by Go integration tests across a leader change, but nothing drives lease keepalive and revoke through a network partition.
+- **Long runs.** Each Jepsen job runs 60 seconds of traffic with three clients.
 
-- Watch ordering and replay across leader failover.
-- Lease keepalive / revoke under partition.
-
-Filing new Jepsen workloads for these is a v1.x follow-up.
+The full list of known gaps is on the [Testing](/testing/#known-gaps) page.
 
 ---
 
@@ -175,5 +176,5 @@ The leader cannot renew the lock, but it keeps hearing its followers, and none o
 - [Configuration reference](configuration) — `ReadConsistency`, `FollowerWaitMode`, `WALSyncUpload`
 - [Architecture](architecture) — CAP properties, follower replication, concurrency model
 - [Operations guide](operations) — Durability and recovery, network partitions
-- [Releasing T4](releasing) — release notes must cite the last green nightly Jepsen run
+- [Releasing T4](releasing) — what gates a release, including the full Jepsen matrix on the release commit
 - [Jepsen suite source](https://github.com/t4db/t4/tree/main/jepsen)
