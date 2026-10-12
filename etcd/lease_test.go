@@ -213,3 +213,36 @@ func TestLeaseGrantHeaderNotBehindLeader(t *testing.T) {
 		}
 	}
 }
+
+// TestLeaseGrantTTLBounds checks that grants follow etcd's TTL bounds: a TTL
+// below etcd's default minimum, zero and negative included, is raised to it,
+// and a TTL above etcd's maximum is refused. Kubernetes grants 1s leases, and
+// on etcd they last 2s.
+func TestLeaseGrantTTLBounds(t *testing.T) {
+	_, cli := newWatchNode(t)
+	lease := etcdserverpb.NewLeaseClient(cli.ActiveConnection())
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	for _, tc := range []struct{ ttl, want int64 }{{-5, 2}, {0, 2}, {1, 2}, {2, 2}, {3, 3}} {
+		resp, err := lease.LeaseGrant(ctx, &etcdserverpb.LeaseGrantRequest{TTL: tc.ttl})
+		if err != nil {
+			t.Fatalf("grant TTL %d: %v", tc.ttl, err)
+		}
+		if resp.TTL != tc.want {
+			t.Errorf("grant TTL %d: granted %d, want %d", tc.ttl, resp.TTL, tc.want)
+		}
+		ttl, err := lease.LeaseTimeToLive(ctx, &etcdserverpb.LeaseTimeToLiveRequest{ID: resp.ID})
+		if err != nil {
+			t.Fatalf("TimeToLive of TTL %d: %v", tc.ttl, err)
+		}
+		if ttl.GrantedTTL != tc.want {
+			t.Errorf("TimeToLive of TTL %d: granted %d, want %d", tc.ttl, ttl.GrantedTTL, tc.want)
+		}
+	}
+
+	_, err := lease.LeaseGrant(ctx, &etcdserverpb.LeaseGrantRequest{TTL: 9_000_000_001})
+	if status.Code(err) != codes.OutOfRange {
+		t.Fatalf("grant above the maximum TTL: got %v, want OutOfRange", err)
+	}
+}

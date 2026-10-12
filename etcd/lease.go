@@ -6,10 +6,18 @@ import (
 	"time"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/sysstate"
+)
+
+// etcd's lease TTL bounds, in seconds. etcd raises a shorter TTL to 1.5
+// election timeouts, rounded up: 2s with its default timeouts.
+const (
+	minLeaseTTL = 2
+	maxLeaseTTL = 9_000_000_000
 )
 
 // LeaseGrant creates or reserves a lease ID with a real expiry time.
@@ -18,8 +26,11 @@ import (
 // explicit ID are serialised by the leader's WAL: exactly one Create commits,
 // the rest return ErrKeyExists which surfaces as AlreadyExists.
 func (s *Server) LeaseGrant(ctx context.Context, r *etcdserverpb.LeaseGrantRequest) (*etcdserverpb.LeaseGrantResponse, error) {
-	if r.TTL <= 0 {
-		return nil, status.Error(codes.InvalidArgument, "lease TTL must be positive")
+	if r.TTL > maxLeaseTTL {
+		return nil, rpctypes.ErrGRPCLeaseTTLTooLarge
+	}
+	if r.TTL < minLeaseTTL {
+		r.TTL = minLeaseTTL
 	}
 	id := r.ID
 
