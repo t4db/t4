@@ -70,7 +70,7 @@ func (n *Node) MetaEnabledSync(ctx context.Context) (bool, error) {
 	if err != nil || known {
 		return on, err
 	}
-	if err := n.syncMetaWithLeader(ctx); err != nil {
+	if err := n.syncAppliedWithLeader(ctx); err != nil {
 		if isUnknownForwardOp(err) {
 			// The leader predates the meta keyspace (a rolling upgrade
 			// from v1.1), and such a leader only runs legacy databases.
@@ -369,7 +369,7 @@ func (n *Node) MetaList(prefix string) ([]MetaKV, error) {
 func (n *Node) LinearizableMetaGet(ctx context.Context, key string) ([]byte, bool, error) {
 	ctx, span := n.tracer.Start(ctx, "t4.meta_get")
 	defer span.End()
-	if err := n.syncMetaWithLeader(ctx); err != nil {
+	if err := n.syncAppliedWithLeader(ctx); err != nil {
 		span.RecordError(err)
 		return nil, false, err
 	}
@@ -380,17 +380,18 @@ func (n *Node) LinearizableMetaGet(ctx context.Context, key string) ([]byte, boo
 func (n *Node) LinearizableMetaList(ctx context.Context, prefix string) ([]MetaKV, error) {
 	ctx, span := n.tracer.Start(ctx, "t4.meta_list")
 	defer span.End()
-	if err := n.syncMetaWithLeader(ctx); err != nil {
+	if err := n.syncAppliedWithLeader(ctx); err != nil {
 		span.RecordError(err)
 		return nil, err
 	}
 	return n.MetaList(prefix)
 }
 
-// syncMetaWithLeader is the ReadIndex step for meta reads. Meta writes do not
-// advance the revision, so syncWithLeader's revision wait would not observe
-// them; this waits for the leader's applied WAL sequence instead.
-func (n *Node) syncMetaWithLeader(ctx context.Context) error {
+// syncAppliedWithLeader is the ReadIndex step for reads that must observe
+// entries taking no revision: meta writes, and compactions for reads at a
+// past revision. syncWithLeader's revision wait would not observe them; this
+// waits for the leader's applied WAL sequence instead.
+func (n *Node) syncAppliedWithLeader(ctx context.Context) error {
 	cli, err := n.readIndexClient()
 	if cli == nil || err != nil {
 		return err
@@ -400,10 +401,10 @@ func (n *Node) syncMetaWithLeader(ctx context.Context) error {
 		if isLeaderUnavailable(err) {
 			return ErrNoLeader
 		}
-		return fmt.Errorf("t4: meta read sync: %w", err)
+		return fmt.Errorf("t4: read sync: %w", err)
 	}
 	if err := n.waitForSequence(ctx, resp.Revision); err != nil {
-		return fmt.Errorf("t4: meta read sync: wait for local sequence %d: %w", resp.Revision, err)
+		return fmt.Errorf("t4: read sync: wait for local sequence %d: %w", resp.Revision, err)
 	}
 	return nil
 }

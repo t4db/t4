@@ -11,6 +11,7 @@ import (
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
+	"github.com/t4db/t4/internal/testhook"
 	"github.com/t4db/t4/internal/wal"
 )
 
@@ -49,6 +50,9 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				return nil
 			},
 			func(entries []wal.Entry) error {
+				if hook := testhook.BeforeFollowerApply.Load(); hook != nil {
+					(*hook)(entries)
+				}
 				if err := n.db.Load().Apply(entries); err != nil {
 					return err
 				}

@@ -3,7 +3,11 @@
 // them.
 package testhook
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+
+	"github.com/t4db/t4/internal/wal"
+)
 
 // LegacyNewDatabases makes nodes create new databases without the meta
 // keyspace, the way releases before it did. Tests use it to exercise the
@@ -20,3 +24,9 @@ var V1Leader atomic.Bool
 // meta mode of a new database, with the peer server already serving. Tests
 // use it to hold a leader in that window.
 var BeforeMetaGenesis atomic.Pointer[func()]
+
+// BeforeFollowerApply, if set, runs on a follower just before it applies a
+// batch the leader committed, after the follower has made it durable and
+// acknowledged it. Tests use it to hold a follower behind what its leader
+// acknowledged.
+var BeforeFollowerApply atomic.Pointer[func(entries []wal.Entry)]

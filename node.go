@@ -1209,6 +1209,34 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 	return nil
 }
 
+// syncForRead is the ReadIndex step of a linearizable read. A read at a past
+// revision also needs every compaction the leader acknowledged, and a
+// compaction takes no revision, so syncWithLeader's revision wait does not
+// observe it: such a read then also waits for the leader's applied WAL
+// sequence. It keeps the revision wait, which covers writes the leader has
+// assigned but not applied yet; the applied sequence alone does not, and a
+// read synced to less than other reads are could see an older state after
+// them. A read of the current state is not affected by compaction.
+func (n *Node) syncForRead(ctx context.Context, opts []ReadOption) error {
+	if err := n.syncWithLeader(ctx); err != nil {
+		return err
+	}
+	var o readOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if !o.hasRevision() {
+		return nil
+	}
+	err := n.syncAppliedWithLeader(ctx)
+	if isUnknownForwardOp(err) {
+		// The leader predates the applied-sequence read index (a rolling
+		// upgrade from v1.1): the revision wait is all it offers.
+		return nil
+	}
+	return err
+}
+
 // readIndexClient returns the client to ask for a read index. A nil client
 // with a nil error means this node is the leader or single-node and its local
 // state is already up to date.
@@ -1331,7 +1359,7 @@ func (n *Node) LinearizableRevision(ctx context.Context) (int64, error) {
 func (n *Node) LinearizableGet(ctx context.Context, key string, opts ...ReadOption) (*KeyValue, error) {
 	ctx, span := n.startSpan(ctx, "t4.get", key)
 	defer span.End()
-	if err := n.syncWithLeader(ctx); err != nil {
+	if err := n.syncForRead(ctx, opts); err != nil {
 		span.RecordError(err)
 		return nil, err
 	}
@@ -1342,7 +1370,7 @@ func (n *Node) LinearizableGet(ctx context.Context, key string, opts ...ReadOpti
 func (n *Node) LinearizableExists(ctx context.Context, key string, opts ...ReadOption) (bool, error) {
 	ctx, span := n.startSpan(ctx, "t4.exists", key)
 	defer span.End()
-	if err := n.syncWithLeader(ctx); err != nil {
+	if err := n.syncForRead(ctx, opts); err != nil {
 		span.RecordError(err)
 		return false, err
 	}
@@ -1354,7 +1382,7 @@ func (n *Node) LinearizableExists(ctx context.Context, key string, opts ...ReadO
 func (n *Node) LinearizableList(ctx context.Context, prefix string, opts ...ReadOption) ([]*KeyValue, error) {
 	ctx, span := n.startSpan(ctx, "t4.list", prefix)
 	defer span.End()
-	if err := n.syncWithLeader(ctx); err != nil {
+	if err := n.syncForRead(ctx, opts); err != nil {
 		span.RecordError(err)
 		return nil, err
 	}
@@ -1366,7 +1394,7 @@ func (n *Node) LinearizableList(ctx context.Context, prefix string, opts ...Read
 func (n *Node) LinearizableCount(ctx context.Context, prefix string, opts ...ReadOption) (int64, error) {
 	ctx, span := n.startSpan(ctx, "t4.count", prefix)
 	defer span.End()
-	if err := n.syncWithLeader(ctx); err != nil {
+	if err := n.syncForRead(ctx, opts); err != nil {
 		span.RecordError(err)
 		return 0, err
 	}
