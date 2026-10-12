@@ -252,13 +252,14 @@ type Node struct {
 	lockObjectStoreComplete atomic.Bool
 
 	entriesSinceCheckpoint int64
-	checkpointTriggerC     chan struct{}       // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
-	checkpointMu           sync.Mutex          // serializes checkpoints and checkpoint GC; taken before fenceMu
-	sstSweepMarks          map[string]struct{} // SSTs the last sweep found unreferenced; guarded by checkpointMu
-	sstSweepTerm           uint64              // term sstSweepMarks was collected under; guarded by checkpointMu
-	checkpointShutdownWait time.Duration       // how long graceful shutdown waits for an in-flight checkpoint
-	sstUploader            *istore.SSTUploader // non-nil when ObjectStore is set; streams SSTs to S3
-	lastRevisionSampleUnix int64               // unix nano timestamp of newest local revision/time sample
+	checkpointTriggerC     chan struct{}         // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
+	checkpointMu           sync.Mutex            // serializes checkpoints and checkpoint GC; taken before fenceMu
+	sstSweepMarks          map[string]struct{}   // SSTs the last sweep found unreferenced; guarded by checkpointMu
+	sstSweepTerm           uint64                // term sstSweepMarks was collected under; guarded by checkpointMu
+	checkpointShutdownWait time.Duration         // how long graceful shutdown waits for an in-flight checkpoint
+	sstUploader            *istore.SSTUploader   // non-nil when ObjectStore is set; streams SSTs to S3
+	pebbleOpts             []istore.PebbleOption // options every Pebble this node opens uses
+	lastRevisionSampleUnix int64                 // unix nano timestamp of newest local revision/time sample
 	tracer                 trace.Tracer
 	tracing                bool // Config.TracerProvider was set
 
@@ -685,6 +686,9 @@ func Open(cfg Config) (*Node, error) {
 				}
 			}
 			_ = newRev // term drives WAL open; startRev is read from Pebble below
+			if sstUp != nil {
+				sstUp.Reset()
+			}
 			freshDB, rerr := istore.Open(pebbleDir, log, pebbleOpts...)
 			if rerr != nil {
 				w.Close()
@@ -747,6 +751,7 @@ func Open(cfg Config) (*Node, error) {
 		pending:     make(map[string]pendingKV),
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,
+		pebbleOpts:  pebbleOpts,
 		fenceReqC:   make(chan struct{}, 1),
 	}
 	n.fence.done = make(chan struct{})
