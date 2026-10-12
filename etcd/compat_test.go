@@ -12,6 +12,7 @@ package etcd_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -318,7 +319,9 @@ func TestCompatKVCompactError(t *testing.T) {
 
 // TestCompatKVCompactIdempotent verifies that compacting the same revision
 // twice succeeds without error.
-func TestCompatKVCompactIdempotent(t *testing.T) {
+// TestCompatKVCompactRepeatedIsCompacted: like etcd, a compaction at the
+// revision the store is already compacted to is refused as compacted.
+func TestCompatKVCompactRepeatedIsCompacted(t *testing.T) {
 	node, cli := newCompatNode(t)
 	ctx := context.Background()
 
@@ -328,8 +331,8 @@ func TestCompatKVCompactIdempotent(t *testing.T) {
 	if err := node.Compact(ctx, compactRev); err != nil {
 		t.Fatalf("first Compact(%d): %v", compactRev, err)
 	}
-	if err := node.Compact(ctx, compactRev); err != nil {
-		t.Fatalf("second Compact(%d) (idempotent): %v", compactRev, err)
+	if err := node.Compact(ctx, compactRev); !errors.Is(err, t4.ErrCompacted) {
+		t.Fatalf("second Compact(%d) = %v, want ErrCompacted", compactRev, err)
 	}
 }
 

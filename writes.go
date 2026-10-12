@@ -1086,7 +1086,9 @@ func (n *Node) clearPendingBatch(batch []*writeReq, err error) {
 	}
 }
 
-// Compact removes log entries at or below revision.
+// Compact removes log entries at or below revision. Like etcd, it returns
+// ErrFutureRevision for a revision not reached yet and ErrCompacted for one at
+// or below the revision the store is compacted to.
 func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 	ctx, span := n.tracer.Start(ctx, "t4.compact",
 		trace.WithAttributes(attribute.Int64("t4.revision", revision)))
@@ -1109,6 +1111,19 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 		n.mu.Unlock()
 		return ErrClosed
 	}
+	// Like etcd, a revision is reached once applied: a write assigned a
+	// revision may still fail, and the revision then never exists.
+	if revision > n.db.Load().CurrentRevision() {
+		n.mu.Unlock()
+		return ErrFutureRevision
+	}
+	// A compaction submitted earlier counts even if its caller never learned
+	// whether it applied.
+	if floor := max(n.db.Load().CompactRevision(), n.compactSubmitted); floor > 0 && revision <= floor {
+		n.mu.Unlock()
+		return ErrCompacted
+	}
+	n.compactSubmitted = revision
 	e := wal.Entry{
 		Revision: n.nextRev, Term: n.term, Op: wal.OpCompact,
 		PrevRevision: revision,
@@ -1132,6 +1147,14 @@ func encodeErr(err error) (code, msg string) {
 	if errors.Is(err, ErrKeyExists) {
 		return "key_exists", ""
 	}
+	// These carry the message too: a node of an earlier release does not
+	// know the codes and reports the message instead.
+	if errors.Is(err, ErrCompacted) {
+		return "compacted", err.Error()
+	}
+	if errors.Is(err, ErrFutureRevision) {
+		return "future_revision", err.Error()
+	}
 	return "error", err.Error()
 }
 
@@ -1141,6 +1164,10 @@ func decodeErr(code, msg string) error {
 		return nil
 	case "key_exists":
 		return ErrKeyExists
+	case "compacted":
+		return ErrCompacted
+	case "future_revision":
+		return ErrFutureRevision
 	default:
 		return errors.New(msg)
 	}
