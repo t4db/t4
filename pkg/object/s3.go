@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -20,6 +21,15 @@ const (
 	defaultS3EndpointRegion = "us-east-1"
 	defaultAWSS3Endpoint    = "s3.amazonaws.com"
 )
+
+// s3ResponseHeaderTimeout is how long a request waits for S3 to start
+// answering once it is sent, before the client gives up on it and retries.
+// minio-go waits a minute. A request on a connection that silently stopped
+// carrying traffic holds whatever waits on it that long, and a leader that
+// flushes each write to S3 stops accepting writes meanwhile. S3 answers
+// within this even for a large upload: the wait starts once the body is
+// sent, and CompleteMultipartUpload answers before it finishes its work.
+var s3ResponseHeaderTimeout = 15 * time.Second
 
 // S3Store implements Store backed by an S3-compatible bucket via minio-go.
 type S3Store struct {
@@ -137,13 +147,11 @@ func s3MinioOptions(cfg S3Config) (*minio.Options, error) {
 		Region: effectiveS3Region(cfg),
 	}
 
-	if cfg.CABundle != "" {
-		transport, err := s3TransportWithCABundle(cfg.CABundle)
-		if err != nil {
-			return nil, err
-		}
-		opts.Transport = transport
+	transport, err := s3Transport(secure, cfg.CABundle)
+	if err != nil {
+		return nil, err
 	}
+	opts.Transport = transport
 
 	return opts, nil
 }
@@ -174,11 +182,20 @@ func s3EndpointSecure(endpoint string) bool {
 	return strings.HasPrefix(endpoint, "https://")
 }
 
-// s3TransportWithCABundle returns an *http.Transport whose TLS config trusts
+// s3Transport returns minio-go's default transport with the response wait
+// bounded by s3ResponseHeaderTimeout. With a CA bundle, its TLS config trusts
 // only the CA roots in caBundlePath (the system pool is intentionally omitted
 // so the operator's stated CA is the single source of truth for the S3
 // endpoint).
-func s3TransportWithCABundle(caBundlePath string) (*http.Transport, error) {
+func s3Transport(secure bool, caBundlePath string) (*http.Transport, error) {
+	tr, err := minio.DefaultTransport(secure)
+	if err != nil {
+		return nil, fmt.Errorf("object/s3: transport: %w", err)
+	}
+	tr.ResponseHeaderTimeout = s3ResponseHeaderTimeout
+	if caBundlePath == "" {
+		return tr, nil
+	}
 	pemBytes, err := os.ReadFile(caBundlePath)
 	if err != nil {
 		return nil, fmt.Errorf("object/s3: read CA bundle: %w", err)
@@ -187,12 +204,11 @@ func s3TransportWithCABundle(caBundlePath string) (*http.Transport, error) {
 	if !pool.AppendCertsFromPEM(pemBytes) {
 		return nil, fmt.Errorf("object/s3: CA bundle %q contains no PEM certificates", caBundlePath)
 	}
-	return &http.Transport{
-		TLSClientConfig: &tls.Config{
-			RootCAs:    pool,
-			MinVersion: tls.VersionTLS12,
-		},
-	}, nil
+	tr.TLSClientConfig = &tls.Config{
+		RootCAs:    pool,
+		MinVersion: tls.VersionTLS12,
+	}
+	return tr, nil
 }
 
 func effectiveS3Region(cfg S3Config) string {
