@@ -38,6 +38,7 @@ type SSTUploader struct {
 	mu        sync.RWMutex
 	local     map[string]string // filename → "sst/{hash16}/{name}" in this store
 	inherited map[string]string // filename → s3 key in ancestor store
+	gen       uint64            // bumped by Reset; an upload started before it is not registered
 
 	uploadC chan string        // local file paths queued for upload
 	waitC   chan chan struct{} // Wait requests to Start's loop
@@ -134,6 +135,21 @@ func (u *SSTUploader) SetInherited(filenames map[string]string) {
 	for name, key := range filenames {
 		u.inherited[name] = key
 	}
+}
+
+// Reset forgets every SST recorded so far, for a node whose Pebble directory
+// was replaced by a restored checkpoint. The registry is keyed by file name,
+// and the restored tables may reuse the names of tables they replaced: Pebble
+// instances name tables independently. A checkpoint trusting an entry for a
+// replaced table would reference the wrong content under that name, and no
+// node could restore from it. An upload in flight when Reset runs is not
+// registered. Call it before opening the new Pebble, and Reconcile after.
+func (u *SSTUploader) Reset() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	clear(u.local)
+	clear(u.inherited)
+	u.gen++
 }
 
 // Reconcile walks pebbleDir and uploads any SST files not already in the
@@ -299,6 +315,7 @@ func (u *SSTUploader) uploadOne(ctx context.Context, path string) error {
 
 	u.mu.RLock()
 	_, exists := u.local[name]
+	gen := u.gen
 	u.mu.RUnlock()
 	if exists {
 		return nil
@@ -326,6 +343,11 @@ func (u *SSTUploader) uploadOne(ctx context.Context, path string) error {
 	}
 
 	u.mu.Lock()
+	if u.gen != gen {
+		// Reset ran meanwhile: the file uploaded may be a replaced table.
+		u.mu.Unlock()
+		return nil
+	}
 	u.local[name] = s3Key
 	u.mu.Unlock()
 	// Pebble may have deleted the table while it uploaded, firing
