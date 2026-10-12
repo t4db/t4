@@ -205,7 +205,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 	stepDown := func(reason, why string) {
 		n.log.Errorf("t4: leader watch (%s): %s — stepping down", reason, why)
 		n.fenceMu.Lock()
-		n.cancelBg()
+		n.stop(fmt.Errorf("t4: stepped down as leader: %s", why))
 		n.fenceMu.Unlock()
 		if grpcSrv := n.peerGRPC; grpcSrv != nil {
 			grpcSrv.Stop()
@@ -759,7 +759,7 @@ func (n *Node) stepDownOnFatalCommitError() {
 		return
 	}
 	n.log.Warnf("t4: commit loop exited with fatal error — stepping down so followers can take over")
-	n.cancelBg()
+	n.stop(errors.New("t4: stepped down as leader: commit loop failed"))
 	n.mu.Lock()
 	grpcSrv := n.peerGRPC
 	n.mu.Unlock()

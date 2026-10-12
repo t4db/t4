@@ -461,11 +461,17 @@ t4 run --metrics-addr 0.0.0.0:9090 ...
 
 ### Endpoints
 
-| Path           | Description                               |
-|----------------|-------------------------------------------|
-| `GET /metrics` | Prometheus metrics                        |
-| `GET /healthz` | 200 once the node has started             |
-| `GET /readyz`  | 200 when the node is ready to serve reads |
+| Path           | Description                                                                  |
+|----------------|------------------------------------------------------------------------------|
+| `GET /metrics` | Prometheus metrics                                                           |
+| `GET /healthz` | 200 once the node has started; 503 once it has stopped and must be restarted |
+| `GET /readyz`  | 200 when the node is ready to serve reads                                    |
+
+A node stops on its own when it cannot go on without a restart: a leader whose
+lock another node took over, or a follower that cannot catch up with its
+leader. `t4 run` then exits with status 1 and logs why; restarted, the node
+rejoins as a follower. Run it under a supervisor that restarts it, such as
+Kubernetes or systemd with `Restart=on-failure`.
 
 ### Inspecting S3 storage state
 

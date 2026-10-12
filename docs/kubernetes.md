@@ -355,7 +355,7 @@ garbage collector works harder as memory fills instead of letting the container 
 
 | Endpoint | Meaning |
 |---|---|
-| `GET /healthz` | Node has started and is reachable |
+| `GET /healthz` | Node has started and is reachable; 503 once it has stopped on its own and must be restarted (`t4 run` also exits) |
 | `GET /readyz` | Node is ready to serve reads |
 | `GET /healthz/leader` | Returns 200 only if this pod is the current leader (useful for proxy routing) |
 

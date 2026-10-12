@@ -317,6 +317,13 @@ type Node struct {
 	bgCtx    context.Context
 	cancelBg context.CancelFunc
 
+	// stopped is closed once the node stops serving, by Close or on its own
+	// (see Done). stopErr says why it stopped on its own; it is written
+	// before stopped is closed and never after.
+	stopped  chan struct{}
+	stopOnce sync.Once
+	stopErr  error
+
 	closeOnce sync.Once
 	closed    atomic.Bool
 	bgWg      sync.WaitGroup // tracks long-running background goroutines (followLoop, checkpointLoop)
@@ -793,6 +800,7 @@ func Open(cfg Config) (*Node, error) {
 		wal:         w,
 		bgCtx:       bgCtx,
 		cancelBg:    bgCancel,
+		stopped:     make(chan struct{}),
 		nextRev:     db.CurrentRevision(),
 		nextSeq:     nextSeq,
 		pending:     make(map[string]pendingKV),
@@ -1129,8 +1137,38 @@ func (n *Node) Close() error {
 		if dberr := n.db.Load().Close(); dberr != nil {
 			err = dberr
 		}
+		n.stopOnce.Do(func() { close(n.stopped) })
 	})
 	return err
+}
+
+// Done returns a channel that is closed once the node has stopped serving,
+// by Close or on its own. A node stops on its own when it cannot go on
+// without a restart: a leader whose lock another node took over or whose
+// commit loop failed, or a follower that cannot apply what its leader sends
+// or catch up with it. Err then says why. Whatever runs the node should
+// Close it and open it again, which brings it back as a follower.
+func (n *Node) Done() <-chan struct{} { return n.stopped }
+
+// Err returns why the node stopped on its own, or nil if it is serving or was
+// closed.
+func (n *Node) Err() error {
+	select {
+	case <-n.stopped:
+		return n.stopErr
+	default:
+		return nil
+	}
+}
+
+// stop records that the node stops on its own because of err and cancels its
+// background work. The first reason recorded wins.
+func (n *Node) stop(err error) {
+	n.stopOnce.Do(func() {
+		n.stopErr = err
+		close(n.stopped)
+	})
+	n.cancelBg()
 }
 
 // ── Read path (all roles serve locally) ──────────────────────────────────────

@@ -74,7 +74,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			metrics.FollowerResyncsTotal.WithLabelValues("stream_gap").Inc()
 			if n.cfg.ObjectStore == nil {
 				n.log.Errorf("t4: follower resync required but no object store — restart node")
-				n.cancelBg()
+				n.stop(errors.New("t4: follower fell behind the leader's buffer and has no object store to catch up from"))
 				return
 			}
 			// Ring buffer miss: the follower has been offline long enough that
@@ -84,7 +84,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			n.log.Warnf("t4: follower resync required — restoring from checkpoint")
 			if cpErr := n.resyncFromCheckpoint(bgCtx); cpErr != nil {
 				n.log.Errorf("t4: follower in-place resync failed: %v — cancelling", cpErr)
-				n.cancelBg()
+				n.stop(fmt.Errorf("t4: follower resync from checkpoint: %w", cpErr))
 				return
 			}
 			reCtx, reCancel := context.WithTimeout(bgCtx, 5*time.Minute)
@@ -111,7 +111,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 
 		if errors.Is(err, wal.ErrUnknownOp) {
 			n.log.Errorf("t4: leader sent a WAL entry this binary cannot apply — upgrade this node; stopping: %v", err)
-			n.cancelBg()
+			n.stop(fmt.Errorf("t4: cannot apply the leader's WAL, upgrade this node: %w", err))
 			return
 		}
 

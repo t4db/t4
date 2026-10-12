@@ -308,11 +308,18 @@ func runCmd() *cobra.Command {
 
 			quit := make(chan os.Signal, 1)
 			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-			sig := <-quit
-			logrus.WithField("signal", sig.String()).Info("shutdown signal received")
-			srv.GracefulStop()
-			logrus.Info("gRPC server stopped")
-			return nil
+			select {
+			case sig := <-quit:
+				logrus.WithField("signal", sig.String()).Info("shutdown signal received")
+				srv.GracefulStop()
+				logrus.Info("gRPC server stopped")
+				return nil
+			case <-node.Done():
+				// The node cannot serve again without a restart: exit so
+				// that whatever runs t4 starts it again, as a follower.
+				srv.Stop()
+				return fmt.Errorf("node stopped: %w", node.Err())
+			}
 		},
 	}
 
@@ -700,7 +707,12 @@ func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled 
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		select {
+		case <-node.Done():
+			http.Error(w, "node stopped", http.StatusServiceUnavailable)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
 	})
 	mux.HandleFunc("/healthz/leader", func(w http.ResponseWriter, _ *http.Request) {
 		if node.IsLeader() {
