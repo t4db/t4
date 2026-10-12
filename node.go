@@ -191,6 +191,12 @@ type Node struct {
 	// on the write path so that in-flight entries have distinct revisions.
 	nextRev int64
 
+	// sharedRev is the highest revision of a batch this leader has sent
+	// followers as committed. A follower may apply and serve it before this
+	// leader has its ACKs and applies it, so a linearizable read here must
+	// wait until this node has applied it too.
+	sharedRev atomic.Int64
+
 	// nextSeq is the last WAL/peer-stream identity committed by this node.
 	// The commit loop assigns IDs immediately before WAL append and advances it
 	// only after successful apply, so canceled requests cannot create holes.
@@ -1093,7 +1099,11 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 		}
 		// Leader or single node: local state is current only while a
 		// leader is sure it still is one.
-		return n.checkLease()
+		if err := n.checkLease(); err != nil {
+			return err
+		}
+		// The leader's read index: what followers may already serve.
+		return n.WaitForRevision(ctx, n.sharedRev.Load())
 	}
 	resp, err := cli.ForwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardGetRevision})
 	if err != nil {

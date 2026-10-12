@@ -106,6 +106,9 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.leasePeers.Store(peerSrv)
 	n.termStartSeq.Store(nextSeq)
 	n.fenceSeq.Store(-1)
+	// Followers have nothing from this term yet; what they hold from earlier
+	// ones this node has applied.
+	n.sharedRev.Store(0)
 	// A term starts with the flag clear, in the lock (TakeOver and
 	// TryAcquire never set it) and here.
 	n.objectStoreComplete.Store(false)
@@ -539,6 +542,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 
 			startRev := batch[0].entry.Sequence()
 			maxRev := batch[len(batch)-1].entry.Sequence()
+			n.sharedRev.Store(batch[len(batch)-1].entry.Revision)
 			n.peerSrv.BroadcastCommit(startRev, maxRev)
 
 			// Wait for follower ACKs according to the configured policy.
