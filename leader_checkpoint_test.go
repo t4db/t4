@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
+
 	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/pkg/object"
@@ -180,7 +182,7 @@ func (s *manifestStore) manifestSeqs() []int64 {
 	return append([]int64(nil), s.seqs...)
 }
 
-func openCheckpointTestNode(t *testing.T, store object.Store) *Node {
+func openCheckpointTestNode(t *testing.T, store object.Store, opts ...func(*pebble.Options)) *Node {
 	t.Helper()
 	walSyncUpload := false
 	n, err := Open(Config{
@@ -188,6 +190,7 @@ func openCheckpointTestNode(t *testing.T, store object.Store) *Node {
 		ObjectStore:        store,
 		WALSyncUpload:      &walSyncUpload,
 		CheckpointInterval: time.Hour, // keep the ticker out of the way
+		PebbleOptions:      opts,
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
