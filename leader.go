@@ -212,6 +212,20 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		}
 	}
 
+	// failed handles a renewal that could not reach object storage. Once
+	// the lease has ended too, this leader serves nothing, yet followers
+	// that still hear it never take over: step down so that one that can
+	// reach object storage does. It waits a renewal interval past the end
+	// of the lease first, so that one failed renewal right when the lease
+	// shortens (leaving slow mode) is retried rather than ending the term.
+	failed := func(reason string, err error) bool {
+		if now := time.Now(); now.Before(n.leaseDeadline(now).Add(fastRenewInterval)) {
+			return true
+		}
+		stepDown(reason, fmt.Sprintf("lease ended and the lock cannot be renewed: %v", err))
+		return false
+	}
+
 	// renew writes the lock once; it returns false after stepping down. It
 	// does not take fenceMu: writes waiting on follower acknowledgements
 	// must not delay it. Safety comes from the lease, which every write
@@ -230,7 +244,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		cancel()
 		if err != nil {
 			n.log.Warnf("t4: leader watch (%s): read lock: %v", reason, err)
-			return true // transient; the lease lapses if this persists
+			return failed(reason, err)
 		}
 		if rec == nil || rec.Term != term || rec.NodeID != n.cfg.NodeID {
 			stepDown(reason, fmt.Sprintf("lock superseded (current: %+v)", rec))
@@ -263,7 +277,7 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		}
 		if err != nil {
 			n.log.Warnf("t4: leader watch (%s): renew lock: %v", reason, err)
-			return true
+			return failed(reason, err)
 		}
 		n.extendLease(start, slow)
 		n.flagWritten(complete)
