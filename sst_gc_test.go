@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/pebble"
+
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -19,7 +21,11 @@ import (
 // stayed in the bucket forever.
 func TestSSTGCRemovesUncheckpointedSSTs(t *testing.T) {
 	store := object.NewMem()
-	n := openCheckpointTestNode(t, store)
+	// Pebble compacts only when the test says so. Otherwise it can compact
+	// the flushed tables away before the uploader reads them, or compact a
+	// table the last rounds flushed away too late for the two sweeps it
+	// takes to delete it.
+	n := openCheckpointTestNode(t, store, func(o *pebble.Options) { o.DisableAutomaticCompactions = true })
 	ctx := context.Background()
 	db := n.db.Load().Pebble()
 
