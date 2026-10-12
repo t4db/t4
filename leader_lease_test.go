@@ -166,25 +166,27 @@ func TestDeposedLeaderStopsServing(t *testing.T) {
 	if kv, err := leader.LinearizableGet(wctx, "/k"); err == nil {
 		t.Fatalf("deposed leader served a linearizable read (%q) after being replaced", kv.Value)
 	}
-	// Conditional writes that fail are answered from local state too.
-	if _, err := leader.Create(wctx, "/k", []byte("x"), 0); !errors.Is(err, ErrNoLeader) {
+	// Conditional writes that fail are answered from local state too. Once
+	// the deposed leader has stepped down, it refuses with ErrClosed.
+	refused := func(err error) bool { return errors.Is(err, ErrNoLeader) || errors.Is(err, ErrClosed) }
+	if _, err := leader.Create(wctx, "/k", []byte("x"), 0); !refused(err) {
 		t.Fatalf("deposed leader answered Create on an existing key with %v, want ErrNoLeader", err)
 	}
-	if _, _, _, err := leader.Update(wctx, "/k", []byte("x"), rev+100, 0); !errors.Is(err, ErrNoLeader) {
+	if _, _, _, err := leader.Update(wctx, "/k", []byte("x"), rev+100, 0); !refused(err) {
 		t.Fatalf("deposed leader answered a mismatched Update with %v, want ErrNoLeader", err)
 	}
-	if _, err := leader.Delete(wctx, "/missing"); !errors.Is(err, ErrNoLeader) {
+	if _, err := leader.Delete(wctx, "/missing"); !refused(err) {
 		t.Fatalf("deposed leader answered Delete of a missing key with %v, want ErrNoLeader", err)
 	}
 	failing := TxnRequest{Conditions: []TxnCondition{{Key: "/k", Target: TxnCondVersion, Result: TxnCondEqual, Version: 99}}}
-	if _, err := leader.Txn(wctx, failing); !errors.Is(err, ErrNoLeader) {
+	if _, err := leader.Txn(wctx, failing); !refused(err) {
 		t.Fatalf("deposed leader answered a failing Txn with %v, want ErrNoLeader", err)
 	}
 	// The meta keyspace has its own write and read paths.
-	if err := leader.MetaPut(wctx, "/meta-k", []byte("x")); !errors.Is(err, ErrNoLeader) {
+	if err := leader.MetaPut(wctx, "/meta-k", []byte("x")); !refused(err) {
 		t.Fatalf("deposed leader answered MetaPut with %v, want ErrNoLeader", err)
 	}
-	if _, _, err := leader.LinearizableMetaGet(wctx, "/meta-k"); !errors.Is(err, ErrNoLeader) {
+	if _, _, err := leader.LinearizableMetaGet(wctx, "/meta-k"); !refused(err) {
 		t.Fatalf("deposed leader answered LinearizableMetaGet with %v, want ErrNoLeader", err)
 	}
 }
