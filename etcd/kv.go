@@ -263,17 +263,16 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 				resp.PrevKvs = []*mvccpb.KeyValue{kvToProto(prev)}
 			}
 		}
-		newRev, err := s.node.Delete(ctx, key)
+		// A txn, not Node.Delete: when the key is absent only because a
+		// write not yet committed deleted it, the txn answers once that
+		// write commits, at a revision where the key is absent.
+		txnResp, err := s.node.Txn(ctx, t4.TxnRequest{Success: []t4.TxnOp{{Type: t4.TxnDelete, Key: key}}})
 		if err != nil {
 			return nil, kvError(err)
 		}
-		if newRev > 0 {
-			resp.Header = s.headerAt(newRev)
+		resp.Header = s.headerAt(txnResp.Revision)
+		if _, ok := txnResp.DeletedKeys[key]; ok {
 			resp.Deleted = 1
-		} else {
-			// Key didn't exist — no commit. Return current revision so the
-			// client sees the cluster state at the moment of the no-op.
-			resp.Header = s.header()
 		}
 		return resp, nil
 	}
