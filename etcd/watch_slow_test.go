@@ -121,9 +121,13 @@ func TestDrainWatchTimeoutDisabled(t *testing.T) {
 	}
 
 	// Draining sendCh lets drainWatch's flush succeed, after which it sits
-	// in the outer select waiting for more events. Closing events stops it.
+	// in the outer select waiting for more events. Closing events stops it,
+	// once it has sent the watch's cancellation.
 	<-sendCh
 	close(events)
+	if run := <-sendCh; !run[0].Canceled {
+		t.Fatalf("got %+v after events closed, want the watch canceled", run[0])
+	}
 
 	select {
 	case <-done:

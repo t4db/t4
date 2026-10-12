@@ -176,7 +176,9 @@ LinearizableCount(ctx context.Context, prefix string) (int64, error)
 // Watch streams events for keys matching prefix using etcd semantics:
 // startRev=0 means start from the current revision (no history replay),
 // startRev=N means replay events from revision N (inclusive).
-// The returned channel is closed when ctx is cancelled or the node shuts down.
+// The returned channel is closed when ctx is cancelled, the node shuts down,
+// or a follower replaces its local store from a checkpoint to catch up; watch
+// again from the revision after the last one received.
 Watch(ctx context.Context, prefix string, startRev int64) (<-chan Event, error)
 
 // WithPrevKV requests previous key/value data on update and delete events.
