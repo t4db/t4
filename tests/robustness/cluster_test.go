@@ -92,10 +92,19 @@ type node struct {
 	clientAddr string
 	args       []string
 	logPath    string
+	// peerProxy fronts the node's peer listener: peers reach the node
+	// through it. s3Proxy is the node's only way to the object store.
+	peerProxy, s3Proxy *proxy
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
 	exited chan struct{}
+	// down is set once the test stops the node for good, so that it is not
+	// restarted.
+	down bool
+	// restarts counts the times the node exited on its own and was
+	// restarted.
+	restarts int
 }
 
 func newCluster(t *testing.T, bin string, size int, s3 *s3Config) *cluster {
@@ -119,10 +128,13 @@ func newCluster(t *testing.T, bin string, size int, s3 *s3Config) *cluster {
 		}
 		if s3 != nil {
 			peer := freeAddr(t)
+			n.peerProxy = newProxy(t, peer)
+			scheme, host, _ := strings.Cut(s3.endpoint, "://")
+			n.s3Proxy = newProxy(t, host)
 			n.args = append(n.args,
 				"--peer-listen", peer,
-				"--advertise-peer", peer,
-				"--s3-endpoint", s3.endpoint,
+				"--advertise-peer", n.peerProxy.addr(),
+				"--s3-endpoint", scheme+"://"+n.s3Proxy.addr(),
 				"--s3-region", s3.region,
 				"--s3-bucket", s3.bucket,
 				"--s3-prefix", prefix,
@@ -140,6 +152,9 @@ func newCluster(t *testing.T, bin string, size int, s3 *s3Config) *cluster {
 	}
 	t.Cleanup(func() {
 		for _, n := range c.nodes {
+			n.mu.Lock()
+			n.down = true
+			n.mu.Unlock()
 			n.kill()
 		}
 		if t.Failed() {
@@ -220,9 +235,34 @@ func (n *node) start(bin string) error {
 		_ = cmd.Wait()
 		_ = logFile.Close()
 		close(exited)
+		n.restartIfExited(bin, cmd)
 	}()
 	n.cmd, n.exited = cmd, exited
 	return nil
+}
+
+// restartIfExited restarts the node if cmd exited without the test stopping
+// it, as a supervisor such as systemd or Kubernetes would: t4 exits when the
+// node stops on its own, for example a leader that steps down, and rejoins as
+// a follower once restarted.
+func (n *node) restartIfExited(bin string, cmd *exec.Cmd) {
+	n.mu.Lock()
+	stopped := n.down || n.cmd != cmd
+	if !stopped {
+		n.cmd = nil
+		n.restarts++
+	}
+	n.mu.Unlock()
+	if stopped {
+		return
+	}
+	time.Sleep(time.Second)
+	n.mu.Lock()
+	down := n.down || n.cmd != nil
+	n.mu.Unlock()
+	if !down {
+		_ = n.start(bin)
+	}
 }
 
 // kill stops the node with SIGKILL and waits for it to exit.

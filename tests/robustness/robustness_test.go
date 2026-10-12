@@ -171,6 +171,13 @@ func testRobustness(t *testing.T, s scenario, fp failpoint, size int, s3 *s3Conf
 	}()
 
 	reports, history := runScenario(ctx, t, lg, s, fp, c)
+	for _, n := range c.nodes {
+		n.mu.Lock()
+		if n.restarts > 0 {
+			t.Logf("%s exited on its own and was restarted %d time(s)", n.name, n.restarts)
+		}
+		n.mu.Unlock()
+	}
 	r.SetClientReports(reports)
 
 	persisted := persistedRequests(history, reports)
@@ -200,7 +207,7 @@ func runScenario(ctx context.Context, t *testing.T, lg *zap.Logger, s scenario, 
 		defer close(injected)
 		time.Sleep(jitter(waitBeforeFailpoint))
 		start := time.Since(baseTime)
-		lg.Info("Injecting failpoint", zap.String("failpoint", fp.Name()))
+		lg.Info("Injecting failpoint", zap.String("failpoint", fp.Name()), zap.Duration("since-start", start))
 		if err := fp.Inject(ctx, c, t4Bin); err != nil {
 			cancel()
 			return fmt.Errorf("inject %s: %w", fp.Name(), err)

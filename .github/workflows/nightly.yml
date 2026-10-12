@@ -67,14 +67,10 @@ jobs:
           docker logs t4-robustness-s3
           exit 1
 
-      # Killing every node under EtcdPutDeleteLease traffic leaves too many
-      # writes with unknown outcomes for the linearizability check to finish;
-      # see tests/robustness/README.md.
       - name: Test with etcd's robustness tests
         run: make test-robustness
         env:
           T4_ROBUSTNESS_S3: "1"
-          T4_ROBUSTNESS_SKIP: EtcdPutDeleteLease/KillAllNodes
 
       - name: Upload failure reports
         if: failure()

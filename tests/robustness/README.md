@@ -2,7 +2,8 @@
 
 These tests run etcd's own robustness tests against T4: the traffic
 generators and validators from `go.etcd.io/etcd/tests/v3/robustness`,
-driven against real `t4 run` processes while nodes are killed and restarted.
+driven against real `t4 run` processes while nodes are killed and restarted
+or lose their network.
 
 Validation requires that:
 
@@ -55,7 +56,15 @@ traffic is left out.
 
 Failures are injected by the harness rather than etcd's gofail failpoints:
 killing a random node, the leader, a follower or every node with SIGKILL, and
-restarting the leader gracefully.
+restarting the leader gracefully. In a three-node cluster, each node's peer
+traffic and its traffic to S3 also pass through a proxy, which can cut the
+followers off from the leader, delay the leader's peer traffic, or cut the
+leader or a follower off from S3. A cut connection drops what is sent rather
+than closing, as on a lossy network.
+
+Like a supervisor, the harness restarts a node whose `t4` process exits on
+its own, as a leader does when it steps down after losing S3; the node then
+rejoins as a follower.
 
 T4 does not implement etcd 3.7's `RangeStream`, which the etcd traffic uses
 for some reads. Those reads fail and, like any failed read, are left out of
@@ -64,7 +73,4 @@ validation.
 ## CI
 
 Pull requests run the single-node scenarios. The nightly workflow runs the
-three-node ones against RustFS, except `EtcdPutDeleteLease/KillAllNodes`:
-killing every node leaves enough writes with unknown outcomes, deletes and
-lease revokes among them, that the linearizability check runs out of time
-before reaching a verdict.
+three-node ones against RustFS.
