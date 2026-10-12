@@ -683,3 +683,47 @@ func TestStatusReportsStorageVersion(t *testing.T) {
 		t.Fatalf("DbSize=%d, want > 0", resp.DbSize)
 	}
 }
+
+// TestRangeHeaderMatchesDataUnderWrites pins that a read at HEAD reports the
+// revision its data is from. With one key written at every revision, the
+// key's ModRevision must equal the header revision; a header read after the
+// data lets a write slip in between, and a client that lists at the header
+// revision and watches from the next one never sees that write.
+func TestRangeHeaderMatchesDataUnderWrites(t *testing.T) {
+	srv := newServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	put(t, srv, "/k", "0")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 1; ctx.Err() == nil; i++ {
+			_, _ = srv.Put(ctx, &etcdserverpb.PutRequest{Key: []byte("/k"), Value: []byte(strconv.Itoa(i))})
+		}
+	}()
+	defer func() { cancel(); <-done }()
+
+	reqs := map[string]*etcdserverpb.RangeRequest{
+		"get":          {Key: []byte("/k")},
+		"list":         {Key: []byte("/"), RangeEnd: []byte("0")},
+		"list limit":   {Key: []byte("/"), RangeEnd: []byte("0"), Limit: 1},
+		"list keys":    {Key: []byte("/"), RangeEnd: []byte("0"), KeysOnly: true},
+		"list all":     {Key: []byte{0}, RangeEnd: []byte{0}},
+		"serializable": {Key: []byte("/k"), Serializable: true},
+	}
+	for range 200 {
+		for name, req := range reqs {
+			resp, err := srv.Range(ctx, req)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if len(resp.Kvs) != 1 {
+				t.Fatalf("%s: got %d kvs, want 1", name, len(resp.Kvs))
+			}
+			if mod := resp.Kvs[0].ModRevision; mod != resp.Header.Revision {
+				t.Fatalf("%s: header revision %d, but /k is at ModRevision %d", name, resp.Header.Revision, mod)
+			}
+		}
+	}
+}
