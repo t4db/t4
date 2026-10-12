@@ -3,6 +3,7 @@ module github.com/t4db/t4-robustness
 go 1.26.0
 
 require (
+	github.com/google/go-cmp v0.7.0
 	github.com/minio/minio-go/v7 v7.3.0
 	go.etcd.io/etcd/api/v3 v3.7.2
 	go.etcd.io/etcd/client/v3 v3.7.2
@@ -32,7 +33,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.0 // indirect

@@ -22,12 +22,16 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	gocmp "github.com/google/go-cmp/cmp"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/robustness/client"
 	"go.etcd.io/etcd/tests/v3/robustness/identity"
+	"go.etcd.io/etcd/tests/v3/robustness/model"
+	"go.etcd.io/etcd/tests/v3/robustness/random"
 	"go.etcd.io/etcd/tests/v3/robustness/report"
 	"go.etcd.io/etcd/tests/v3/robustness/traffic"
 	"go.etcd.io/etcd/tests/v3/robustness/validate"
@@ -74,18 +78,16 @@ type scenario struct {
 	profile traffic.Profile
 }
 
-// Compaction traffic is left out: the rebuilt history cannot place a
-// compaction among the revisions, so stale reads could not be checked.
 var scenarios = []scenario{
 	{
 		name:    "EtcdPutDeleteLease",
 		traffic: traffic.EtcdPutDeleteLease,
-		profile: traffic.Profile{KeyValue: &traffic.KeyValueMedium, Watch: &traffic.WatchDefault},
+		profile: traffic.Profile{KeyValue: &traffic.KeyValueMedium, Watch: &traffic.WatchDefault, Compaction: &traffic.CompactionDefault},
 	},
 	{
 		name:    "Kubernetes",
 		traffic: traffic.Kubernetes,
-		profile: traffic.Profile{KeyValue: &traffic.KeyValueMedium, Watch: &traffic.WatchDefault},
+		profile: traffic.Profile{KeyValue: &traffic.KeyValueMedium, Watch: &traffic.WatchDefault, Compaction: &traffic.CompactionDefault},
 	},
 }
 
@@ -180,12 +182,23 @@ func testRobustness(t *testing.T, s scenario, fp failpoint, size int, s3 *s3Conf
 	}
 	r.SetClientReports(reports)
 
-	persisted := persistedRequests(history, reports)
+	compacted, err := compactRevision(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := persistedRequests(history, reports, compacted)
+	t.Logf("compacted to revision %d; compactions: %s", compacted, compactionOutcomes(reports))
 	result := validate.ValidateAndReturnVisualize(lg, validate.Config{ExpectRevisionUnique: s.traffic.ExpectUniqueRevision()}, reports, persisted, 5*time.Minute)
+	r.SetVisualizer(result.Linearization.Visualize)
 	if err := result.Error(); err != nil {
 		t.Error(err)
-	} else {
-		r.SetVisualizer(result.Linearization.Visualize)
+		if result.Linearization.Status == validate.Failure {
+			// Tell a wrong rebuilt history from T4 misbehaving: the
+			// history only feeds the patching of failed operations.
+			unpatched := validate.ValidateAndReturnVisualize(zap.NewNop(), validate.Config{ExpectRevisionUnique: s.traffic.ExpectUniqueRevision()}, reports, nil, 2*time.Minute)
+			t.Logf("linearization without patching from the rebuilt history: %v", unpatched.Linearization.Status)
+			logHistoricalReadMismatches(t, reports, persisted)
+		}
 	}
 	if err := checkHashKV(ctx, c); err != nil {
 		t.Error(err)
@@ -222,13 +235,14 @@ func runScenario(ctx context.Context, t *testing.T, lg *zap.Logger, s scenario, 
 	trafficSet := client.NewSet(ids, baseTime)
 	defer trafficSet.Close()
 	maxRevs := []chan int64{make(chan int64, 1), make(chan int64, 1)}
+	var historySeen atomic.Int64
 	g.Go(func() error {
 		defer func() {
 			for _, ch := range maxRevs {
 				close(ch)
 			}
 		}()
-		reports, err := simulateTraffic(ctx, lg, c.endpoints(), s, injected, trafficSet)
+		reports, err := simulateTraffic(ctx, lg, c.endpoints(), s, injected, trafficSet, &historySeen)
 		if err != nil {
 			return err
 		}
@@ -253,7 +267,7 @@ func runScenario(ctx context.Context, t *testing.T, lg *zap.Logger, s scenario, 
 	var history []*clientv3.Event
 	g.Go(func() error {
 		var err error
-		history, err = collectHistory(ctx, c.endpoints(), maxRevs[1])
+		history, err = collectHistory(ctx, c.endpoints(), maxRevs[1], &historySeen)
 		return err
 	})
 	if err := g.Wait(); err != nil {
@@ -264,7 +278,7 @@ func runScenario(ctx context.Context, t *testing.T, lg *zap.Logger, s scenario, 
 
 // simulateTraffic is traffic.SimulateTraffic, which takes an etcd e2e cluster,
 // over a list of endpoints.
-func simulateTraffic(ctx context.Context, lg *zap.Logger, endpoints []string, s scenario, injected <-chan report.FailpointInjection, clientSet *client.ClientSet) ([]report.ClientReport, error) {
+func simulateTraffic(ctx context.Context, lg *zap.Logger, endpoints []string, s scenario, injected <-chan report.FailpointInjection, clientSet *client.ClientSet, historySeen *atomic.Int64) ([]report.ClientReport, error) {
 	profile := s.profile
 	limiter := rate.NewLimiter(rate.Limit(profile.KeyValue.MaximalQPS), profile.KeyValue.BurstableQPS)
 	if err := traffic.CheckEmptyDatabaseAtStart(ctx, lg, endpoints, clientSet); err != nil {
@@ -306,6 +320,21 @@ func simulateTraffic(ctx context.Context, lg *zap.Logger, endpoints []string, s 
 		}
 	}
 
+	if profile.Compaction != nil {
+		cc, err := clientSet.NewClient(endpoints)
+		if err != nil {
+			close(finish)
+			wg.Wait()
+			return nil, err
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer cc.Close()
+			runCompactLoop(ctx, cc, profile.Compaction.Period, finish, historySeen)
+		}()
+	}
+
 	var fr report.FailpointInjection
 	var ok bool
 	select {
@@ -341,6 +370,131 @@ func simulateTraffic(ctx context.Context, lg *zap.Logger, endpoints []string, s 
 		return nil, fmt.Errorf("traffic reached %.1f qps before the failpoint, results need at least %.1f", before.QPS(), profile.KeyValue.MinimalQPS)
 	}
 	return reports, nil
+}
+
+// logHistoricalReadMismatches replays the rebuilt history to the revision
+// each successful read at a past revision asked for, and logs the reads whose
+// answer differs from that state's: upstream checks this only for
+// serializable reads, and only once linearization passed.
+func logHistoricalReadMismatches(t *testing.T, reports []report.ClientReport, persisted []model.EtcdRequest) {
+	replay := model.NewReplay(persisted)
+	n, checked := 0, 0
+	for _, rep := range reports {
+		for _, op := range rep.KeyValue {
+			req, ok := op.Input.(model.EtcdRequest)
+			if !ok || req.Type != model.Range || req.Range.Revision <= 0 {
+				continue
+			}
+			resp := op.Output.(model.MaybeEtcdResponse)
+			if resp.Error != "" || resp.ClientError != "" || resp.Persisted {
+				continue
+			}
+			state, err := replay.StateForRevision(req.Range.Revision)
+			if err != nil {
+				continue
+			}
+			checked++
+			_, want := state.Step(req)
+			if diff := gocmp.Diff(want.Range, resp.Range); diff != "" && n < 5 {
+				t.Logf("mismatch: range %+v at revision %d [%d,%d]:\n%s", *req.Range, req.Range.Revision, op.Call, op.Return, diff)
+				n++
+			}
+		}
+	}
+	t.Logf("historical reads checked: %d, mismatches logged: %d", checked, n)
+}
+
+// compactionOutcomes counts the compactions the traffic made by outcome.
+func compactionOutcomes(reports []report.ClientReport) string {
+	var ok, compacted, future, unknown int
+	for _, r := range reports {
+		for _, op := range r.KeyValue {
+			if op.Input.(model.EtcdRequest).Type != model.Compact {
+				continue
+			}
+			resp := op.Output.(model.MaybeEtcdResponse)
+			switch {
+			case resp.Error != "":
+				unknown++
+			case strings.Contains(resp.ClientError, "compacted"):
+				compacted++
+			case resp.ClientError != "":
+				future++
+			default:
+				ok++
+			}
+		}
+	}
+	return fmt.Sprintf("%d succeeded, %d refused as compacted, %d as future, %d unknown", ok, compacted, future, unknown)
+}
+
+// runCompactLoop is the etcd traffic's compaction loop, which every scenario
+// uses: each period it compacts to a random revision from the last one it
+// compacted to, and now and then to one that cannot exist yet, so some
+// compactions are refused as compacted or as a future revision. Unlike
+// upstream:
+//
+//   - It does not compact past historySeen, the revision the history watch
+//     can resume from: T4 has no raft log to rebuild the history from, and a
+//     compaction past it would lose the history if that watch had to resume.
+//   - It stops after a compaction whose outcome it does not learn. Being the
+//     only compactor, and compactions only moving forward, the compaction
+//     revision at the end then tells whether that one took effect (see
+//     persistedCompactions). Otherwise every such compaction might have, and
+//     checking every way they might have would take the validation too long.
+func runCompactLoop(ctx context.Context, c *client.RecordingClient, period time.Duration, finish <-chan struct{}, historySeen *atomic.Int64) {
+	var last int64 = 2
+	ticker := time.NewTicker(period)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-finish:
+			return
+		case <-ticker.C:
+		}
+		sctx, cancel := context.WithTimeout(ctx, traffic.RequestTimeout)
+		resp, err := c.Status(sctx, c.Endpoints()[0])
+		cancel()
+		if err != nil {
+			continue
+		}
+		// The status may come from a node behind the leader, so a revision
+		// past it may exist already: every compaction stays within
+		// historySeen, and one in eight targets a revision too far ahead to
+		// exist, to be refused as a future revision.
+		if resp.Header.Revision < last {
+			continue
+		}
+		rev := min(random.RandRange(last, resp.Header.Revision), historySeen.Load())
+		if rand.Intn(8) == 0 {
+			rev = resp.Header.Revision + 1000
+		} else if rev < last {
+			continue // historySeen is behind: a refusal would teach nothing new
+		}
+		_, err = c.Compact(ctx, rev)
+		switch {
+		case err == nil:
+			last = rev
+		case !strings.Contains(err.Error(), "required revision"):
+			return // outcome unknown: refused ones say why
+		}
+	}
+}
+
+// compactRevision returns the revision the cluster is compacted to.
+func compactRevision(ctx context.Context, c *cluster) (int64, error) {
+	cli, err := clientv3.New(clientv3.Config{Endpoints: c.endpoints(), DialTimeout: time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		return 0, err
+	}
+	defer cli.Close()
+	h, err := cli.HashKV(ctx, c.nodes[0].clientAddr, 0)
+	if err != nil {
+		return 0, fmt.Errorf("HashKV %s: %w", c.nodes[0].name, err)
+	}
+	return h.CompactRevision, nil
 }
 
 // checkHashKV checks that every node holds the same history once they have

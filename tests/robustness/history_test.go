@@ -3,6 +3,7 @@ package robustness
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -21,8 +22,9 @@ import (
 // are not needed.
 
 // collectHistory watches every key from the first revision until it has seen
-// maxRev, which arrives on maxRevCh once traffic has stopped.
-func collectHistory(ctx context.Context, endpoints []string, maxRevCh <-chan int64) ([]*clientv3.Event, error) {
+// maxRev, which arrives on maxRevCh once traffic has stopped. seen holds the
+// revision it can resume from: compacting past it would lose the history.
+func collectHistory(ctx context.Context, endpoints []string, maxRevCh <-chan int64, seen *atomic.Int64) ([]*clientv3.Event, error) {
 	c, err := clientv3.New(clientv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: time.Second,
@@ -79,6 +81,7 @@ func collectHistory(ctx context.Context, endpoints []string, maxRevCh <-chan int
 					}
 					if n := len(resp.Events); n > 0 {
 						lastRev = resp.Events[n-1].Kv.ModRevision
+						seen.Store(lastRev)
 					}
 				}
 			}
@@ -94,8 +97,9 @@ func collectHistory(ctx context.Context, endpoints []string, maxRevCh <-chan int
 
 // persistedRequests rebuilds the requests that produced events. A revision
 // that deletes exactly the keys of a lease some client revoked, which no later
-// put uses, is that revoke; any other revision is a transaction.
-func persistedRequests(events []*clientv3.Event, reports []report.ClientReport) []model.EtcdRequest {
+// put uses, is that revoke; any other revision is a transaction. The
+// compactions that took effect follow, see persistedCompactions.
+func persistedRequests(events []*clientv3.Event, reports []report.ClientReport, compacted int64) []model.EtcdRequest {
 	revoked := map[int64]bool{}
 	for _, r := range reports {
 		for _, op := range r.KeyValue {
@@ -169,6 +173,39 @@ func persistedRequests(events []*clientv3.Event, reports []report.ClientReport) 
 			}
 		}
 		requests = append(requests, model.EtcdRequest{Type: model.Txn, Txn: txn})
+	}
+	return append(requests, persistedCompactions(reports, compacted)...)
+}
+
+// persistedCompactions returns the compactions to add to the rebuilt
+// history: only one whose outcome is unknown, if it took effect.
+//
+// A compaction that succeeded is left out. It is a known operation, which
+// linearization places by itself, and adding it would do harm: validation
+// gives an operation the return time of the persisted requests after it, so
+// it would have to sit exactly where it took effect among the revisions, and
+// a compaction takes no revision a client can learn. Nothing else needs it:
+// replay checks a read at a past revision against the state at that
+// revision, which a compaction does not change, and skips reads that failed.
+//
+// A compaction refused as compacted or as a future revision did not take
+// effect. One that failed otherwise may have; runCompactLoop makes no
+// compaction after it, so it took effect if and only if it does not exceed
+// compacted, the compaction revision at the end. Its return time is unknown,
+// so it can go last without giving anything an earlier one.
+func persistedCompactions(reports []report.ClientReport, compacted int64) []model.EtcdRequest {
+	var requests []model.EtcdRequest
+	for _, r := range reports {
+		for _, op := range r.KeyValue {
+			req := op.Input.(model.EtcdRequest)
+			if req.Type != model.Compact {
+				continue
+			}
+			resp := op.Output.(model.MaybeEtcdResponse)
+			if resp.Error != "" && req.Compact.Revision <= compacted {
+				requests = append(requests, req)
+			}
+		}
 	}
 	return requests
 }

@@ -51,8 +51,22 @@ the lease grants and revokes the model needs. A revision that deletes exactly
 the keys of a lease some client revoked, and that no later put uses, is
 taken to be that revoke.
 
-That history cannot place a compaction among the revisions, so compaction
-traffic is left out.
+Compactions run every 200 ms, but differently from upstream. A compaction
+takes no revision, and the rebuilt history cannot place one among them, so a
+compaction that succeeded is left out of it: linearization places it by
+itself, and the other checks do not need it. The compaction loop:
+
+- never compacts past the revision the history watch has seen, which would
+  lose the history if that watch had to resume;
+- stops after a compaction whose outcome it does not learn, so that the
+  compaction revision at the end tells whether that one took effect;
+- now and then targets a revision too far ahead to exist, to be refused as a
+  future revision.
+
+When linearization fails, the test also validates without the patching the
+rebuilt history feeds, and logs whether that passes: if it does, the rebuilt
+history is at fault, not T4. It also replays the history to check the answer
+of every read at a past revision.
 
 Failures are injected by the harness rather than etcd's gofail failpoints:
 killing a random node, the leader, a follower or every node with SIGKILL, and
