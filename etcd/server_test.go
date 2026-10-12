@@ -683,3 +683,40 @@ func TestStatusReportsStorageVersion(t *testing.T) {
 		t.Fatalf("DbSize=%d, want > 0", resp.DbSize)
 	}
 }
+
+// TestDeleteNoopRevisionUnderWrites pins that a delete that finds nothing to
+// delete reports a revision at which the key is absent. One the key is
+// deleted by a write not yet committed must not answer before that write.
+func TestDeleteNoopRevisionUnderWrites(t *testing.T) {
+	srv := newServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ctx.Err() == nil {
+			_, _ = srv.Put(ctx, &etcdserverpb.PutRequest{Key: []byte("/k"), Value: []byte("v")})
+			_, _ = srv.DeleteRange(ctx, &etcdserverpb.DeleteRangeRequest{Key: []byte("/k")})
+		}
+	}()
+	defer func() { cancel(); <-done }()
+
+	for range 2000 {
+		resp, err := srv.DeleteRange(ctx, &etcdserverpb.DeleteRangeRequest{Key: []byte("/k")})
+		if err != nil {
+			t.Fatalf("DeleteRange: %v", err)
+		}
+		if resp.Deleted != 0 {
+			continue
+		}
+		rev := resp.Header.Revision
+		r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/k"), Revision: rev})
+		if err != nil {
+			t.Fatalf("Range at %d: %v", rev, err)
+		}
+		if len(r.Kvs) != 0 {
+			t.Fatalf("delete found nothing to delete at revision %d, but /k exists there: %v", rev, r.Kvs[0])
+		}
+	}
+}
