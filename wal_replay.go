@@ -141,7 +141,10 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 		_ = os.RemoveAll(tmpDir)
 		return false, fmt.Errorf("rename resync dir: %w", rerr)
 	}
-	newDB, rerr := istore.Open(pebbleDir, n.log)
+	if n.sstUploader != nil {
+		n.sstUploader.Reset()
+	}
+	newDB, rerr := istore.Open(pebbleDir, n.log, n.pebbleOpts...)
 	if rerr != nil {
 		n.readMu.Unlock()
 		n.fenceMu.Unlock()
@@ -164,6 +167,12 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	n.readMu.Unlock()
 	n.term = newTerm
 	n.fenceMu.Unlock()
+	if n.sstUploader != nil {
+		// Checkpoints upload what this misses themselves.
+		if rerr := n.sstUploader.Reconcile(ctx); rerr != nil {
+			n.log.Warnf("t4: SST reconcile after restore: %v", rerr)
+		}
+	}
 	return true, nil
 }
 
