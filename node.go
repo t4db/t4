@@ -566,7 +566,7 @@ func Open(cfg Config) (*Node, error) {
 		if !objectStoreDown {
 			reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer reconcileCancel()
-			if err := sstUp.Reconcile(reconcileCtx); err != nil {
+			if err := reconcileSSTs(reconcileCtx, sstUp, db); err != nil {
 				log.Warnf("t4: SST reconcile: %v", err)
 			}
 		}
@@ -753,7 +753,7 @@ func Open(cfg Config) (*Node, error) {
 			if sstUp != nil {
 				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer reconcileCancel()
-				if err := sstUp.Reconcile(reconcileCtx); err != nil {
+				if err := reconcileSSTs(reconcileCtx, sstUp, freshDB); err != nil {
 					log.Warnf("t4: SST reconcile after GC-gap fix: %v", err)
 				}
 			}

@@ -169,11 +169,20 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	n.fenceMu.Unlock()
 	if n.sstUploader != nil {
 		// Checkpoints upload what this misses themselves.
-		if rerr := n.sstUploader.Reconcile(ctx); rerr != nil {
+		if rerr := reconcileSSTs(ctx, n.sstUploader, newDB); rerr != nil {
 			n.log.Warnf("t4: SST reconcile after restore: %v", rerr)
 		}
 	}
 	return true, nil
+}
+
+// reconcileSSTs uploads the tables of db that up has not uploaded yet.
+func reconcileSSTs(ctx context.Context, up *istore.SSTUploader, db *istore.Store) error {
+	tables, err := istore.LiveTables(db.Pebble())
+	if err != nil {
+		return err
+	}
+	return up.Reconcile(ctx, tables)
 }
 
 // replayRemote replays WAL segments stored in the object store. afterSeq is

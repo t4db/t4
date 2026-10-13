@@ -11,6 +11,7 @@ import (
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
+	istore "github.com/t4db/t4/internal/store"
 	"github.com/t4db/t4/internal/testhook"
 	"github.com/t4db/t4/internal/wal"
 )
@@ -305,7 +306,11 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 		// from a checkpoint, so it is verified against S3 first.
 		if n.sstUploader != nil {
 			rCtx, rCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			if rErr := n.sstUploader.ReconcileVerified(rCtx); rErr != nil {
+			tables, rErr := istore.LiveTables(n.db.Load().Pebble())
+			if rErr == nil {
+				rErr = n.sstUploader.ReconcileVerified(rCtx, tables)
+			}
+			if rErr != nil {
 				n.log.Warnf("t4: promoted leader SST reconcile: %v", rErr)
 			}
 			rCancel()
