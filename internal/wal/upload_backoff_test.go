@@ -112,12 +112,14 @@ func pendingCount(w *WAL) int {
 // retried as one attempt per backoff period, not one per segment, and that
 // all of it is uploaded once object storage is back.
 func TestUploadBacksOffDuringOutage(t *testing.T) {
-	shortBackoff(t, 20*time.Millisecond, 80*time.Millisecond)
+	const minBackoff = 20 * time.Millisecond
+	shortBackoff(t, minBackoff, 80*time.Millisecond)
 	store := newFakeStore()
 	store.set(true)
 	w := startWAL(t, t.TempDir(), store.upload)
 
 	const segments = 100
+	start := time.Now()
 	sealSegments(t, w, 1, segments)
 
 	time.Sleep(500 * time.Millisecond)
@@ -128,11 +130,15 @@ func TestUploadBacksOffDuringOutage(t *testing.T) {
 	store.mu.Lock()
 	tried, attempts := len(store.tried), store.attempts
 	store.mu.Unlock()
+	elapsed := time.Since(start)
 	if tried != 1 {
 		t.Errorf("uploads tried for %d of %d segments while the store was down, want only the oldest", tried, segments)
 	}
-	if attempts > segments/2 {
-		t.Errorf("%d upload attempts for %d failing segments, want one per backoff period", attempts, segments)
+	// Sealing the segments takes a while on a busy machine, and the store is
+	// down all along: bound the attempts by the time that passed rather than
+	// assume sealing is instant.
+	if limit := int(elapsed/minBackoff) + 2; attempts > limit {
+		t.Errorf("%d upload attempts in %v, want at most one per %v backoff period (%d)", attempts, elapsed.Round(time.Millisecond), minBackoff, limit)
 	}
 
 	store.set(false)
