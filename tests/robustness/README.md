@@ -82,5 +82,5 @@ rejoins as a follower.
 
 ## CI
 
-Pull requests run the single-node scenarios. The nightly workflow runs the
-three-node ones against RustFS.
+Pull requests run the single-node scenarios. The nightly workflow, and every
+release tag, runs the three-node ones against RustFS.

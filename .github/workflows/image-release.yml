@@ -53,12 +53,12 @@ jobs:
           echo "Timed out waiting for CI on $SHA" >&2
           exit 1
 
-  jepsen:
-    name: Jepsen (release)
+  # Everything the nightly runs: Jepsen, the stress test and etcd's
+  # robustness tests.
+  nightly:
+    name: Nightly tests (release)
     needs: precheck
-    uses: ./.github/workflows/jepsen-workflow.yml
-    with:
-      nemeses: '["partition-halves", "kill", "partition-s3"]'
+    uses: ./.github/workflows/nightly.yml
 
   release:
     name: Create draft release
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - release
-      - jepsen
+      - nightly
     steps:
       - uses: actions/checkout@v7
 
@@ -159,7 +159,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - release
-      - jepsen
+      - nightly
     strategy:
       fail-fast: false
       matrix:

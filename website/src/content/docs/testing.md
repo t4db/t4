@@ -18,11 +18,11 @@ This page lists the test suites that back T4's correctness claims: what each one
 | Upgrade from earlier releases | Every PR |
 | Differential tests against etcd | Every PR |
 | etcd robustness tests, single node | Every PR |
-| etcd robustness tests, three nodes on S3 | Nightly |
+| etcd robustness tests, three nodes on S3 | Nightly and on every release tag |
 | Kubernetes apiserver storage and watch cache tests | Every PR |
 | Jepsen smoke matrix (3 jobs) | Every PR |
 | Jepsen full matrix (18 jobs) | Nightly and on every release tag |
-| 30-minute stress test | Nightly |
+| 30-minute stress test | Nightly and on every release tag |
 | Go benchmarks | Pushes to `main` |
 
 ---
@@ -105,7 +105,7 @@ Every scenario also compacts the history every 200 ms, including to revisions al
 - etcd validates against the requests it persisted, read from its raft WAL. T4 has no raft WAL, so the history is rebuilt from a watch over the whole keyspace.
 - A compaction takes no revision, so that history has no place for one. A successful compaction is left out of it and placed by linearization alone; the compaction loop never compacts past what the history watch has seen.
 
-**When:** every PR runs the single-node scenarios. The nightly workflow also runs every scenario and fault on a three-node cluster against RustFS.
+**When:** every PR runs the single-node scenarios. The nightly workflow, and every release tag, also runs every scenario and fault on a three-node cluster against RustFS.
 
 ## Jepsen
 
@@ -155,7 +155,7 @@ There is no fault injection: T4 runs as a single node.
 
 `TestLongRunningConsistency` in [`tests/integration`](https://github.com/t4db/t4/tree/main/tests/integration) writes continuously through any live node while it compacts periodically and adds or removes a random node every ~12 seconds, keeping the cluster between 1 and 5 nodes. New nodes bootstrap from the object store, and removing the leader forces an election. Every ~15 seconds, and once at the end, every live node must hold every committed write.
 
-**When:** nightly, for 30 minutes. Every PR also runs it for its default 3 minutes in the race detector job.
+**When:** nightly and on every release tag, for 30 minutes. Every PR also runs it for its default 3 minutes in the race detector job.
 
 ## Static analysis
 
@@ -170,10 +170,8 @@ The Go benchmarks for the root package and the etcd adapter run on every push to
 Pushing a release tag starts the release workflow, which:
 
 1. waits for the CI workflow to have passed on the tagged commit, and refuses to release otherwise;
-2. runs the full Jepsen matrix on that commit;
+2. runs everything the nightly workflow runs on that commit: the full Jepsen matrix, the 30-minute stress test and the three-node robustness tests;
 3. builds and publishes images and binaries only after both pass.
-
-The 30-minute stress test and the three-node robustness run are not part of the release gate; they run nightly on `main`, and maintainers can trigger the nightly workflow on a release commit by hand.
 
 ---
 
@@ -182,6 +180,6 @@ The 30-minute stress test and the three-node robustness run are not part of the 
 What the suites above do not cover today:
 
 - **No lease workload in Jepsen.** Leases are exercised by the robustness tests' `EtcdPutDeleteLease` traffic, under process kills and while the followers are cut off from the leader or a node from S3, by the differential tests (no faults), and by the integration tests for keepalive, expiry and revoke across a leader change. No test drives lease keepalive through a network partition: the robustness traffic grants and revokes leases but never keeps one alive.
-- **Network faults in the robustness tests run only nightly.** They need a three-node cluster on S3; pull requests run the single-node scenarios.
+- **Network faults in the robustness tests run only nightly and on release tags.** They need a three-node cluster on S3; pull requests run the single-node scenarios.
 - **The differential and Kubernetes apiserver tests run a single node without faults.** They check API semantics, not behaviour under failure.
 - **Jepsen runs are short.** Each job runs 60 seconds of traffic with three clients, on one host in Docker.
