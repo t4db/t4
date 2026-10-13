@@ -90,7 +90,18 @@ docker exec "$K0S" sh -c 'k0s kubeconfig admin >/root/kubeconfig'
 sonobuoy() { docker exec "$K0S" sonobuoy --kubeconfig /root/kubeconfig "$@"; }
 # Only the e2e plugin: systemd-logs never finishes in a container without
 # a systemd journal.
-sonobuoy run --plugin e2e --mode "$MODE" --wait=240
+sonobuoy run --plugin e2e --mode "$MODE"
+# Sonobuoy's progress counter stays at zero with this conformance image:
+# show the tests' own output instead, a dot per test and every failure in
+# full as it happens.
+for _ in $(seq 1 60); do
+  pod="$(docker exec "$K0S" k0s kubectl -n sonobuoy get pods -l sonobuoy-plugin=e2e -o name 2>/dev/null)"
+  if [[ -n "$pod" ]] && docker exec "$K0S" k0s kubectl -n sonobuoy logs -f "$pod" -c e2e 2>/dev/null; then
+    break
+  fi
+  sleep 5
+done
+sonobuoy wait --wait=240 --wait-output=silent
 tarball="$(sonobuoy retrieve /root)"
 docker cp "$K0S:$tarball" "$RESULTS_DIR/"
 summary="$(docker exec "$K0S" sonobuoy results "$tarball" --plugin e2e)"
