@@ -104,7 +104,6 @@ Every scenario also compacts the history every 200 ms, including to revisions al
 
 - etcd validates against the requests it persisted, read from its raft WAL. T4 has no raft WAL, so the history is rebuilt from a watch over the whole keyspace.
 - A compaction takes no revision, so that history has no place for one. A successful compaction is left out of it and placed by linearization alone; the compaction loop never compacts past what the history watch has seen.
-- T4 does not implement etcd 3.7's `RangeStream`, which etcd's traffic uses for some reads. Those reads fail and, like any failed read, are left out of validation.
 
 **When:** every PR runs the single-node scenarios. The nightly workflow also runs every scenario and fault on a three-node cluster against RustFS.
 
@@ -184,6 +183,5 @@ What the suites above do not cover today:
 
 - **No lease workload in Jepsen.** Leases are exercised by the robustness tests' `EtcdPutDeleteLease` traffic, under process kills and while the followers are cut off from the leader or a node from S3, by the differential tests (no faults), and by the integration tests for keepalive, expiry and revoke across a leader change. No test drives lease keepalive through a network partition: the robustness traffic grants and revokes leases but never keeps one alive.
 - **Network faults in the robustness tests run only nightly.** They need a three-node cluster on S3; pull requests run the single-node scenarios.
-- **`RangeStream` is not implemented.** The robustness traffic's `RangeStream` reads fail and are left out of validation.
 - **The differential and Kubernetes apiserver tests run a single node without faults.** They check API semantics, not behaviour under failure.
 - **Jepsen runs are short.** Each job runs 60 seconds of traffic with three clients, on one host in Docker.
