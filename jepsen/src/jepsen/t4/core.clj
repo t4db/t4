@@ -6,6 +6,7 @@
              [checker  :as checker]
              [control  :as c]
              [generator :as gen]
+             [independent :as independent]
              [nemesis  :as nemesis]
              [tests    :as tests]]
             [jepsen.checker.timeline  :as timeline]
@@ -99,23 +100,42 @@
 
 ;; ── Workloads ─────────────────────────────────────────────────────────────────
 
+(def ^:private register-ops-per-key
+  "Ops each independent register gets. Knossos's search grows with the ops
+  whose outcome is unknown, which faults leave pending until the history
+  ends: a short history per key bounds them, where one long history over a
+  single key could run the checker out of memory."
+  20)
+
 (defn register-workload
-  "CAS-register workload: verifies linearizability of read/write/cas on one key."
-  [_opts]
-  {:client  (client/register-client)
-   :checker (checker/compose
-              {:linearizable (checker/linearizable
-                               {:model     (model/cas-register)
-                                :algorithm :linear})
-               :timeline     (timeline/html)
-               :perf         (checker/perf)})
-   ;; Mix of reads (50%), writes (30%), CAS (20%).
-   :gen     (gen/mix
-              [(repeat 5 {:type :invoke :f :read  :value nil})
-               (repeat 3 (fn [] {:type :invoke :f :write
-                                 :value (rand-int 10)}))
-               (repeat 2 (fn [] {:type :invoke :f :cas
-                                 :value [(rand-int 10) (rand-int 10)]}))])})
+  "CAS-register workload: verifies linearizability of read/write/cas on a
+  series of independent keys, each checked on its own."
+  [opts]
+  {:client    (client/register-client)
+   :checker   (checker/compose
+                {:linearizable (independent/checker
+                                 (checker/compose
+                                   {:linearizable (checker/linearizable
+                                                    {:model     (model/cas-register)
+                                                     :algorithm :linear})
+                                    :timeline     (timeline/html)}))
+                 :perf         (checker/perf)})
+   ;; Mix of reads (50%), writes (30%), CAS (20%), every client thread on
+   ;; the same key until its ops are done.
+   :gen       (independent/concurrent-generator
+                (:concurrency opts 3)
+                (range)
+                (fn [_k]
+                  (gen/limit register-ops-per-key
+                             (gen/mix
+                               [(repeat 5 {:type :invoke :f :read  :value nil})
+                                (repeat 3 (fn [] {:type :invoke :f :write
+                                                  :value (rand-int 10)}))
+                                (repeat 2 (fn [] {:type :invoke :f :cas
+                                                  :value [(rand-int 10) (rand-int 10)]}))]))))
+   ;; The default final read is of a single key; each key's history is
+   ;; checked as it ends instead.
+   :final-gen nil})
 
 (defn- rand-multi-values
   "Returns a {:a v :b v :c v} map of fresh random small integers — the value

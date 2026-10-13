@@ -1,7 +1,8 @@
 (ns jepsen.t4.client
   "Jepsen client that drives T4 through its etcd v3 API using jetcd."
   (:require [clojure.tools.logging :refer [info warn]]
-            [jepsen.client         :as client])
+            [jepsen.client         :as client]
+            [jepsen.independent    :as independent])
   (:import [io.etcd.jetcd
             Client ByteSequence]
            ;; jetcd 0.7.x API notes:
@@ -62,23 +63,28 @@
 ;; CAS is two RPCs (Get + Txn).  A concurrent write between them causes the
 ;; Txn to fail — correctly returned as :fail to Jepsen.
 
-(def ^:private register-key "/jepsen/register")
+(def ^:private register-prefix "/jepsen/register/")
 
-(defn do-read [kv]
-  (let [resp (-> (.get kv (->bs register-key))
+(defn- register-key
+  "The etcd key of independent register k."
+  [k]
+  (str register-prefix k))
+
+(defn do-read [kv k]
+  (let [resp (-> (.get kv (->bs (register-key k)))
                  (.get timeout-ms TimeUnit/MILLISECONDS))]
     (when (pos? (.getCount resp))
       (-> resp .getKvs first .getValue bs-> Long/parseLong))))
 
-(defn do-write [kv value]
-  (-> (.put kv (->bs register-key) (->bs value))
+(defn do-write [kv k value]
+  (-> (.put kv (->bs (register-key k)) (->bs value))
       (.get timeout-ms TimeUnit/MILLISECONDS))
   :ok)
 
 (defn do-cas
   "Returns true if the swap succeeded."
-  [kv old-val new-val]
-  (let [get-resp (-> (.get kv (->bs register-key))
+  [kv k old-val new-val]
+  (let [get-resp (-> (.get kv (->bs (register-key k)))
                      (.get timeout-ms TimeUnit/MILLISECONDS))
         [cur-val mod-rev]
         (if (zero? (.getCount get-resp))
@@ -88,12 +94,12 @@
              (.getModRevision kv-entry)]))]
     (when (= cur-val old-val)
       ;; Guard the put with the ModRevision we just read.
-      (let [cmp (Cmp. (->bs register-key)
+      (let [cmp (Cmp. (->bs (register-key k))
                       Cmp$Op/EQUAL                   ; ← inner enum, not CmpResult
                       (CmpTarget/modRevision mod-rev)) ; ← static factory
             txn (-> (.txn kv)
                     (.If    (into-array Cmp [cmp]))
-                    (.Then  (into-array Op  [(Op/put (->bs register-key)
+                    (.Then  (into-array Op  [(Op/put (->bs (register-key k))
                                                      (->bs new-val)
                                                      (PutOption/DEFAULT))]))
                     (.Else  (into-array Op  []))
@@ -112,15 +118,17 @@
 
   (setup! [this test])
 
+  ;; Each op's value is an independent [key value] tuple.
   (invoke! [this test op]
     (try
-      (case (:f op)
-        :read  (assoc op :type :ok :value (do-read kv))
-        :write (do (do-write kv (:value op))
-                   (assoc op :type :ok))
-        :cas   (let [[old new] (:value op)
-                     swapped?  (do-cas kv old new)]
-                 (assoc op :type (if swapped? :ok :fail))))
+      (let [[k v] (:value op)]
+        (case (:f op)
+          :read  (assoc op :type :ok :value (independent/tuple k (do-read kv k)))
+          :write (do (do-write kv k v)
+                     (assoc op :type :ok))
+          :cas   (let [[old new] v
+                       swapped?  (do-cas kv k old new)]
+                   (assoc op :type (if swapped? :ok :fail)))))
 
       (catch TimeoutException _
         (assoc op :type :info :error :timeout))
