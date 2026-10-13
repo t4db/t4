@@ -301,6 +301,10 @@ func assertPrefixEncrypted(t *testing.T, ctx context.Context, client *minio.Clie
 		}
 		relKey := strings.TrimPrefix(obj.Key, listPrefix)
 		raw, err := s3GetObject(ctx, client, cfg, relKey)
+		if minio.ToErrorResponse(err).Code == minio.NoSuchKey {
+			// The nodes may still be running: GC deleted it after the list.
+			continue
+		}
 		if err != nil {
 			t.Fatalf("get raw %s: %v", relKey, err)
 		}
