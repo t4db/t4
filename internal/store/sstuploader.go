@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/cockroachdb/pebble"
@@ -152,33 +151,48 @@ func (u *SSTUploader) Reset() {
 	u.gen++
 }
 
-// Reconcile walks pebbleDir and uploads any SST files not already in the
-// registry. Must be called after Pebble opens and before serving requests.
-func (u *SSTUploader) Reconcile(ctx context.Context) error {
-	entries, err := os.ReadDir(u.pebbleDir)
+// LiveTables returns the file names of the tables in db's current version.
+// A table Pebble is still writing, for a flush or a compaction in progress,
+// is not among them.
+func LiveTables(db *pebble.DB) ([]string, error) {
+	levels, err := db.SSTables()
 	if err != nil {
-		return fmt.Errorf("sstuploader: readdir %q: %w", u.pebbleDir, err)
+		return nil, fmt.Errorf("sstuploader: list tables: %w", err)
 	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sst") {
-			continue
+	var names []string
+	seen := map[string]bool{}
+	for _, level := range levels {
+		for _, t := range level {
+			// A virtual table reads from the file of its backing table.
+			name := t.BackingSSTNum.String() + ".sst"
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
 		}
-		// Skip SST files that are still being written by Pebble (TableCreated
-		// fires when the file is created but still empty; data is written before
-		// FlushEnd/CompactionEnd). Uploading a 0-byte file here would poison the
-		// local registry and prevent the correct upload triggered by those events.
-		if info, err := e.Info(); err != nil || info.Size() == 0 {
-			continue
-		}
+	}
+	return names, nil
+}
+
+// Reconcile uploads the tables among tables, the file names LiveTables
+// returned, that are not in the registry yet. Must be called after Pebble
+// opens and before serving requests.
+//
+// It takes the tables from Pebble rather than the directory: a file of a
+// flush or compaction still in progress is there too, and uploading it would
+// record what had been written so far under its name. The finished table
+// would then never be uploaded, since its name is recorded, and a
+// checkpoint would reference the truncated one.
+func (u *SSTUploader) Reconcile(ctx context.Context, tables []string) error {
+	for _, name := range tables {
 		u.mu.RLock()
-		_, inLocal := u.local[e.Name()]
-		_, inInherited := u.inherited[e.Name()]
+		_, inLocal := u.local[name]
+		_, inInherited := u.inherited[name]
 		u.mu.RUnlock()
 		if inLocal || inInherited {
 			continue
 		}
-		path := filepath.Join(u.pebbleDir, e.Name())
-		if err := u.uploadOne(ctx, path); err != nil {
+		if err := u.uploadOne(ctx, filepath.Join(u.pebbleDir, name)); err != nil {
 			return err
 		}
 	}
@@ -188,7 +202,7 @@ func (u *SSTUploader) Reconcile(ctx context.Context) error {
 // ReconcileVerified is Reconcile for a registry that may be stale: SSTs it
 // records as uploaded may have been deleted since. It lists the store's SSTs
 // once, forgets the registered ones that are gone, and then uploads every
-// local SST not in the registry, which re-uploads those.
+// table of tables not in the registry, which re-uploads those.
 //
 // A node fills its registry when it opens, whatever its role. A follower
 // keeps the SSTs it restored from a checkpoint while the leader's checkpoint
@@ -199,7 +213,7 @@ func (u *SSTUploader) Reconcile(ctx context.Context) error {
 //
 // If the store cannot be listed, the whole registry is forgotten, so that
 // checkpoints upload every SST they reference themselves.
-func (u *SSTUploader) ReconcileVerified(ctx context.Context) error {
+func (u *SSTUploader) ReconcileVerified(ctx context.Context, tables []string) error {
 	keys, err := u.store.List(ctx, "sst/")
 	if err != nil {
 		u.mu.Lock()
@@ -218,7 +232,7 @@ func (u *SSTUploader) ReconcileVerified(ctx context.Context) error {
 		}
 	}
 	u.mu.Unlock()
-	return u.Reconcile(ctx)
+	return u.Reconcile(ctx, tables)
 }
 
 // Start launches the background upload goroutine. Call once; runs until ctx
