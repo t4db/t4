@@ -116,6 +116,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.storeRole(roleLeader)
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.nextSeq = nextSeq
+	n.compactSubmitted = 0 // the store holds what earlier terms compacted
 	n.pending = make(map[string]pendingKV)
 	n.mu.Unlock()
 
