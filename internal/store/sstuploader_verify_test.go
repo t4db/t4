@@ -27,7 +27,7 @@ func TestReconcileVerifiedReuploadsDeletedSSTs(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := NewSSTUploader(store, dir)
-	if err := u.Reconcile(ctx); err != nil {
+	if err := u.Reconcile(ctx, tablesIn(t, dir)); err != nil {
 		t.Fatal(err)
 	}
 	key := u.Registry()["000123.sst"]
@@ -39,14 +39,14 @@ func TestReconcileVerifiedReuploadsDeletedSSTs(t *testing.T) {
 	if err := store.Delete(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	if err := u.Reconcile(ctx); err != nil {
+	if err := u.Reconcile(ctx, tablesIn(t, dir)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Get(ctx, key); !errors.Is(err, object.ErrNotFound) {
 		t.Fatalf("plain Reconcile changed something: err=%v", err)
 	}
 
-	if err := u.ReconcileVerified(ctx); err != nil {
+	if err := u.ReconcileVerified(ctx, tablesIn(t, dir)); err != nil {
 		t.Fatal(err)
 	}
 	rc, err := store.Get(ctx, key)
@@ -74,11 +74,11 @@ func TestReconcileVerifiedForgetsRegistryWhenUnverifiable(t *testing.T) {
 	}
 	mem := object.NewMem()
 	u := NewSSTUploader(mem, dir)
-	if err := u.Reconcile(ctx); err != nil {
+	if err := u.Reconcile(ctx, tablesIn(t, dir)); err != nil {
 		t.Fatal(err)
 	}
 	u.store = failingListStore{mem}
-	if err := u.ReconcileVerified(ctx); err == nil {
+	if err := u.ReconcileVerified(ctx, tablesIn(t, dir)); err == nil {
 		t.Fatal("ReconcileVerified succeeded although the store could not be listed")
 	}
 	if n := len(u.Registry()); n != 0 {
@@ -96,7 +96,7 @@ func TestRegistryForgetsDeletedTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := NewSSTUploader(object.NewMem(), dir)
-	if err := u.Reconcile(ctx); err != nil {
+	if err := u.Reconcile(ctx, tablesIn(t, dir)); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := u.Registry()["000123.sst"]; !ok {
@@ -137,10 +137,68 @@ func TestRegistrySkipsTableDeletedDuringUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := NewSSTUploader(deletingStore{Store: object.NewMem(), path: path}, dir)
-	if err := u.Reconcile(ctx); err != nil {
+	if err := u.Reconcile(ctx, tablesIn(t, dir)); err != nil {
 		t.Fatal(err)
 	}
 	if key, ok := u.Registry()["000123.sst"]; ok {
 		t.Fatalf("table deleted during upload still registered as %q", key)
+	}
+}
+
+// tablesIn returns the names of the .sst files in dir, standing in for the
+// tables Pebble would report.
+func tablesIn(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".sst" {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+// TestLiveTablesSkipsFilesPebbleIsWriting: Reconcile uploads the tables
+// LiveTables lists. A file of a flush or compaction still in progress is in
+// the directory already but not in Pebble's version, and must not be listed:
+// uploading it would record a truncated table under its name.
+func TestLiveTablesSkipsFilesPebbleIsWriting(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	for i := range 3 {
+		if err := db.Set([]byte{byte(i)}, []byte("v"), pebble.Sync); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A table Pebble has started writing.
+	if err := os.WriteFile(filepath.Join(dir, "999999.sst"), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tables, err := LiveTables(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) == 0 {
+		t.Fatal("no live tables listed")
+	}
+	for _, name := range tables {
+		if name == "999999.sst" {
+			t.Fatal("LiveTables listed a file Pebble is still writing")
+		}
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("listed table %s: %v", name, err)
+		}
 	}
 }

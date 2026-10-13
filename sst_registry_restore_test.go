@@ -73,7 +73,7 @@ func TestInPlaceRestoreForgetsReplacedSSTs(t *testing.T) {
 	if err := os.WriteFile(own, []byte("the follower's own table"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := follower.sstUploader.Reconcile(ctx); err != nil {
+	if err := follower.sstUploader.Reconcile(ctx, []string{name}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(own); err != nil {
