@@ -31,9 +31,7 @@ import (
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/testutil"
 )
@@ -112,7 +110,9 @@ func checkWithNew(t *testing.T, bin, dataDir string, extra []string, want writte
 	if _, err := alice.Get(ctx, "/upgrade/plain/000"); err != nil {
 		t.Errorf("alice cannot read under /upgrade/ (role reader): %v", err)
 	}
-	if _, err := alice.Put(ctx, "/upgrade/plain/000", "x"); status.Code(err) != codes.PermissionDenied {
+	// T4 answers with etcd's permission denied error, which clientv3 turns
+	// into rpctypes.ErrPermissionDenied rather than a gRPC status.
+	if _, err := alice.Put(ctx, "/upgrade/plain/000", "x"); !errors.Is(err, rpctypes.ErrPermissionDenied) {
 		t.Errorf("alice write under /upgrade/: err=%v, want permission denied", err)
 	}
 	// A token issued by the earlier release stays valid. It is sent by hand:
