@@ -20,7 +20,8 @@ This page lists the test suites that back T4's correctness claims: what each one
 | etcd robustness tests, single node | Every PR |
 | etcd robustness tests, three nodes on S3 | Nightly and on every release tag |
 | Kubernetes apiserver storage and watch cache tests | Every PR |
-| Kubernetes conformance on k0s | Nightly and on every release tag |
+| Kubernetes conformance on k0s, quick mode (one test) | Every PR |
+| Kubernetes conformance on k0s, full suite | Nightly and on every release tag |
 | Jepsen smoke matrix (3 jobs) | Every PR |
 | Jepsen full matrix (18 jobs) | Nightly and on every release tag |
 | 30-minute stress test | Nightly and on every release tag |
@@ -158,7 +159,7 @@ There is no fault injection: T4 runs as a single node.
 
 There is no fault injection: T4 runs as a single node. Run it locally with `make test-conformance`; `T4_CONFORMANCE_MODE=quick` runs a single test.
 
-**When:** nightly and on every release tag. The full suite takes about two hours.
+**When:** every PR runs quick mode, which boots the cluster and runs a single test in a few minutes. The full suite runs nightly and on every release tag, and takes about two hours.
 
 ## Stress test
 

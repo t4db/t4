@@ -101,6 +101,30 @@ jobs:
       - name: Test Kubernetes apiserver storage
         run: make test-apiserver
 
+  test-conformance-quick:
+    name: Kubernetes conformance smoke (k0s on T4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Boots a two-node k0s cluster on T4 and runs Sonobuoy's quick mode;
+      # the nightly runs the full suite.
+      - name: Run Kubernetes conformance (quick)
+        run: make test-conformance
+        env:
+          T4_CONFORMANCE_MODE: quick
+
+      - name: Upload results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-quick-results-${{ github.sha }}
+          path: .tmp/conformance/
+          retention-days: 7
+          if-no-files-found: ignore
+
   test-etcd-diff-linux:
     name: Test differential against etcd (Linux)
     runs-on: ubuntu-latest
