@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/etcd/auth"
 )
 
 // Range implements KVServer.Range (Get / List).
@@ -220,6 +221,9 @@ func (s *Server) Put(ctx context.Context, r *etcdserverpb.PutRequest) (*etcdserv
 	}
 	if r.Lease != 0 {
 		if _, err := s.getLease(ctx, r.Lease, true); err != nil {
+			return nil, err
+		}
+		if err := s.checkLeaseKeys(ctx, r.Lease, auth.WRITE); err != nil {
 			return nil, err
 		}
 	}
@@ -879,6 +883,9 @@ func (s *Server) validateTxnOpLeases(ctx context.Context, ops []*etcdserverpb.Re
 		if p, ok := op.GetRequest().(*etcdserverpb.RequestOp_RequestPut); ok {
 			if p.RequestPut.Lease != 0 {
 				if _, err := s.getLease(ctx, p.RequestPut.Lease, true); err != nil {
+					return err
+				}
+				if err := s.checkLeaseKeys(ctx, p.RequestPut.Lease, auth.WRITE); err != nil {
 					return err
 				}
 			}

@@ -59,6 +59,66 @@ func (r Role) HasPermission(key string, pt PermType) bool {
 	return false
 }
 
+// coversRange reports whether perms, together, grant pt access to every key
+// in [key, rangeEnd), as etcd's IsRangePermitted does: an empty rangeEnd
+// means key alone, and "\x00" every key from key on. Permissions combine, so
+// a range two of them cover between them is covered.
+func coversRange(perms []Permission, key, rangeEnd string, pt PermType) bool {
+	if rangeEnd == "" {
+		for _, p := range perms {
+			if p.covers(key, pt) {
+				return true
+			}
+		}
+		return false
+	}
+	// The intervals perms grant, with an empty end standing for no end. A
+	// point permission covers [Key, Key+"\x00").
+	type interval struct{ start, end string }
+	var ivs []interval
+	for _, p := range perms {
+		if !permIncludes(p.PermType, pt) {
+			continue
+		}
+		switch p.RangeEnd {
+		case "":
+			ivs = append(ivs, interval{p.Key, p.Key + "\x00"})
+		case "\x00":
+			ivs = append(ivs, interval{p.Key, ""})
+		default:
+			ivs = append(ivs, interval{p.Key, p.RangeEnd})
+		}
+	}
+	end := rangeEnd
+	if end == "\x00" {
+		end = ""
+	}
+	// Walk from key, each step extending as far as an interval that starts
+	// at or before where the covered part ends.
+	at := key
+	for {
+		if end != "" && at >= end {
+			return true
+		}
+		reach, found := at, false
+		for _, iv := range ivs {
+			if iv.start > at {
+				continue
+			}
+			if iv.end == "" {
+				return true
+			}
+			if iv.end > reach {
+				reach, found = iv.end, true
+			}
+		}
+		if !found {
+			return false
+		}
+		at = reach
+	}
+}
+
 // User is a named principal with a bcrypt-hashed password and a list of role names.
 type User struct {
 	Name         string   `json:"name"`

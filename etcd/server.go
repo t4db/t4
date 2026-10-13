@@ -18,6 +18,7 @@ import (
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -59,6 +60,20 @@ type Server struct {
 	authStore     *auth.Store
 	tokens        *auth.TokenStore
 	leaseLoopOnce sync.Once
+}
+
+// checkRequest returns PermissionDenied unless the user ctx authenticated as
+// may make every check. It passes while auth is disabled. With auth enabled,
+// a context that authenticated as no one is denied.
+func (s *Server) checkRequest(ctx context.Context, checks []auth.RangeCheck) error {
+	if s.authStore == nil || !s.authStore.IsEnabled() {
+		return nil
+	}
+	user, ok := auth.UserFromContext(ctx)
+	if !ok {
+		return rpctypes.ErrGRPCPermissionDenied
+	}
+	return s.authStore.CheckRequest(user, checks)
 }
 
 // New returns a Server backed by node. When authStore and tokens are non-nil,

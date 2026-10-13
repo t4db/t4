@@ -12,6 +12,7 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/etcd/auth"
 )
 
 // Maximum events coalesced into a single WatchResponse frame. Real etcd
@@ -90,6 +91,22 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 					WatchId:      -1,
 					Canceled:     true,
 					CancelReason: "reserved internal prefix is not watchable",
+				}}:
+				case <-ctx.Done():
+					return nil
+				}
+				continue
+			}
+			if err := s.checkRequest(stream.Context(), auth.WatchChecks(cr)); err != nil {
+				// As etcd does: cancel this watch only, not the stream
+				// carrying the others.
+				select {
+				case sendCh <- []*etcdserverpb.WatchResponse{{
+					Header:       s.header(),
+					WatchId:      -1,
+					Created:      true,
+					Canceled:     true,
+					CancelReason: rpctypes.ErrGRPCPermissionDenied.Error(),
 				}}:
 				case <-ctx.Done():
 					return nil

@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/etcd/auth"
 )
 
 // etcd's lease TTL bounds, in seconds. etcd raises a shorter TTL to 1.5
@@ -97,11 +98,40 @@ func (s *Server) LeaseRevoke(ctx context.Context, r *etcdserverpb.LeaseRevokeReq
 	if _, err := s.getLease(ctx, r.ID, true); err != nil {
 		return nil, err
 	}
+	if err := s.checkLeaseKeys(ctx, r.ID, auth.WRITE); err != nil {
+		return nil, err
+	}
 	rev, err := s.revokeLease(ctx, r.ID)
 	if err != nil {
 		return nil, err
 	}
 	return &etcdserverpb.LeaseRevokeResponse{Header: s.headerAt(rev)}, nil
+}
+
+// checkLeaseKeys returns PermissionDenied unless the user ctx authenticated
+// as has pt access to every key attached to the lease, as etcd requires to
+// revoke a lease or attach a key to it (write) and to read its time to live
+// (read). It passes while auth is disabled and for a user with the root role.
+func (s *Server) checkLeaseKeys(ctx context.Context, leaseID int64, pt auth.PermType) error {
+	if s.authStore == nil || !s.authStore.IsEnabled() {
+		return nil
+	}
+	user, ok := auth.UserFromContext(ctx)
+	if !ok {
+		return rpctypes.ErrGRPCPermissionDenied
+	}
+	if s.authStore.IsAdmin(user) {
+		return nil
+	}
+	keys, err := s.collectLeaseKeys(ctx, leaseID, true)
+	if err != nil {
+		return err
+	}
+	checks := make([]auth.RangeCheck, len(keys))
+	for i, key := range keys {
+		checks[i] = auth.RangeCheck{Key: key, PermType: pt}
+	}
+	return s.authStore.CheckRequest(user, checks)
 }
 
 func (s *Server) LeaseKeepAlive(stream etcdserverpb.Lease_LeaseKeepAliveServer) error {
@@ -131,6 +161,9 @@ func (s *Server) LeaseKeepAlive(stream etcdserverpb.Lease_LeaseKeepAliveServer) 
 func (s *Server) LeaseTimeToLive(ctx context.Context, r *etcdserverpb.LeaseTimeToLiveRequest) (*etcdserverpb.LeaseTimeToLiveResponse, error) {
 	rec, err := s.getLease(ctx, r.ID, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.checkLeaseKeys(ctx, r.ID, auth.READ); err != nil {
 		return nil, err
 	}
 	resp := &etcdserverpb.LeaseTimeToLiveResponse{

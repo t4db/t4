@@ -307,6 +307,14 @@ func (s *Store) RevokePermission(ctx context.Context, roleName, key, rangeEnd st
 // CheckPermission returns nil when the user identified by userName has pt
 // access to key, or when auth is disabled.
 func (s *Store) CheckPermission(userName, key string, pt PermType) error {
+	return s.CheckRangePermission(userName, key, "", pt)
+}
+
+// CheckRangePermission returns nil if userName's roles, together, grant pt
+// access to every key in [key, rangeEnd); an empty rangeEnd means key alone,
+// and "\x00" every key from key on. It always passes while auth is disabled
+// and for a user with the root role.
+func (s *Store) CheckRangePermission(userName, key, rangeEnd string, pt PermType) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -317,16 +325,37 @@ func (s *Store) CheckPermission(userName, key string, pt PermType) error {
 	if err != nil {
 		return fmt.Errorf("user %q not found", userName)
 	}
+	var perms []Permission
 	for _, roleName := range u.Roles {
 		r, err := s.getRole(roleName)
 		if err != nil {
 			continue
 		}
-		if r.HasPermission(key, pt) {
+		if r.Name == RootRole {
 			return nil
 		}
+		perms = append(perms, r.Permissions...)
+	}
+	if coversRange(perms, key, rangeEnd, pt) {
+		return nil
 	}
 	return fmt.Errorf("permission denied")
+}
+
+// IsAdmin reports whether userName may do anything: auth is disabled, or the
+// user has the root role.
+func (s *Store) IsAdmin(userName string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.enabled {
+		return true
+	}
+	u, err := s.getUser(userName)
+	if err != nil || !u.HasRole(RootRole) {
+		return false
+	}
+	_, err = s.getRole(RootRole)
+	return err == nil
 }
 
 // ── Internal helpers (caller holds mu) ───────────────────────────────────────
