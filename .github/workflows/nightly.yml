@@ -2,7 +2,7 @@ name: Nightly stress test
 
 on:
   schedule:
-    - cron: "0 2 * * *" # 02:00 UTC every night
+    - cron: "0 22 * * *" # 22:00 UTC every night
   workflow_dispatch: # allow manual trigger
   workflow_call: # the release workflow runs these before building (see image-release.yml)
 
