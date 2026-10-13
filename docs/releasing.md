@@ -7,13 +7,7 @@ What a maintainer needs to know that is **not** already encoded in CI workflows 
 Release tag (`v*`) push triggers `image-release.yml`, which gates publish on:
 
 - `precheck` — `ci.yml` workflow must have completed with `success` on the release SHA (waits up to ~30 min).
-- `jepsen` — full nemesis matrix (`partition-halves`, `kill`, `partition-s3`) on the release SHA via the reusable `jepsen-workflow.yml`. Guards linearizability per-release, not just nightly.
-
-`nightly.yml` still runs the same jepsen matrix plus `TestLongRunningConsistency` (30 min stress). Stress is not gated on release; if you care about it for a specific tag, trigger nightly on the SHA first:
-
-```bash
-gh workflow run nightly.yml --ref <release-sha>
-```
+- `nightly` — everything `nightly.yml` runs, on the release SHA: the full Jepsen nemesis × workload matrix, `TestLongRunningConsistency` (30 min stress) and etcd's three-node robustness tests on S3. A test added to the nightly gates releases too.
 
 Required CI checks on `main` are whichever checks are marked **required** in branch-protection settings. That config is authoritative — this page does not duplicate the list.
 
@@ -25,7 +19,7 @@ Required CI checks on `main` are whichever checks are marked **required** in bra
    git tag -a vX.Y.Z -m "vX.Y.Z" <release-sha>
    git push origin vX.Y.Z
    ```
-3. `image-release.yml` fires: precheck → jepsen → draft release (notes auto-generated from merged PRs via `gh release create --generate-notes`) → multi-arch image to GHCR (cosign-signed, SLSA provenance attested) → four binaries (provenance attested) → `checksums.txt` (cosign-signed `.sig` + `.pem`).
+3. `image-release.yml` fires: precheck → nightly tests → draft release (notes auto-generated from merged PRs via `gh release create --generate-notes`) → multi-arch image to GHCR (cosign-signed, SLSA provenance attested) → four binaries (provenance attested) → `checksums.txt` (cosign-signed `.sig` + `.pem`).
 4. Review the draft release notes, edit if needed, then unpublish "Draft".
 
 ## Verifying release artifacts
