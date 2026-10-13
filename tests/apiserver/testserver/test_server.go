@@ -41,9 +41,24 @@ func NewTestConfig(t testing.TB) *embed.Config {
 	cfg.AdvertiseClientUrls = []url.URL{clientURL}
 	cfg.InitialCluster = cfg.InitialClusterFromName(cfg.Name)
 	cfg.ZapLoggerBuilder = embed.NewZapLoggerBuilder(zaptest.NewLogger(t, zaptest.Level(zapcore.ErrorLevel)).Named("t4-apiserver"))
-	cfg.Dir = t.TempDir()
+	cfg.Dir = dataDir(t)
 	_ = os.Chmod(cfg.Dir, 0700)
 	return cfg
+}
+
+// dataDir returns a data directory on tmpfs where there is one. T4 fsyncs
+// every write and has no UnsafeNoFsync: on tmpfs an fsync costs nothing, as
+// with the embedded etcd these tests expect. Tests that time a write, such as
+// TestCompact's 100ms for a compaction cycle, otherwise fail on a slow disk.
+func dataDir(t testing.TB) string {
+	t.Helper()
+	if fi, err := os.Stat("/dev/shm"); err == nil && fi.IsDir() {
+		if dir, err := os.MkdirTemp("/dev/shm", "t4-apiserver-"); err == nil {
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			return dir
+		}
+	}
+	return t.TempDir()
 }
 
 func RunEtcd(t testing.TB, cfg *embed.Config) *kubernetes.Client {
