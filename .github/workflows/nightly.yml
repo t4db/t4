@@ -81,3 +81,23 @@ jobs:
           path: .tmp/robustness/results/
           retention-days: 30
           if-no-files-found: ignore
+
+  conformance:
+    name: Kubernetes conformance (k0s on T4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run Kubernetes conformance with Sonobuoy
+        run: make test-conformance
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-results-${{ github.sha }}
+          path: .tmp/conformance/
+          retention-days: 30
+          if-no-files-found: ignore

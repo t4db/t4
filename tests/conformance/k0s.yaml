@@ -1,0 +1,11 @@
+apiVersion: k0s.k0sproject.io/v1beta1
+kind: ClusterConfig
+metadata:
+  name: k0s
+spec:
+  storage:
+    type: etcd
+    etcd:
+      externalCluster:
+        endpoints: ["http://t4:3379"]
+        etcdPrefix: k0s

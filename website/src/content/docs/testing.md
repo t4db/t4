@@ -20,6 +20,7 @@ This page lists the test suites that back T4's correctness claims: what each one
 | etcd robustness tests, single node | Every PR |
 | etcd robustness tests, three nodes on S3 | Nightly and on every release tag |
 | Kubernetes apiserver storage and watch cache tests | Every PR |
+| Kubernetes conformance on k0s | Nightly and on every release tag |
 | Jepsen smoke matrix (3 jobs) | Every PR |
 | Jepsen full matrix (18 jobs) | Nightly and on every release tag |
 | 30-minute stress test | Nightly and on every release tag |
@@ -149,6 +150,16 @@ There is no fault injection: T4 runs as a single node.
 
 **When:** every PR.
 
+## Kubernetes conformance
+
+**What it proves:** a Kubernetes cluster that keeps its state in T4 passes the Kubernetes conformance tests.
+
+[`tests/conformance`](https://github.com/t4db/t4/tree/main/tests/conformance) builds a T4 image from the tree and starts a one-node [k0s](https://k0sproject.io/) cluster in Docker, with T4 as its external etcd. [Sonobuoy](https://sonobuoy.io/) then runs the conformance suite (`certified-conformance` mode) on it. This covers what the apiserver storage tests do not: the whole control plane on T4, with its controllers, watches, leader election leases and the apiserver's own compactions.
+
+There is no fault injection: T4 runs as a single node. Run it locally with `make test-conformance`; `T4_CONFORMANCE_MODE=quick` runs a single test.
+
+**When:** nightly and on every release tag. The full suite takes about two hours.
+
 ## Stress test
 
 **What it proves:** a cluster stays consistent through a long run of membership changes, leader changes and compactions under continuous writes.
@@ -170,7 +181,7 @@ The Go benchmarks for the root package and the etcd adapter run on every push to
 Pushing a release tag starts the release workflow, which:
 
 1. waits for the CI workflow to have passed on the tagged commit, and refuses to release otherwise;
-2. runs everything the nightly workflow runs on that commit: the full Jepsen matrix, the 30-minute stress test and the three-node robustness tests;
+2. runs everything the nightly workflow runs on that commit: the full Jepsen matrix, the 30-minute stress test, the three-node robustness tests and Kubernetes conformance;
 3. builds and publishes images and binaries only after both pass.
 
 ---
@@ -181,5 +192,5 @@ What the suites above do not cover today:
 
 - **No lease workload in Jepsen.** Leases are exercised by the robustness tests' `EtcdPutDeleteLease` traffic, under process kills and while the followers are cut off from the leader or a node from S3, by the differential tests (no faults), and by the integration tests for keepalive, expiry and revoke across a leader change. No test drives lease keepalive through a network partition: the robustness traffic grants and revokes leases but never keeps one alive.
 - **Network faults in the robustness tests run only nightly and on release tags.** They need a three-node cluster on S3; pull requests run the single-node scenarios.
-- **The differential and Kubernetes apiserver tests run a single node without faults.** They check API semantics, not behaviour under failure.
+- **The differential, Kubernetes apiserver and conformance tests run a single node without faults.** They check API semantics, not behaviour under failure.
 - **Jepsen runs are short.** Each job runs 60 seconds of traffic with three clients, on one host in Docker.

@@ -7,7 +7,7 @@ What a maintainer needs to know that is **not** already encoded in CI workflows 
 Release tag (`v*`) push triggers `image-release.yml`, which gates publish on:
 
 - `precheck` — `ci.yml` workflow must have completed with `success` on the release SHA (waits up to ~30 min).
-- `nightly` — everything `nightly.yml` runs, on the release SHA: the full Jepsen nemesis × workload matrix, `TestLongRunningConsistency` (30 min stress) and etcd's three-node robustness tests on S3. A test added to the nightly gates releases too.
+- `nightly` — everything `nightly.yml` runs, on the release SHA: the full Jepsen nemesis × workload matrix, `TestLongRunningConsistency` (30 min stress), etcd's three-node robustness tests on S3 and Kubernetes conformance on k0s (about 2 h). A test added to the nightly gates releases too.
 
 Required CI checks on `main` are whichever checks are marked **required** in branch-protection settings. That config is authoritative — this page does not duplicate the list.
 
