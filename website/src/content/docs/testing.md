@@ -154,7 +154,7 @@ There is no fault injection: T4 runs as a single node.
 
 **What it proves:** a Kubernetes cluster that keeps its state in T4 passes the Kubernetes conformance tests.
 
-[`tests/conformance`](https://github.com/t4db/t4/tree/main/tests/conformance) builds a T4 image from the tree and starts a one-node [k0s](https://k0sproject.io/) cluster in Docker, with T4 as its external etcd. [Sonobuoy](https://sonobuoy.io/) then runs the conformance suite (`certified-conformance` mode) on it. This covers what the apiserver storage tests do not: the whole control plane on T4, with its controllers, watches, leader election leases and the apiserver's own compactions.
+[`tests/conformance`](https://github.com/t4db/t4/tree/main/tests/conformance) builds a T4 image from the tree and starts a two-node [k0s](https://k0sproject.io/) cluster in Docker (a controller that also runs workloads, and a worker), with T4 as its external etcd. [Sonobuoy](https://sonobuoy.io/) then runs the conformance suite (`certified-conformance` mode) on it. This covers what the apiserver storage tests do not: the whole control plane on T4, with its controllers, watches, leader election leases and the apiserver's own compactions.
 
 There is no fault injection: T4 runs as a single node. Run it locally with `make test-conformance`; `T4_CONFORMANCE_MODE=quick` runs a single test.
 

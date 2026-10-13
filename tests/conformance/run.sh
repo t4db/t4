@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the Kubernetes conformance tests with Sonobuoy on a one-node k0s
+# Runs the Kubernetes conformance tests with Sonobuoy on a two-node k0s
 # cluster that keeps its state in T4, built from this tree.
 set -euo pipefail
 
@@ -13,14 +13,16 @@ K0S_MEMORY="${T4_CONFORMANCE_K0S_MEMORY:-8g}"
 NET=t4-conformance
 T4=t4-conformance-t4
 K0S=t4-conformance-k0s
+WORKER=t4-conformance-worker
 
 remove() {
-  docker rm -f "$K0S" "$T4" >/dev/null 2>&1 || true
+  docker rm -f "$WORKER" "$K0S" "$T4" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 finish() {
   docker logs "$T4" >"$RESULTS_DIR/t4.log" 2>&1 || true
   docker logs "$K0S" >"$RESULTS_DIR/k0s.log" 2>&1 || true
+  docker logs "$WORKER" >"$RESULTS_DIR/worker.log" 2>&1 || true
   # T4_CONFORMANCE_KEEP=1 leaves the cluster up to look into.
   if [[ -z "${T4_CONFORMANCE_KEEP:-}" ]]; then
     remove
@@ -62,9 +64,22 @@ docker run -d --name "$K0S" --hostname k0s --network "$NET" \
   --kubelet-extra-args="$KUBELET_ARGS" >/dev/null
 docker cp "$SONOBUOY" "$K0S:/usr/local/bin/sonobuoy"
 
-echo "Waiting for the k0s node to be ready"
+# The conformance suite needs two nodes: the controller's own and a worker.
 for _ in $(seq 1 60); do
-  if docker exec "$K0S" k0s kubectl wait --for=condition=Ready node --all --timeout=5s >/dev/null 2>&1; then
+  if token="$(docker exec "$K0S" k0s token create --role=worker 2>/dev/null)"; then
+    break
+  fi
+  sleep 5
+done
+docker run -d --name "$WORKER" --hostname worker --network "$NET" \
+  --privileged --cgroupns=host --memory "$K0S_MEMORY" --memory-swap "$K0S_MEMORY" \
+  -v /var/lib/k0s "docker.io/k0sproject/k0s:$K0S_VERSION" \
+  k0s worker --kubelet-extra-args="$KUBELET_ARGS" "$token" >/dev/null
+
+echo "Waiting for both k0s nodes to be ready"
+for _ in $(seq 1 60); do
+  ready="$(docker exec "$K0S" k0s kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || true)"
+  if [[ "$ready" == 2 ]]; then
     break
   fi
   sleep 5
