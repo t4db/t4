@@ -1869,7 +1869,17 @@ func (s *Store) watchLoop(
 		s.watchHubMu.Unlock()
 
 		gap, ok := s.scanWatchRange(prefix, boundary+1, handoff, withPrevKV)
-		if !ok || !s.sendWatchEvents(ctx, ch, replay) || !s.sendWatchEvents(ctx, ch, gap) {
+		if !ok {
+			return
+		}
+		// A compaction past nextRev may have deleted records the scans
+		// needed. applyCompact raises compactRev before its deletions
+		// commit, so a scan that missed any sees it here. End the watch: one
+		// started again from nextRev is refused as compacted.
+		if atomic.LoadInt64(&s.compactRev) > nextRev {
+			return
+		}
+		if !s.sendWatchEvents(ctx, ch, replay) || !s.sendWatchEvents(ctx, ch, gap) {
 			return
 		}
 		// Seal the replay the same way the dispatcher seals a live batch.
