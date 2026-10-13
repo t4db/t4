@@ -80,7 +80,7 @@ There is no fault injection: both servers run as a single node.
 
 ## etcd robustness tests
 
-**What they prove:** T4 passes etcd's own correctness checks for linearizability and watch guarantees while nodes crash.
+**What they prove:** T4 passes etcd's own correctness checks for linearizability and watch guarantees while nodes crash, lose each other, or lose S3, and while history is compacted.
 
 [`tests/robustness`](https://github.com/t4db/t4/tree/main/tests/robustness) drives real `t4 run` processes with the traffic generators and validators from etcd's robustness suite (`go.etcd.io/etcd/tests/v3/robustness`). Validation requires that:
 
@@ -91,15 +91,22 @@ There is no fault injection: both servers run as a single node.
 
 Two traffic scenarios run: `EtcdPutDeleteLease` (puts, deletes and leases) and `Kubernetes` (traffic shaped like the Kubernetes apiserver's).
 
-**Fault injection:** the harness, not etcd's gofail failpoints, injects one fault per run once traffic is up to speed: SIGKILL of a random node, the leader, a follower, or every node, followed by a restart; or a graceful restart of the leader. On a single node only the random-node kill applies.
+**Fault injection:** the harness, not etcd's gofail failpoints, injects one fault per run once traffic is up to speed:
+
+- SIGKILL of a random node, the leader, a follower, or every node, followed by a restart; or a graceful restart of the leader.
+- In a three-node cluster, network faults through a proxy in front of each node's peer and S3 traffic: the followers cut off from the leader, the leader's peer traffic delayed by 50–200 ms, or the leader or a follower cut off from S3. A cut connection drops what is sent rather than closing, as on a lossy network.
+
+On a single node only the random-node kill applies. Like a supervisor, the harness restarts a node whose `t4` process exits on its own, as a leader does when it steps down after losing S3.
+
+Every scenario also compacts the history every 200 ms, including to revisions already compacted and to revisions that do not exist yet, which must be refused as etcd refuses them.
 
 **Differences from upstream:**
 
 - etcd validates against the requests it persisted, read from its raft WAL. T4 has no raft WAL, so the history is rebuilt from a watch over the whole keyspace.
-- That history cannot place a compaction among the revisions, so compaction traffic is left out.
+- A compaction takes no revision, so that history has no place for one. A successful compaction is left out of it and placed by linearization alone; the compaction loop never compacts past what the history watch has seen.
 - T4 does not implement etcd 3.7's `RangeStream`, which etcd's traffic uses for some reads. Those reads fail and, like any failed read, are left out of validation.
 
-**When:** every PR runs the single-node scenarios. The nightly workflow also runs a three-node cluster against RustFS, skipping `EtcdPutDeleteLease/KillAllNodes`: killing every node leaves enough writes with unknown outcomes that the linearizability check runs out of time before reaching a verdict.
+**When:** every PR runs the single-node scenarios. The nightly workflow also runs every scenario and fault on a three-node cluster against RustFS.
 
 ## Jepsen
 
@@ -175,10 +182,8 @@ The 30-minute stress test and the three-node robustness run are not part of the 
 
 What the suites above do not cover today:
 
-- **No lease workload in Jepsen.** Leases are exercised by the robustness tests' `EtcdPutDeleteLease` traffic (under process kills), the differential tests (no faults), and the integration tests for keepalive, expiry and revoke across a leader change. No test drives lease keepalive and revoke through a network partition.
-- **Robustness tests inject only process kills and a graceful leader restart.** No network partitions or S3 outages; those are covered by Jepsen and the integration tests.
-- **Robustness tests leave out compaction traffic**, because the history rebuilt from a watch cannot place a compaction among the revisions.
-- **The nightly three-node robustness run skips `EtcdPutDeleteLease/KillAllNodes`**, because the linearizability check runs out of time on its history.
+- **No lease workload in Jepsen.** Leases are exercised by the robustness tests' `EtcdPutDeleteLease` traffic, under process kills and while the followers are cut off from the leader or a node from S3, by the differential tests (no faults), and by the integration tests for keepalive, expiry and revoke across a leader change. No test drives lease keepalive through a network partition: the robustness traffic grants and revokes leases but never keeps one alive.
+- **Network faults in the robustness tests run only nightly.** They need a three-node cluster on S3; pull requests run the single-node scenarios.
 - **`RangeStream` is not implemented.** The robustness traffic's `RangeStream` reads fail and are left out of validation.
 - **The differential and Kubernetes apiserver tests run a single node without faults.** They check API semantics, not behaviour under failure.
 - **Jepsen runs are short.** Each job runs 60 seconds of traffic with three clients, on one host in Docker.

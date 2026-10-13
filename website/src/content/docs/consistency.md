@@ -89,11 +89,11 @@ Nemeses (the same for every workload):
 
 Every PR runs a smoke matrix (`partition-halves` × `register`, `multi-register`, `append`). The nightly workflow and every release tag run the full matrix (every nemesis × every workload = 18 jobs); a release is not built until it passes.
 
-Jepsen is one of several suites. etcd's own robustness tests check linearizability and watch guarantees while nodes are killed, differential tests compare every response and revision with a real etcd, and Kubernetes' apiserver storage tests run against T4. See [Testing](/testing/) for what each suite covers and when it runs.
+Jepsen is one of several suites. etcd's own robustness tests check linearizability and watch guarantees while nodes are killed or lose each other or S3, and while history is compacted, differential tests compare every response and revision with a real etcd, and Kubernetes' apiserver storage tests run against T4. See [Testing](/testing/) for what each suite covers and when it runs.
 
 ### What Jepsen does not prove (today)
 
-- **Leases.** No Jepsen workload uses leases. Lease grant, revoke and expiry are exercised by etcd's robustness tests under process kills, by the differential tests against etcd, and by Go integration tests across a leader change, but nothing drives lease keepalive and revoke through a network partition.
+- **Leases.** No Jepsen workload uses leases. Lease grant, revoke and expiry are exercised by etcd's robustness tests under process kills and network and S3 faults, by the differential tests against etcd, and by Go integration tests across a leader change, but nothing drives lease keepalive through a network partition.
 - **Long runs.** Each Jepsen job runs 60 seconds of traffic with three clients.
 
 The full list of known gaps is on the [Testing](/testing/#known-gaps) page.
