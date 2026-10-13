@@ -61,6 +61,9 @@ func NewStore(n node) (*Store, error) {
 	return s, nil
 }
 
+// AuthPrefix is the reserved prefix of the auth state's keys.
+const AuthPrefix = authPrefix
+
 // IsAuthPrefix reports whether key is in the reserved auth namespace.
 func IsAuthPrefix(key string) bool {
 	return len(key) >= len(authPrefix) && key[:len(authPrefix)] == authPrefix

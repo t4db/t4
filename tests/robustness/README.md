@@ -80,10 +80,6 @@ Like a supervisor, the harness restarts a node whose `t4` process exits on
 its own, as a leader does when it steps down after losing S3; the node then
 rejoins as a follower.
 
-T4 does not implement etcd 3.7's `RangeStream`, which the etcd traffic uses
-for some reads. Those reads fail and, like any failed read, are left out of
-validation.
-
 ## CI
 
 Pull requests run the single-node scenarios. The nightly workflow runs the

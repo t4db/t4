@@ -13,7 +13,9 @@ package etcddiff
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"net/url"
@@ -263,6 +265,44 @@ func (p *pair) txn(cmps []clientv3.Cmp, then, els []clientv3.Op) {
 func (p *pair) state() {
 	p.t.Helper()
 	p.get("", clientv3.WithPrefix())
+	p.rangeStream(&etcdserverpb.RangeRequest{Key: []byte{0}, RangeEnd: []byte{0}})
+	p.rangeStream(&etcdserverpb.RangeRequest{Key: []byte{0}, RangeEnd: []byte{0}, Limit: 3})
+}
+
+// rangeStream compares RangeStream on both backends, each merged from its
+// chunks.
+func (p *pair) rangeStream(r *etcdserverpb.RangeRequest) {
+	p.t.Helper()
+	merge := func(cli *clientv3.Client) (*etcdserverpb.RangeResponse, error) {
+		stream, err := etcdserverpb.NewKVClient(cli.ActiveConnection()).RangeStream(p.ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		merged := &etcdserverpb.RangeResponse{}
+		for {
+			resp, err := stream.Recv()
+			if errors.Is(err, io.EOF) {
+				return merged, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			rr := resp.RangeResponse
+			merged.Kvs = append(merged.Kvs, rr.Kvs...)
+			if rr.Header != nil {
+				merged.Header, merged.More, merged.Count = rr.Header, rr.More, rr.Count
+			}
+		}
+	}
+	e, eErr := merge(p.etcd)
+	t, tErr := merge(p.t4)
+	if p.compareErr(eErr, tErr) {
+		p.compareHeader(e.Header, t.Header)
+		if e.Count != t.Count || e.More != t.More {
+			p.failf("range stream count/more: etcd=%d/%v t4=%d/%v", e.Count, e.More, t.Count, t.More)
+		}
+		p.compareKVs("range stream kvs", e.Kvs, t.Kvs)
+	}
 }
 
 // workload drives both backends with the same random operations.
