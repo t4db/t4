@@ -187,6 +187,11 @@ func TestNoopTxnRevisionUnderWrites(t *testing.T) {
 		if len(resp.DeletedKeys) != 0 {
 			continue
 		}
+		if resp.Revision == 0 {
+			// Answered before the first write committed: nothing existed
+			// then. Get would read revision 0 as the current one.
+			continue
+		}
 		kv, err := n.Get("/k", WithRevision(resp.Revision))
 		if err != nil {
 			t.Fatalf("Get at %d: %v", resp.Revision, err)
