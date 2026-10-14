@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -681,6 +682,23 @@ func TestStatusReportsStorageVersion(t *testing.T) {
 	}
 	if resp.DbSize <= 0 {
 		t.Fatalf("DbSize=%d, want > 0", resp.DbSize)
+	}
+}
+
+// TestStatusReportsDbSizeInUse: Status reports the part of DbSize in use, as
+// etcd does. Defragmenting tools compare the two, and with DbSizeInUse left
+// at 0 a T4 database would look entirely fragmented.
+func TestStatusReportsDbSizeInUse(t *testing.T) {
+	srv := newServer(t)
+	for i := range 100 {
+		put(t, srv, fmt.Sprintf("/k/%d", i), strings.Repeat("v", 1<<10))
+	}
+	resp, err := srv.Status(context.Background(), &etcdserverpb.StatusRequest{})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if resp.DbSizeInUse <= 0 || resp.DbSizeInUse > resp.DbSize {
+		t.Fatalf("DbSizeInUse=%d with DbSize=%d, want in (0, DbSize]", resp.DbSizeInUse, resp.DbSize)
 	}
 }
 
