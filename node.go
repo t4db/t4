@@ -1415,6 +1415,18 @@ func (n *Node) DBSize() (int64, error) {
 	return int64(n.db.Load().DiskSpaceUsage()), nil
 }
 
+// DBSizeInUse returns DBSize less the files Pebble has made obsolete and
+// deletes on its own. Unlike etcd's bbolt file, Pebble needs no defragment to
+// give space back, so this is all a defragment could free.
+func (n *Node) DBSizeInUse() (int64, error) {
+	n.readMu.RLock()
+	defer n.readMu.RUnlock()
+	if n.closed.Load() {
+		return 0, ErrClosed
+	}
+	return int64(n.db.Load().DiskSpaceInUse()), nil
+}
+
 func (n *Node) CurrentRevision() int64 { return n.db.Load().CurrentRevision() }
 func (n *Node) CompactRevision() int64 { return n.db.Load().CompactRevision() }
 func (n *Node) Config() Config         { return n.cfg }

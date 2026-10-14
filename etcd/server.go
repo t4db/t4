@@ -495,10 +495,17 @@ func (s *Server) Alarm(_ context.Context, _ *etcdserverpb.AlarmRequest) (*etcdse
 }
 
 // Status returns basic node status: current revision, leader, version, the
-// local Pebble size as DbSize, and the database's data format version as
-// StorageVersion, where etcd reports its storage schema version.
+// local Pebble size as DbSize and the part of it in use as DbSizeInUse, and
+// the database's data format version as StorageVersion, where etcd reports
+// its storage schema version.
 func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcdserverpb.StatusResponse, error) {
 	dbSize, err := s.node.DBSize()
+	if err != nil {
+		return nil, err
+	}
+	// Tools that defragment etcd do so when DbSize is well above
+	// DbSizeInUse. Left at 0, T4 would look entirely fragmented.
+	inUse, err := s.node.DBSizeInUse()
 	if err != nil {
 		return nil, err
 	}
@@ -513,6 +520,7 @@ func (s *Server) Status(_ context.Context, _ *etcdserverpb.StatusRequest) (*etcd
 		Version:          emulatedETCDVersion,
 		StorageVersion:   storageVersion,
 		DbSize:           dbSize,
+		DbSizeInUse:      min(inUse, dbSize),
 		Leader:           leader,
 		RaftIndex:        uint64(etcdRev),
 		RaftAppliedIndex: uint64(etcdRev),
