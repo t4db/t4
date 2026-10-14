@@ -1548,6 +1548,18 @@ func (n *Node) DBSize() (int64, error) {
 	return int64(n.db.Load().DiskSpaceUsage()), nil
 }
 
+// DBSizeInUse returns DBSize less the files Pebble has made obsolete and
+// deletes on its own. Unlike etcd's bbolt file, Pebble needs no defragment to
+// give space back, so this is all a defragment could free.
+func (n *Node) DBSizeInUse() (int64, error) {
+	n.readMu.RLock()
+	defer n.readMu.RUnlock()
+	if n.closed.Load() {
+		return 0, ErrClosed
+	}
+	return int64(n.db.Load().DiskSpaceInUse()), nil
+}
+
 // HashKV hashes this node's local key history up to rev (0 for the current
 // revision), as etcd's HashKV does, so replicas can be compared: two nodes
 // that applied the same log return the same hash for the same revision.
