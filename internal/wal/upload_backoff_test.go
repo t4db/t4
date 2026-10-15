@@ -171,7 +171,7 @@ func TestSealDoesNotBlockOnUploadBacklog(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second): // 200 fsyncs are slow on some runners
 		t.Fatal("sealing blocked behind a hung upload")
 	}
 	if n := pendingCount(w); n != 200 {

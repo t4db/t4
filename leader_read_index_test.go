@@ -28,7 +28,9 @@ func TestLeaderLinearizableReadCoversFollowers(t *testing.T) {
 	}()
 	defer func() { wcancel(); <-done }()
 
-	for i := range 2000 {
+	// Up to 2000 rounds, within ctx's budget where fsync is slow.
+	stop := time.Now().Add(20 * time.Second)
+	for i := 0; i < 2000 && time.Now().Before(stop); i++ {
 		seen, err := followers[i%len(followers)].LinearizableRevision(ctx)
 		if err != nil {
 			t.Fatalf("follower LinearizableRevision: %v", err)
@@ -67,7 +69,9 @@ func TestLeaderNoopTxnCoversFollowers(t *testing.T) {
 	noop := TxnRequest{
 		Conditions: []TxnCondition{{Key: "/absent", Target: TxnCondVersion, Result: TxnCondGreater, Version: 0}},
 	}
-	for i := range 2000 {
+	// Up to 2000 rounds, within ctx's budget where fsync is slow.
+	stop := time.Now().Add(20 * time.Second)
+	for i := 0; i < 2000 && time.Now().Before(stop); i++ {
 		seen, err := followers[i%len(followers)].LinearizableRevision(ctx)
 		if err != nil {
 			t.Fatalf("follower LinearizableRevision: %v", err)

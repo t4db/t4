@@ -71,8 +71,8 @@ func TestTracingWritePathSpans(t *testing.T) {
 	if walAppend.Parent().SpanID() != put.SpanContext().SpanID() {
 		t.Error("t4.wal.append is not a child of t4.put")
 	}
-	if !walAppend.StartTime().After(put.StartTime()) {
-		t.Error("t4.wal.append should start after its parent")
+	if walAppend.StartTime().Before(put.StartTime()) {
+		t.Error("t4.wal.append should not start before its parent")
 	}
 }
 

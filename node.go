@@ -1777,7 +1777,7 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 		}
 		// Closed before the file is removed: Windows refuses to remove an
 		// open file.
-		f.Close()
+		_ = f.Close()
 		if errors.Is(err, object.ErrPreconditionFailed) {
 			metrics.WALUploadConflicts.Inc()
 			if err := segmentPublished(ctx, obj, localPath, objectKey); err != nil {
