@@ -13,6 +13,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/sirupsen/logrus"
 
+	"github.com/t4db/t4/internal/osfile"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -343,7 +344,7 @@ func (u *SSTUploader) uploadOne(ctx context.Context, path string) error {
 		return fmt.Errorf("sstuploader: hash %q: %w", name, err)
 	}
 
-	f, err := os.Open(path)
+	f, err := osfile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // same: already compacted
@@ -377,7 +378,7 @@ func (u *SSTUploader) uploadOne(ctx context.Context, path string) error {
 
 // contentSSTKey returns "sst/{first16hexOfSHA256}/{name}" for the file at path.
 func contentSSTKey(path, name string) (string, error) {
-	f, err := os.Open(path)
+	f, err := osfile.Open(path)
 	if err != nil {
 		return "", err
 	}

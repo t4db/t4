@@ -1769,24 +1769,26 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 			log.Errorf("uploader: local file %q is gone AND %q is not in S3 — segment data is lost", localPath, objectKey)
 			return fmt.Errorf("uploader: open %q: %w", localPath, err)
 		}
-		defer f.Close()
 		start := time.Now()
 		if cond != nil {
 			err = cond.PutIfAbsent(ctx, objectKey, f)
-			if errors.Is(err, object.ErrPreconditionFailed) {
-				metrics.WALUploadConflicts.Inc()
-				if err := segmentPublished(ctx, obj, localPath, objectKey); err != nil {
-					metrics.WALUploadErrors.Inc()
-					log.Errorf("uploader: %v", err)
-					return err
-				}
-				// Another writer published these entries first. Its copy is
-				// authoritative; drop ours and reclaim the local file.
-				log.Debugf("uploader: %q already present in object storage — keeping the existing object", objectKey)
-				return os.Remove(localPath)
-			}
 		} else {
 			err = obj.Put(ctx, objectKey, f)
+		}
+		// Closed before the file is removed: Windows refuses to remove an
+		// open file.
+		f.Close()
+		if errors.Is(err, object.ErrPreconditionFailed) {
+			metrics.WALUploadConflicts.Inc()
+			if err := segmentPublished(ctx, obj, localPath, objectKey); err != nil {
+				metrics.WALUploadErrors.Inc()
+				log.Errorf("uploader: %v", err)
+				return err
+			}
+			// Another writer published these entries first. Its copy is
+			// authoritative; drop ours and reclaim the local file.
+			log.Debugf("uploader: %q already present in object storage — keeping the existing object", objectKey)
+			return os.Remove(localPath)
 		}
 		if err != nil {
 			metrics.WALUploadErrors.Inc()

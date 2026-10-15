@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/t4db/t4/internal/osfile"
 )
 
 // Segment file format:
@@ -88,7 +90,7 @@ func OpenSegmentWriter(dir string, term uint64, firstRev int64) (*SegmentWriter,
 	name := SegmentName(term, firstRev)
 	path := filepath.Join(dir, name)
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := osfile.Create(path)
 	if err != nil {
 		return nil, fmt.Errorf("wal: create segment %q: %w", path, err)
 	}
@@ -271,7 +273,7 @@ type SegmentReader struct {
 
 // OpenSegmentFile opens a local file for reading.
 func OpenSegmentFile(path string) (*SegmentReader, func(), error) {
-	f, err := os.Open(path)
+	f, err := osfile.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("wal: open segment %q: %w", path, err)
 	}
