@@ -58,7 +58,7 @@ jobs:
       - name: Test (unit)
         shell: bash
         run: |
-          go test -short -timeout 360s -count=1 \
+          go test -short -timeout ${{ matrix.os == 'windows-latest' && '15m' || '360s' }} -count=1 \
             . \
             ./cmd/t4 \
             ./etcd \

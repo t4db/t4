@@ -25,7 +25,9 @@ import (
 // signals when the first checkpoint object starts uploading, so a test can
 // observe the system while a checkpoint upload is still in flight. WAL and SST
 // uploads don't count: the WAL seal and Pebble flush queue them while the
-// checkpoint still holds the write fence.
+// checkpoint still holds the write fence. WAL uploads aren't delayed: a leader
+// without followers uploads WAL synchronously, so a write may wait for the
+// segment the checkpoint sealed, which isn't the checkpoint upload.
 type blockingStore struct {
 	object.Store
 	delay    time.Duration
@@ -45,10 +47,12 @@ func (s *blockingStore) Put(ctx context.Context, key string, r io.Reader) error 
 	s.mu.Lock()
 	s.putKeys = append(s.putKeys, key)
 	s.mu.Unlock()
-	select {
-	case <-time.After(s.delay):
-	case <-ctx.Done():
-		return ctx.Err()
+	if !strings.HasPrefix(key, "wal/") {
+		select {
+		case <-time.After(s.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	err := s.Store.Put(ctx, key, r)
 	s.mu.Lock()
