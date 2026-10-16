@@ -463,8 +463,10 @@ func runCompactLoop(ctx context.Context, c *client.RecordingClient, period time.
 		// The status may come from a node behind the leader, so a revision
 		// past it may exist already: every compaction stays within
 		// historySeen, and one in eight targets a revision too far ahead to
-		// exist, to be refused as a future revision.
-		if resp.Header.Revision < last {
+		// exist, to be refused as a future revision. RandRange needs a
+		// non-empty range: nothing written since the last compaction leaves
+		// nothing to compact.
+		if resp.Header.Revision <= last {
 			continue
 		}
 		rev := min(random.RandRange(last, resp.Header.Revision), historySeen.Load())
