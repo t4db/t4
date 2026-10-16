@@ -19,7 +19,7 @@ Required CI checks on `main` are whichever checks are marked **required** in bra
    git tag -a vX.Y.Z -m "vX.Y.Z" <release-sha>
    git push origin vX.Y.Z
    ```
-3. `image-release.yml` fires: precheck → nightly tests → draft release (notes auto-generated from merged PRs via `gh release create --generate-notes`) → multi-arch image to GHCR (cosign-signed, SLSA provenance attested) → four binaries (provenance attested) → `checksums.txt` (cosign-signed `.sig` + `.pem`).
+3. `image-release.yml` fires: precheck → nightly tests → draft release (notes auto-generated from merged PRs via `gh release create --generate-notes`) → multi-arch image to GHCR (cosign-signed, SLSA provenance attested) → six binaries: Linux, macOS and Windows on amd64 and arm64 (provenance attested) → `checksums.txt` (cosign-signed `.sig` + `.pem`).
 4. Review the draft release notes, edit if needed, then unpublish "Draft".
 
 ## Verifying release artifacts

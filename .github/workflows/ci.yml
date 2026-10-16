@@ -37,8 +37,6 @@ jobs:
   test-unit:
     name: Test Unit (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Windows is experimental: report it, but don't fail CI on it.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:

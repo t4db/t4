@@ -11,7 +11,7 @@ This page lists the test suites that back T4's correctness claims: what each one
 
 | Suite | Runs |
 |---|---|
-| Go unit tests and compatibility fixtures | Every PR (Linux and macOS) |
+| Go unit tests and compatibility fixtures | Every PR (Linux, macOS and Windows) |
 | Go integration tests, including the chaos test | Every PR |
 | Race detector over the whole main module | Every PR |
 | S3 end-to-end tests | Every PR |
@@ -33,7 +33,7 @@ This page lists the test suites that back T4's correctness claims: what each one
 
 **What they prove:** the storage engine, WAL, replication, leader election, checkpointing, leases, auth and the etcd adapter behave as specified, including under crashes, object store outages and partitions between nodes.
 
-- **Unit tests** cover the root package, `cmd/t4`, the etcd adapter (`etcd`, `etcd/auth`), `internal/...` and `pkg/object`. They run with `-short` on Linux and macOS.
+- **Unit tests** cover the root package, `cmd/t4`, the etcd adapter (`etcd`, `etcd/auth`), `internal/...` and `pkg/object`. They run with `-short` on Linux, macOS and Windows.
 - **Integration tests** in [`tests/integration`](https://github.com/t4db/t4/tree/main/tests/integration) are black-box scenarios through the public `t4` API: multi-node clusters, scale down and up, recovery from checkpoints and WAL, leader failover, watches and leases across a leader change, and corruption of the WAL and checkpoints. Faults are injected in-process: nodes are closed or killed mid-commit, the object store is wrapped to fail on demand, and peer traffic goes through a proxy that can be blocked to partition a follower from the leader.
 - **`TestChaos`** runs rounds of concurrent writes on a three-node cluster, kills a random node each round (the leader about a third of the time), restarts it from an empty data directory so it must recover from the object store, and checks that every acknowledged write is still readable. CI runs 5 rounds; `T4_CHAOS_ROUNDS` runs more.
 - **Race detector:** a separate job runs `go test -race ./...` over the whole main module without `-short`, so the integration tests, `TestChaos` and a 3-minute run of the stress test below also run under the race detector.

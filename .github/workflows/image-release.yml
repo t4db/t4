@@ -172,6 +172,14 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: arm64
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+          - goos: windows
+            goarch: arm64
+            ext: .exe
+    env:
+      BIN: t4-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
     steps:
       - uses: actions/checkout@v7
 
@@ -195,26 +203,26 @@ jobs:
               -X github.com/t4db/t4/internal/version.Version=${TAG_NAME} \
               -X github.com/t4db/t4/internal/version.Commit=${GITHUB_SHA} \
               -X github.com/t4db/t4/internal/version.Date=${DATE}" \
-            -o "dist/t4-${GOOS}-${GOARCH}" \
+            -o "dist/${BIN}" \
             ./cmd/t4
 
       - name: Attest binary provenance
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: dist/t4-${{ matrix.goos }}-${{ matrix.goarch }}
+          subject-path: dist/${{ env.BIN }}
 
       - name: Upload binary to draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.release.outputs.tag_name }}
         run: |
-          gh release upload "$TAG_NAME" ./dist/t4-${{ matrix.goos }}-${{ matrix.goarch }} --clobber
+          gh release upload "$TAG_NAME" "./dist/${BIN}" --clobber
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v7
         with:
-          name: t4-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/t4-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: ${{ env.BIN }}
+          path: dist/${{ env.BIN }}
           if-no-files-found: error
 
   checksums:
