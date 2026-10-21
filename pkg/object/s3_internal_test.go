@@ -132,3 +132,15 @@ func TestS3StorePrefixIgnoresSurroundingSlashes(t *testing.T) {
 		t.Errorf("nested prefix: key = %q, want %q", got, "a/b/wal/1")
 	}
 }
+
+func TestS3StoreSubNestsBelowPrefix(t *testing.T) {
+	for _, tc := range []struct{ prefix, sub, want string }{
+		{"t4", "dbs/a", "t4/dbs/a/wal/1"},
+		{"", "dbs/a", "dbs/a/wal/1"},
+		{"/t4/", "/dbs/a/", "t4/dbs/a/wal/1"},
+	} {
+		if got := NewS3Store(nil, "bucket", tc.prefix).Sub(tc.sub).key("wal/1"); got != tc.want {
+			t.Errorf("prefix %q sub %q: key = %q, want %q", tc.prefix, tc.sub, got, tc.want)
+		}
+	}
+}

@@ -15,10 +15,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/soheilhy/cmux"
 	"github.com/spf13/cobra"
@@ -32,8 +32,9 @@ import (
 	"github.com/t4db/t4"
 	t4etcd "github.com/t4db/t4/etcd"
 	"github.com/t4db/t4/etcd/auth"
+	"github.com/t4db/t4/internal/dbmux"
 	"github.com/t4db/t4/internal/gateway"
-	"github.com/t4db/t4/internal/metrics"
+	"github.com/t4db/t4/pkg/object"
 )
 
 func runCmd() *cobra.Command {
@@ -87,6 +88,8 @@ func runCmd() *cobra.Command {
 		// branch node
 		branchPrefix     string
 		branchCheckpoint string
+		// several databases
+		databases []string
 		// gRPC keepalive (etcd-compatible defaults)
 		grpcKeepaliveMinTime             time.Duration
 		grpcStreamWorkers                int
@@ -129,6 +132,20 @@ func runCmd() *cobra.Command {
 			}
 			if autoCompactRevisions < 0 {
 				return fmt.Errorf("--auto-compact-retain-revisions must be non-negative")
+			}
+			if len(databases) > 0 {
+				if err := validateDatabases(databases); err != nil {
+					return err
+				}
+				if clientTLSCert == "" || clientTLSCA == "" {
+					return fmt.Errorf("--db requires --client-tls-cert, --client-tls-key and --client-tls-ca: clients reach the database named by the Common Name of their certificate")
+				}
+				if peerListenAddr != "" {
+					return fmt.Errorf("--db does not support --peer-listen yet: several databases are served by a single node")
+				}
+				if branchPrefix != "" || branchCheckpoint != "" {
+					return fmt.Errorf("--db cannot be combined with --branch-prefix")
+				}
 			}
 
 			logrus.WithFields(startupLogFields(
@@ -209,6 +226,7 @@ func runCmd() *cobra.Command {
 				logrus.Info("peer mTLS enabled for node replication")
 			}
 
+			var s3Store *object.S3Store
 			if s3.configured() {
 				obj, err := s3.newStore(cmd.Context(), "")
 				if err != nil {
@@ -216,6 +234,14 @@ func runCmd() *cobra.Command {
 				}
 				cfg.ObjectStore = obj
 				logrus.Infof("using object store %s", s3.uri())
+				// Several databases divide one store by prefix, which needs
+				// the store itself rather than the Store interface.
+				if len(databases) > 0 {
+					var ok bool
+					if s3Store, ok = obj.(*object.S3Store); !ok {
+						return fmt.Errorf("--db needs an S3 object store: %s cannot be divided by prefix yet", s3.uri())
+					}
+				}
 			} else {
 				logrus.Warn("no object store configured — durability is local-only")
 			}
@@ -241,53 +267,38 @@ func runCmd() *cobra.Command {
 					branchPrefix, branchCheckpoint)
 			}
 
-			node, err := t4.Open(cfg)
+			dbs, metricsHandler, err := openDatabases(cfg, s3Store, databases)
 			if err != nil {
-				return fmt.Errorf("open node: %w", err)
+				return err
 			}
-			defer node.Close()
-			logrus.WithFields(logrus.Fields{
-				"listen_addr": listenAddr,
-				"mode":        runMode(storeURIOrEmpty(s3), peerListenAddr, branchCheckpoint),
-				"node_id":     resolvedNodeID(nodeID),
-				"revision":    node.CurrentRevision(),
-			}).Info("t4 node opened")
+			defer func() {
+				for _, db := range dbs {
+					_ = db.node.Close()
+				}
+			}()
+			for _, db := range dbs {
+				logrus.WithFields(logrus.Fields{
+					"db":          db.name,
+					"listen_addr": listenAddr,
+					"mode":        runMode(storeURIOrEmpty(s3), peerListenAddr, branchCheckpoint),
+					"node_id":     resolvedNodeID(nodeID),
+					"revision":    db.node.CurrentRevision(),
+				}).Info("t4 node opened")
+			}
 
 			// ── Observability ─────────────────────────────────────────────────
-			go serveMetrics(cmd.Context(), metricsAddr, node, pprofEnabled)
-
-			// ── Auth setup ───────────────────────────────────────────────────
-			var (
-				authStore *auth.Store
-				tokens    *auth.TokenStore
-			)
-			if authEnabled {
-				authStore, err = auth.NewStore(node)
-				if err != nil {
-					return fmt.Errorf("init auth store: %w", err)
-				}
-				tokens = auth.NewTokenStore(cmd.Context(), time.Duration(tokenTTLSec)*time.Second, node)
-				logrus.Infof("auth enabled (token TTL %ds)", tokenTTLSec)
+			nodes := make([]*t4.Node, len(dbs))
+			for i, db := range dbs {
+				nodes[i] = db.node
 			}
+			go serveMetrics(cmd.Context(), metricsAddr, metricsHandler, nodes, pprofEnabled)
 
-			// ── gRPC server ──────────────────────────────────────────────────
-			var grpcOpts []grpc.ServerOption
+			// ── Client listener ──────────────────────────────────────────────
 			var clientTLSConf *tls.Config // nil when the client port is plaintext
-
 			if clientTLSCert != "" {
 				clientTLSConf, err = buildClientTLSConfig(clientTLSCert, clientTLSKey, clientTLSCA)
 				if err != nil {
 					return fmt.Errorf("client TLS: %w", err)
-				}
-				// With a gateway, TLS is terminated before gRPC sees a
-				// connection: on a shared port because the protocols can only
-				// be told apart above HTTP, and on a separate port so that the
-				// in-process loopback the gateway dials stays plaintext. A
-				// gRPC server holding credentials would try to handshake that
-				// pipe too, and giving it credentials as well as decrypted
-				// connections would start a second handshake inside the first.
-				if !enableGRPCGateway {
-					grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(clientTLSConf)))
 				}
 				if clientTLSCA != "" {
 					logrus.Info("client mTLS enabled")
@@ -296,34 +307,102 @@ func runCmd() *cobra.Command {
 				}
 			}
 
-			grpcOpts = append(grpcOpts, t4etcd.NewServerOptions(authStore, tokens,
-				t4etcd.WithKeepalive(t4etcd.KeepaliveOptions{
-					MinTime:             grpcKeepaliveMinTime,
-					PermitWithoutStream: grpcKeepalivePermitWithoutStream,
-					Time:                grpcKeepaliveTime,
-					Timeout:             grpcKeepaliveTimeout,
-				}),
-				t4etcd.WithStreamWorkers(grpcStreamWorkers),
-			)...)
-			grpcOpts = append(grpcOpts, t4etcd.TracingOptions(tp)...)
-
 			lis, err := net.Listen("tcp", listenAddr)
 			if err != nil {
 				return fmt.Errorf("listen %s: %w", listenAddr, err)
+			}
+			defer lis.Close()
+
+			var creds credentials.TransportCredentials
+			if len(databases) == 0 {
+				dbs[0].lis = lis
+				// With a gateway, TLS is terminated before gRPC sees a
+				// connection: on a shared port because the protocols can only
+				// be told apart above HTTP, and on a separate port so that the
+				// in-process loopback the gateway dials stays plaintext. A gRPC
+				// server holding credentials would try to handshake that pipe
+				// too, and giving it credentials as well as decrypted
+				// connections would start a second handshake inside the first.
+				if clientTLSConf != nil && !enableGRPCGateway {
+					creds = credentials.NewTLS(clientTLSConf)
+				}
+			} else {
+				// One listener for every database: the mux routes each
+				// connection by the Common Name of its client certificate.
+				mux, err := dbmux.New(lis, clientTLSConf, databases, logrus.StandardLogger())
+				if err != nil {
+					return err
+				}
+				for _, db := range dbs {
+					db.lis = mux.Listener(db.name)
+				}
+				creds = dbmux.Credentials()
+				go func() { _ = mux.Serve() }()
 			}
 			logrus.WithFields(logrus.Fields{
 				"listen_addr": listenAddr,
 				"client_tls":  tlsMode(clientTLSCert, clientTLSCA),
 				"auth":        authEnabled,
-				"gateway":     enableGRPCGateway,
+				"databases":   len(dbs),
+				"gateway":     enableGRPCGateway && len(databases) == 0,
 			}).Info("etcd gRPC server listening")
 
-			srv := grpc.NewServer(grpcOpts...)
-			t4etcd.New(node, authStore, tokens).Register(srv)
+			// ── gRPC server per database ─────────────────────────────────────
+			for _, db := range dbs {
+				var (
+					authStore *auth.Store
+					tokens    *auth.TokenStore
+				)
+				if authEnabled {
+					authStore, err = auth.NewStore(db.node)
+					if err != nil {
+						return fmt.Errorf("init auth store%s: %w", db.label(), err)
+					}
+					tokens = auth.NewTokenStore(cmd.Context(), time.Duration(tokenTTLSec)*time.Second, db.node)
+				}
+
+				var grpcOpts []grpc.ServerOption
+				if creds != nil {
+					grpcOpts = append(grpcOpts, grpc.Creds(creds))
+				}
+				grpcOpts = append(grpcOpts, t4etcd.NewServerOptions(authStore, tokens,
+					t4etcd.WithKeepalive(t4etcd.KeepaliveOptions{
+						MinTime:             grpcKeepaliveMinTime,
+						PermitWithoutStream: grpcKeepalivePermitWithoutStream,
+						Time:                grpcKeepaliveTime,
+						Timeout:             grpcKeepaliveTimeout,
+					}),
+					t4etcd.WithStreamWorkers(grpcStreamWorkers),
+				)...)
+				grpcOpts = append(grpcOpts, t4etcd.TracingOptions(tp)...)
+
+				db.srv = grpc.NewServer(grpcOpts...)
+				t4etcd.New(db.node, authStore, tokens).Register(db.srv)
+				if len(databases) > 0 {
+					go func() {
+						if err := db.srv.Serve(db.lis); err != nil {
+							logrus.Errorf("gRPC serve%s: %v", db.label(), err)
+						}
+					}()
+				}
+			}
+			if authEnabled {
+				logrus.Infof("auth enabled (token TTL %ds)", tokenTTLSec)
+			}
 
 			// ── JSON/HTTP gateway ────────────────────────────────────────────
+			// A single database only. dbmux routes a connection by the Common
+			// Name of the client certificate that opened it, and offers h2
+			// alone; a JSON or websocket request carries no such name, so with
+			// --db there is nothing to route one by. The gateway is enabled by
+			// default, so this says what it is doing rather than refusing to
+			// start.
 			var httpSrv *http.Server
-			if enableGRPCGateway {
+			if enableGRPCGateway && len(databases) > 0 && cmd.Flags().Changed("enable-grpc-gateway") {
+				logrus.Warn("t4: the JSON/HTTP gateway is not served with --db: a database is " +
+					"chosen by client certificate, which a JSON request has no way to present")
+			}
+			if enableGRPCGateway && len(databases) == 0 {
 				loopback := gateway.NewLoopback()
 				defer func() { _ = loopback.Close() }()
 
@@ -349,7 +428,7 @@ func runCmd() *cobra.Command {
 
 				// The gateway reaches the gRPC server over this listener, which
 				// carries no network traffic of its own.
-				go serveGRPC(srv, loopback)
+				go serveGRPC(dbs[0].srv, loopback)
 
 			}
 
@@ -393,32 +472,47 @@ func runCmd() *cobra.Command {
 				}
 			}
 
-			serveClientPort(srv, httpSrv, lis, gatewayLis, clientTLSConf)
+			if len(databases) == 0 {
+				serveClientPort(dbs[0].srv, httpSrv, lis, gatewayLis, clientTLSConf)
+			}
 
+			stopped := make(chan *database, len(dbs))
+			for _, db := range dbs {
+				go func() {
+					<-db.node.Done()
+					stopped <- db
+				}()
+			}
 			quit := make(chan os.Signal, 1)
 			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+			defer signal.Stop(quit)
+			stop := func() {
+				var wg sync.WaitGroup
+				for _, db := range dbs {
+					wg.Go(db.srv.GracefulStop)
+				}
+				wg.Wait()
+				logrus.Info("gRPC server stopped")
+			}
 			select {
 			case sig := <-quit:
 				logrus.WithField("signal", sig.String()).Info("shutdown signal received")
-				if httpSrv != nil {
-					shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					if err := httpSrv.Shutdown(shutCtx); err != nil {
-						logrus.Warnf("t4: gateway shutdown: %v", err)
-					}
-					cancel()
-					logrus.Info("gateway stopped")
-				}
-				srv.GracefulStop()
-				logrus.Info("gRPC server stopped")
+				stopGateway(httpSrv)
+				stop()
 				return nil
-			case <-node.Done():
+			case <-cmd.Context().Done():
+				stop()
+				return nil
+			case db := <-stopped:
 				// The node cannot serve again without a restart: exit so
 				// that whatever runs t4 starts it again, as a follower.
 				if httpSrv != nil {
 					_ = httpSrv.Close()
 				}
-				srv.Stop()
-				return fmt.Errorf("node stopped: %w", node.Err())
+				for _, db := range dbs {
+					db.srv.Stop()
+				}
+				return fmt.Errorf("node%s stopped: %w", db.label(), db.node.Err())
 			}
 		},
 	}
@@ -470,6 +564,8 @@ func runCmd() *cobra.Command {
 	// branch node
 	cmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "S3 key prefix of the source node to branch from (uses --s3-bucket) (env: T4_BRANCH_PREFIX)")
 	cmd.Flags().StringVar(&branchCheckpoint, "branch-checkpoint", "", "checkpoint index key returned by 't4 branch fork' (required with --branch-prefix) (env: T4_BRANCH_CHECKPOINT)")
+	// several databases
+	cmd.Flags().StringSliceVar(&databases, "db", nil, "serve this database; repeat or comma-separate for several. Each is stored below dbs/<name> in --data-dir and --s3-prefix, and clients reach the one named by the Common Name of their certificate (requires client mTLS) (env: T4_DBS)")
 	// gRPC keepalive — match etcd CLI flag names + defaults so etcd v3 clients
 	// (kube-apiserver, etcdctl) don't get GOAWAY too_many_pings.
 	defaultsKA := t4etcd.DefaultKeepaliveOptions()
@@ -519,6 +615,7 @@ func runCmd() *cobra.Command {
 			"gateway-host-whitelist":               "T4_GATEWAY_HOST_WHITELIST",
 			"branch-prefix":                        "T4_BRANCH_PREFIX",
 			"branch-checkpoint":                    "T4_BRANCH_CHECKPOINT",
+			"db":                                   "T4_DBS",
 			"grpc-keepalive-min-time":              "T4_GRPC_KEEPALIVE_MIN_TIME",
 			"grpc-keepalive-interval":              "T4_GRPC_KEEPALIVE_INTERVAL",
 			"grpc-keepalive-timeout":               "T4_GRPC_KEEPALIVE_TIMEOUT",
@@ -682,7 +779,7 @@ func authMode(enabled bool, tokenTTLSec int) string {
 	return fmt.Sprintf("enabled (token_ttl=%ds)", tokenTTLSec)
 }
 
-// buildClientTLS constructs TLS credentials for the client-facing gRPC server.
+// buildClientTLS constructs the TLS configuration for the client-facing gRPC server.
 // cert and key are required. ca is optional: when provided, mutual TLS is
 // enforced (client cert required); when absent, only the server presents a
 // certificate (encryption-only).
@@ -938,6 +1035,20 @@ func serveClientPort(grpcSrv *grpc.Server, httpSrv *http.Server, lis, gatewayLis
 	}
 }
 
+// stopGateway shuts the JSON/HTTP gateway down, if one is being served, giving
+// it the same brief grace period as the gRPC server's GracefulStop.
+func stopGateway(srv *http.Server) {
+	if srv == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		logrus.Warnf("t4: gateway shutdown: %v", err)
+	}
+	logrus.Info("gateway stopped")
+}
+
 // serveGatewayTLS serves srv over TLS on lis.
 //
 // ServeTLS, rather than a tls.NewListener of our own, because it is what
@@ -979,9 +1090,12 @@ func splitCommaList(v string) []string {
 	return out
 }
 
-func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled bool) {
+// serveMetrics serves metricsHandler at /metrics and health on addr. With
+// several databases a health endpoint reports OK only when it holds for every
+// database.
+func serveMetrics(ctx context.Context, addr string, metricsHandler http.Handler, nodes []*t4.Node, pprofEnabled bool) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Gatherer(), promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", metricsHandler)
 	if pprofEnabled {
 		mux.HandleFunc("/debug/pprof/", pprof.Index)
 		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
@@ -990,26 +1104,33 @@ func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled 
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		select {
-		case <-node.Done():
-			http.Error(w, "node stopped", http.StatusServiceUnavailable)
-		default:
-			w.WriteHeader(http.StatusOK)
+		for _, node := range nodes {
+			select {
+			case <-node.Done():
+				http.Error(w, "node stopped", http.StatusServiceUnavailable)
+				return
+			default:
+			}
 		}
+		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/healthz/leader", func(w http.ResponseWriter, _ *http.Request) {
-		if node.IsLeader() {
-			w.WriteHeader(http.StatusOK)
-			return
+		for _, node := range nodes {
+			if !node.IsLeader() {
+				http.Error(w, "not leader", http.StatusServiceUnavailable)
+				return
+			}
 		}
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if node.CurrentRevision() >= 0 {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
+		for _, node := range nodes {
+			if node.CurrentRevision() < 0 {
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
 		}
+		w.WriteHeader(http.StatusOK)
 	})
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {

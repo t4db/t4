@@ -12,7 +12,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/election"
-	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
 	istore "github.com/t4db/t4/internal/store"
 	"github.com/t4db/t4/internal/testhook"
@@ -79,7 +78,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 		}
 
 		if peer.IsResyncRequired(err) {
-			metrics.FollowerResyncsTotal.WithLabelValues("stream_gap").Inc()
+			n.m.FollowerResyncsTotal.WithLabelValues("stream_gap").Inc()
 			if n.cfg.ObjectStore == nil {
 				n.log.Errorf("t4: follower resync required but no object store — restart node")
 				n.stop(errors.New("t4: follower fell behind the leader's buffer and has no object store to catch up from"))
@@ -347,8 +346,8 @@ func (n *Node) forwardWrite(ctx context.Context, req *peer.ForwardRequest) (*pee
 	op := fwdOpLabel(req.Op)
 	start := time.Now()
 	resp, err := cli.ForwardWrite(ctx, req)
-	metrics.ForwardedWritesTotal.WithLabelValues(op).Inc()
-	metrics.ForwardDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	n.m.ForwardedWritesTotal.WithLabelValues(op).Inc()
+	n.m.ForwardDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
 	if err != nil {
 		return nil, forwardError(ctx, err)
 	}

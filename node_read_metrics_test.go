@@ -4,8 +4,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/t4db/t4"
-	"github.com/t4db/t4/internal/metrics"
 )
 
 // TestNodeReadMetrics proves the read path records one counter increment and
@@ -78,7 +79,7 @@ func gatherReadMetrics(t *testing.T) readMetricsSnapshot {
 		errs:    map[string]float64{},
 		latency: map[string]uint64{},
 	}
-	families, err := metrics.Gatherer().Gather()
+	families, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
 	}

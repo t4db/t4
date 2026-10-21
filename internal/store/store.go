@@ -82,6 +82,9 @@ type Store struct {
 
 	watchPrefixes map[string]int
 
+	// metrics, when set, records watch activity (see SetMetrics).
+	metrics *metrics.Metrics
+
 	// watchHubMu protects the live-watch registry. Live revisions are decoded
 	// once after Apply and fanned out in memory instead of making every watch
 	// rescan the Pebble revision log.
@@ -385,6 +388,13 @@ func (s *Store) SetHistoryRingSize(n int) {
 		return
 	}
 	s.hist.Store(newHistoryRing(n))
+}
+
+// SetMetrics sets the metrics watches are recorded on. A store without
+// metrics, such as one opened by an inspection tool, records none. Call it
+// before the store serves watches.
+func (s *Store) SetMetrics(m *metrics.Metrics) {
+	s.metrics = m
 }
 
 // LastSequence returns the highest WAL/peer-stream sequence applied. Used by
@@ -2039,9 +2049,9 @@ func (s *Store) registerWatch(prefix string) func() {
 	prefixes := len(s.watchPrefixes)
 	s.mu.Unlock()
 
-	if metrics.WatchActive != nil {
-		metrics.WatchActive.Inc()
-		metrics.WatchActivePrefixes.Set(float64(prefixes))
+	if m := s.metrics; m != nil {
+		m.WatchActive.Inc()
+		m.WatchActivePrefixes.Set(float64(prefixes))
 	}
 
 	return func() {
@@ -2054,9 +2064,9 @@ func (s *Store) registerWatch(prefix string) func() {
 		prefixes := len(s.watchPrefixes)
 		s.mu.Unlock()
 
-		if metrics.WatchActive != nil {
-			metrics.WatchActive.Dec()
-			metrics.WatchActivePrefixes.Set(float64(prefixes))
+		if m := s.metrics; m != nil {
+			m.WatchActive.Dec()
+			m.WatchActivePrefixes.Set(float64(prefixes))
 		}
 	}
 }
@@ -2158,7 +2168,7 @@ func (s *Store) scanWatchRange(prefix string, fromRev, toRev int64, withPrevKV b
 	if err != nil {
 		return nil, false
 	}
-	recordWatchScanMetrics(time.Since(start), fromRev, toRev, scanned, len(events))
+	s.recordWatchScanMetrics(time.Since(start), fromRev, toRev, scanned, len(events))
 	return events, true
 }
 
@@ -2257,7 +2267,7 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 			lastMarkerRev, lastMarkerAt = toRev, time.Now()
 		}
 		matched := s.dispatchWatchEvents(events, toRev, standalone)
-		recordWatchScanMetrics(time.Since(start), nextRev, toRev, scanned, matched)
+		s.recordWatchScanMetrics(time.Since(start), nextRev, toRev, scanned, matched)
 		nextRev = toRev + 1
 	}
 }
@@ -2390,14 +2400,15 @@ func progressEvent(rev int64) Event {
 	return Event{Type: EventProgress, Revision: rev}
 }
 
-func recordWatchScanMetrics(d time.Duration, fromRev, toRev int64, scanned, matched int) {
-	if metrics.WatchScanDuration == nil {
+func (s *Store) recordWatchScanMetrics(d time.Duration, fromRev, toRev int64, scanned, matched int) {
+	m := s.metrics
+	if m == nil {
 		return
 	}
-	metrics.WatchScanDuration.Observe(d.Seconds())
-	metrics.WatchScanRevisionSpan.Observe(float64(toRev - fromRev + 1))
-	metrics.WatchScanEntriesTotal.WithLabelValues("scanned").Add(float64(scanned))
-	metrics.WatchScanEntriesTotal.WithLabelValues("matched").Add(float64(matched))
+	m.WatchScanDuration.Observe(d.Seconds())
+	m.WatchScanRevisionSpan.Observe(float64(toRev - fromRev + 1))
+	m.WatchScanEntriesTotal.WithLabelValues("scanned").Add(float64(scanned))
+	m.WatchScanEntriesTotal.WithLabelValues("matched").Add(float64(matched))
 }
 
 // scanLog reads log entries in [fromRev, toRev] and returns events for keys

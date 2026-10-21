@@ -45,6 +45,12 @@ func NewS3Store(client *minio.Client, bucket, prefix string) *S3Store {
 	return &S3Store{client: client, bucket: bucket, prefix: strings.Trim(prefix, "/")}
 }
 
+// Sub returns a store for the keys below sub within s's prefix, sharing s's
+// client and its connections.
+func (s *S3Store) Sub(sub string) *S3Store {
+	return NewS3Store(s.client, s.bucket, s.key(strings.Trim(sub, "/")))
+}
+
 // S3Config holds the parameters for NewS3StoreFromConfig.
 type S3Config struct {
 	// Bucket is the S3 bucket name. Required.
