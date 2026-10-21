@@ -40,7 +40,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// had no uploader (follower WAL) or crashed before the upload completed.
 	// After this point, new leader writes are uploaded async (SegmentMaxAge).
 	upCtx, upCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	uploadErr := uploadLocalWALSegments(upCtx, walDir, n.cfg.ObjectStore, n.log)
+	uploadErr := uploadLocalWALSegments(upCtx, walDir, n.cfg.ObjectStore, n.log, n.m)
 	upCancel()
 	if uploadErr != nil {
 		return fmt.Errorf("t4: upload committed local WAL before leadership: %w", uploadErr)
@@ -73,7 +73,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// nodes fail simultaneously), so uploads can be async — driven by
 	// SegmentMaxAge — without affecting write durability.
 	w2 := wal.New(
-		wal.WithUploader(makeUploader(n.cfg.ObjectStore, n.log)),
+		wal.WithUploader(makeUploader(n.cfg.ObjectStore, n.log, n.m)),
 		wal.WithSegmentMaxSize(n.cfg.SegmentMaxSize),
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 		wal.WithLogger(n.log),
@@ -86,6 +86,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 
 	peerSrv := peer.NewServer(n.cfg.PeerBufferSize, n.log)
 	peerSrv.SetTerm(rec.Term)
+	peerSrv.SetMetrics(n.m)
 	// A database with the meta keyspace, or one Open is about to create with
 	// it (see initMetaAtGenesis), has WAL entries that followers below format
 	// 3 would misapply: refuse them before serving.
@@ -156,7 +157,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	}()
 
 	n.updateMetrics()
-	metrics.ElectionsTotal.WithLabelValues("won").Inc()
+	n.m.ElectionsTotal.WithLabelValues("won").Inc()
 	n.log.Infof("t4: elected leader (term=%d, peer=%s)", rec.Term, n.cfg.PeerListenAddr)
 	go n.watchLoop(bgCtx, lock, rec.Term)
 	return nil
@@ -614,7 +615,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 			if setter, ok := n.wal.(interface{ SetSyncUpload(bool) }); ok {
 				setter.SetSyncUpload(want)
 				degraded = want
-				metrics.ReplicationDegraded.Set(boolToFloat(want))
+				n.m.ReplicationDegraded.Set(boolToFloat(want))
 				if want {
 					n.log.Warnf("t4: replication below ACK target — flushing each batch to object storage before acknowledging")
 				} else {
@@ -806,7 +807,7 @@ func (n *Node) stepDownOnFatalCommitError() {
 // can legitimately differ from the leader's. Entries it holds past the
 // published object are in Pebble, and the new leader's first checkpoint makes
 // them durable.
-func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Store, log Logger) error {
+func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Store, log Logger, m *metrics.Metrics) error {
 	if store == nil {
 		return nil
 	}
@@ -828,7 +829,7 @@ func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Sto
 		inS3[k] = struct{}{}
 	}
 
-	up := makeUploader(store, log)
+	up := makeUploader(store, log, m)
 	for _, path := range paths {
 		term, firstRev, ok := wal.ParseSegmentName(filepath.Base(path))
 		if !ok {
@@ -961,7 +962,7 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 	// failed upload leaves the counter non-zero so the next tick retries, and
 	// writes admitted during the upload still count toward the next one.
 	atomic.AddInt64(&n.entriesSinceCheckpoint, -covered)
-	metrics.CheckpointsTotal.Inc()
+	n.m.CheckpointsTotal.Inc()
 	n.log.Infof("t4: checkpoint written (rev=%d)", rev)
 	return seq, true
 }
@@ -1035,7 +1036,7 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	if gcErr != nil {
 		n.log.Warnf("t4: wal gc: %v", gcErr)
 	} else if deleted > 0 {
-		metrics.WALGCTotal.Add(float64(deleted))
+		n.m.WALGCTotal.Add(float64(deleted))
 		n.log.Infof("t4: wal gc: deleted %d segments (covered by checkpoint seq=%d)", deleted, gcSeq)
 	}
 

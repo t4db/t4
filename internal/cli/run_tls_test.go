@@ -28,10 +28,11 @@ import (
 
 func TestEtcdAPIClientTLSNegotiatesHybridPostQuantumKeyExchange(t *testing.T) {
 	certPath, keyPath, roots := writeTLSTestCertificate(t)
-	serverCreds, err := buildClientTLS(certPath, keyPath, "")
+	serverTLS, err := buildClientTLS(certPath, keyPath, "")
 	if err != nil {
 		t.Fatalf("build client-facing TLS: %v", err)
 	}
+	serverCreds := credentials.NewTLS(serverTLS)
 	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("open t4 node: %v", err)

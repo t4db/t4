@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
@@ -201,6 +202,7 @@ type pendingKV struct {
 type Node struct {
 	cfg  Config
 	log  Logger
+	m    *metrics.Metrics
 	cp   *checkpoint.Manager
 	term uint64
 	role atomic.Int32 // stores nodeRole values; use loadRole/storeRole
@@ -399,9 +401,9 @@ func Open(cfg Config) (*Node, error) {
 		cp.SetSingleWriter()
 	}
 
-	// Register all t4 metrics on the configured registerer.
-	// When nil, metrics.Register falls back to prometheus.DefaultRegisterer.
-	metrics.Register(cfg.MetricsRegisterer)
+	// The t4 metrics registered on the configured registerer; nil means
+	// prometheus.DefaultRegisterer.
+	m := metrics.For(cfg.MetricsRegisterer)
 
 	if err := applyObjectStoreEncryption(&cfg); err != nil {
 		return nil, err
@@ -411,7 +413,7 @@ func Open(cfg Config) (*Node, error) {
 	// operation is counted and timed without scattering metrics calls
 	// throughout the codebase.
 	if cfg.ObjectStore != nil {
-		cfg.ObjectStore = object.NewInstrumentedStore(cfg.ObjectStore)
+		cfg.ObjectStore = object.NewInstrumentedStoreFor(cfg.ObjectStore, cfg.MetricsRegisterer)
 	}
 
 	pebbleDir := filepath.Join(cfg.DataDir, "db")
@@ -560,6 +562,7 @@ func Open(cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("t4: open store: %w", err)
 	}
 	db.SetHistoryRingSize(cfg.HistoryRingSize)
+	db.SetMetrics(m)
 	if sstUp != nil {
 		if len(inheritedSSTs) > 0 {
 			sstUp.SetInherited(inheritedSSTs)
@@ -586,7 +589,7 @@ func Open(cfg Config) (*Node, error) {
 	// ── Open WAL ─────────────────────────────────────────────────────────────
 	var uploader wal.Uploader
 	if cfg.ObjectStore != nil && cfg.PeerListenAddr == "" {
-		uploader = makeUploader(cfg.ObjectStore, log)
+		uploader = makeUploader(cfg.ObjectStore, log, m)
 	}
 
 	opts := []wal.Option{
@@ -753,6 +756,7 @@ func Open(cfg Config) (*Node, error) {
 				return nil, fmt.Errorf("t4: reopen store after GC-gap fix: %w", rerr)
 			}
 			freshDB.SetHistoryRingSize(cfg.HistoryRingSize)
+			freshDB.SetMetrics(m)
 			if sstUp != nil {
 				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer reconcileCancel()
@@ -800,6 +804,7 @@ func Open(cfg Config) (*Node, error) {
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	n := &Node{
 		cfg:         cfg,
+		m:           m,
 		term:        term,
 		wal:         w,
 		bgCtx:       bgCtx,
@@ -895,7 +900,7 @@ func Open(cfg Config) (*Node, error) {
 
 	// ── Observability ─────────────────────────────────────────────────────────
 	n.updateMetrics()
-	metrics.SetDBSizeFunc(func() (uint64, bool) {
+	n.m.SetDBSizeFunc(func() (uint64, bool) {
 		size, err := n.DBSize()
 		return uint64(size), err == nil
 	})
@@ -903,18 +908,25 @@ func Open(cfg Config) (*Node, error) {
 	return n, nil
 }
 
+// MetricsRegisterer returns the registerer the node's metrics are registered
+// on (Config.MetricsRegisterer), so that components serving the node, such as
+// the etcd auth store, report next to them.
+func (n *Node) MetricsRegisterer() prometheus.Registerer {
+	return n.cfg.MetricsRegisterer
+}
+
 // updateMetrics refreshes the role and revision gauges.
 func (n *Node) updateMetrics() {
 	switch n.loadRole() {
 	case roleLeader:
-		metrics.SetRole("leader")
+		n.m.SetRole("leader")
 	case roleFollower:
-		metrics.SetRole("follower")
+		n.m.SetRole("follower")
 	default:
-		metrics.SetRole("single")
+		n.m.SetRole("single")
 	}
-	metrics.CurrentRevision.Set(float64(n.db.Load().CurrentRevision()))
-	metrics.CompactRevision.Set(float64(n.db.Load().CompactRevision()))
+	n.m.CurrentRevision.Set(float64(n.db.Load().CurrentRevision()))
+	n.m.CompactRevision.Set(float64(n.db.Load().CompactRevision()))
 }
 
 // electAndStart runs leader election and configures the node as leader or follower.
@@ -939,7 +951,7 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 	cli := peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log, n.cfg.TracerProvider)
 	n.peerCli = cli
 	n.leaderCli.Store(cli)
-	metrics.ElectionsTotal.WithLabelValues("lost").Inc()
+	n.m.ElectionsTotal.WithLabelValues("lost").Inc()
 	n.log.Infof("t4: following leader at %s (term=%d)", rec.LeaderAddr, rec.Term)
 	return nil
 }
@@ -1421,13 +1433,13 @@ func (n *Node) LinearizableLeaseKeys(ctx context.Context, lease int64) ([]string
 // observeRead records one local read operation, mirroring the write-side
 // instrumentation in await: errors increment only the error counter; a
 // successful read increments the op counter and observes latency.
-func observeRead(op string, start time.Time, err error) {
+func (n *Node) observeRead(op string, start time.Time, err error) {
 	if err != nil {
-		metrics.ReadErrors.WithLabelValues(op).Inc()
+		n.m.ReadErrors.WithLabelValues(op).Inc()
 		return
 	}
-	metrics.ReadsTotal.WithLabelValues(op).Inc()
-	metrics.ReadDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	n.m.ReadsTotal.WithLabelValues(op).Inc()
+	n.m.ReadDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
 }
 
 func (n *Node) Get(key string, opts ...ReadOption) (kv *KeyValue, err error) {
@@ -1435,7 +1447,7 @@ func (n *Node) Get(key string, opts ...ReadOption) (kv *KeyValue, err error) {
 	o := applyReadOpts(opts)
 	defer func() {
 		if !o.internal {
-			observeRead("get", start, err)
+			n.observeRead("get", start, err)
 		}
 	}()
 	if n.closed.Load() {
@@ -1463,7 +1475,7 @@ func (n *Node) Exists(key string, opts ...ReadOption) (exists bool, err error) {
 	o := applyReadOpts(opts)
 	defer func() {
 		if !o.internal {
-			observeRead("exists", start, err)
+			n.observeRead("exists", start, err)
 		}
 	}()
 	if n.closed.Load() {
@@ -1485,7 +1497,7 @@ func (n *Node) List(prefix string, opts ...ReadOption) (list []*KeyValue, err er
 	o := applyReadOpts(opts)
 	defer func() {
 		if !o.internal {
-			observeRead("list", start, err)
+			n.observeRead("list", start, err)
 		}
 	}()
 	if n.closed.Load() {
@@ -1526,7 +1538,7 @@ func (n *Node) Count(prefix string, opts ...ReadOption) (count int64, err error)
 	o := applyReadOpts(opts)
 	defer func() {
 		if !o.internal {
-			observeRead("count", start, err)
+			n.observeRead("count", start, err)
 		}
 	}()
 	if n.closed.Load() {
@@ -1746,7 +1758,7 @@ func toKV(sv *istore.KeyValue) *KeyValue { return sv }
 // conflict means the local entries are not in object storage; it returns
 // wal.ErrSegmentConflict and keeps the local file, so a synchronous upload
 // fails the write instead of acknowledging entries that were never persisted.
-func makeUploader(obj object.Store, log Logger) wal.Uploader {
+func makeUploader(obj object.Store, log Logger, m *metrics.Metrics) wal.Uploader {
 	// Resolved once: the wrappers in pkg/object (instrumented, encrypted)
 	// forward the conditional methods and preserve this assertion.
 	cond, _ := obj.(object.ConditionalStore)
@@ -1755,7 +1767,7 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 		f, err := os.Open(localPath)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				metrics.WALUploadErrors.Inc()
+				m.WALUploadErrors.Inc()
 				return fmt.Errorf("uploader: open %q: %w", localPath, err)
 			}
 			// Local file is gone. Verify the segment reached S3; if it did the
@@ -1769,7 +1781,7 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 				log.Debugf("uploader: local file %q already gone but %q exists in S3 — treating as success", localPath, objectKey)
 				return nil
 			}
-			metrics.WALUploadErrors.Inc()
+			m.WALUploadErrors.Inc()
 			log.Errorf("uploader: local file %q is gone AND %q is not in S3 — segment data is lost", localPath, objectKey)
 			return fmt.Errorf("uploader: open %q: %w", localPath, err)
 		}
@@ -1783,9 +1795,9 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 		// open file.
 		_ = f.Close()
 		if errors.Is(err, object.ErrPreconditionFailed) {
-			metrics.WALUploadConflicts.Inc()
+			m.WALUploadConflicts.Inc()
 			if err := segmentPublished(ctx, obj, localPath, objectKey); err != nil {
-				metrics.WALUploadErrors.Inc()
+				m.WALUploadErrors.Inc()
 				log.Errorf("uploader: %v", err)
 				return err
 			}
@@ -1795,11 +1807,11 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 			return os.Remove(localPath)
 		}
 		if err != nil {
-			metrics.WALUploadErrors.Inc()
+			m.WALUploadErrors.Inc()
 			return err
 		}
-		metrics.WALUploadsTotal.Inc()
-		metrics.WALUploadDuration.Observe(time.Since(start).Seconds())
+		m.WALUploadsTotal.Inc()
+		m.WALUploadDuration.Observe(time.Since(start).Seconds())
 		return os.Remove(localPath)
 	}
 }

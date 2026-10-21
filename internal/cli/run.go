@@ -12,10 +12,10 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel"
@@ -28,7 +28,7 @@ import (
 	"github.com/t4db/t4"
 	t4etcd "github.com/t4db/t4/etcd"
 	"github.com/t4db/t4/etcd/auth"
-	"github.com/t4db/t4/internal/metrics"
+	"github.com/t4db/t4/internal/dbmux"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -77,6 +77,8 @@ func runCmd() *cobra.Command {
 		// branch node
 		branchPrefix     string
 		branchCheckpoint string
+		// several databases
+		databases []string
 		// gRPC keepalive (etcd-compatible defaults)
 		grpcKeepaliveMinTime             time.Duration
 		grpcStreamWorkers                int
@@ -119,6 +121,20 @@ func runCmd() *cobra.Command {
 			}
 			if autoCompactRevisions < 0 {
 				return fmt.Errorf("--auto-compact-retain-revisions must be non-negative")
+			}
+			if len(databases) > 0 {
+				if err := validateDatabases(databases); err != nil {
+					return err
+				}
+				if clientTLSCert == "" || clientTLSCA == "" {
+					return fmt.Errorf("--db requires --client-tls-cert, --client-tls-key and --client-tls-ca: clients reach the database named by the Common Name of their certificate")
+				}
+				if peerListenAddr != "" {
+					return fmt.Errorf("--db does not support --peer-listen yet: several databases are served by a single node")
+				}
+				if branchPrefix != "" || branchCheckpoint != "" {
+					return fmt.Errorf("--db cannot be combined with --branch-prefix")
+				}
 			}
 
 			logrus.WithFields(startupLogFields(
@@ -198,12 +214,13 @@ func runCmd() *cobra.Command {
 				logrus.Info("peer mTLS enabled for node replication")
 			}
 
+			var s3Store *object.S3Store
 			if s3.Bucket != "" {
-				obj, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
+				s3Store, err = object.NewS3StoreFromConfig(cmd.Context(), s3.config())
 				if err != nil {
 					return fmt.Errorf("init S3: %w", err)
 				}
-				cfg.ObjectStore = obj
+				cfg.ObjectStore = s3Store
 				logrus.Infof("using S3 bucket %q prefix %q", s3.Bucket, s3.Prefix)
 			} else {
 				logrus.Warn("no S3 bucket configured — durability is local-only")
@@ -231,44 +248,39 @@ func runCmd() *cobra.Command {
 					branchPrefix, branchCheckpoint)
 			}
 
-			node, err := t4.Open(cfg)
+			dbs, metricsHandler, err := openDatabases(cfg, s3Store, databases)
 			if err != nil {
-				return fmt.Errorf("open node: %w", err)
+				return err
 			}
-			defer node.Close()
-			logrus.WithFields(logrus.Fields{
-				"listen_addr": listenAddr,
-				"mode":        runMode(s3.Bucket, peerListenAddr, branchCheckpoint),
-				"node_id":     resolvedNodeID(nodeID),
-				"revision":    node.CurrentRevision(),
-			}).Info("t4 node opened")
+			defer func() {
+				for _, db := range dbs {
+					_ = db.node.Close()
+				}
+			}()
+			for _, db := range dbs {
+				logrus.WithFields(logrus.Fields{
+					"db":          db.name,
+					"listen_addr": listenAddr,
+					"mode":        runMode(s3.Bucket, peerListenAddr, branchCheckpoint),
+					"node_id":     resolvedNodeID(nodeID),
+					"revision":    db.node.CurrentRevision(),
+				}).Info("t4 node opened")
+			}
 
 			// ── Observability ─────────────────────────────────────────────────
-			go serveMetrics(cmd.Context(), metricsAddr, node, pprofEnabled)
-
-			// ── Auth setup ───────────────────────────────────────────────────
-			var (
-				authStore *auth.Store
-				tokens    *auth.TokenStore
-			)
-			if authEnabled {
-				authStore, err = auth.NewStore(node)
-				if err != nil {
-					return fmt.Errorf("init auth store: %w", err)
-				}
-				tokens = auth.NewTokenStore(cmd.Context(), time.Duration(tokenTTLSec)*time.Second, node)
-				logrus.Infof("auth enabled (token TTL %ds)", tokenTTLSec)
+			nodes := make([]*t4.Node, len(dbs))
+			for i, db := range dbs {
+				nodes[i] = db.node
 			}
+			go serveMetrics(cmd.Context(), metricsAddr, metricsHandler, nodes, pprofEnabled)
 
-			// ── gRPC server ──────────────────────────────────────────────────
-			var grpcOpts []grpc.ServerOption
-
+			// ── Client listener ──────────────────────────────────────────────
+			var clientTLS *tls.Config
 			if clientTLSCert != "" {
-				creds, err := buildClientTLS(clientTLSCert, clientTLSKey, clientTLSCA)
+				clientTLS, err = buildClientTLS(clientTLSCert, clientTLSKey, clientTLSCA)
 				if err != nil {
 					return fmt.Errorf("client TLS: %w", err)
 				}
-				grpcOpts = append(grpcOpts, grpc.Creds(creds))
 				if clientTLSCA != "" {
 					logrus.Info("client mTLS enabled")
 				} else {
@@ -276,49 +288,112 @@ func runCmd() *cobra.Command {
 				}
 			}
 
-			grpcOpts = append(grpcOpts, t4etcd.NewServerOptions(authStore, tokens,
-				t4etcd.WithKeepalive(t4etcd.KeepaliveOptions{
-					MinTime:             grpcKeepaliveMinTime,
-					PermitWithoutStream: grpcKeepalivePermitWithoutStream,
-					Time:                grpcKeepaliveTime,
-					Timeout:             grpcKeepaliveTimeout,
-				}),
-				t4etcd.WithStreamWorkers(grpcStreamWorkers),
-			)...)
-			grpcOpts = append(grpcOpts, t4etcd.TracingOptions(tp)...)
-
 			lis, err := net.Listen("tcp", listenAddr)
 			if err != nil {
 				return fmt.Errorf("listen %s: %w", listenAddr, err)
+			}
+			defer lis.Close()
+
+			var creds credentials.TransportCredentials
+			if len(databases) == 0 {
+				dbs[0].lis = lis
+				if clientTLS != nil {
+					creds = credentials.NewTLS(clientTLS)
+				}
+			} else {
+				// One listener for every database: the mux routes each
+				// connection by the Common Name of its client certificate.
+				mux, err := dbmux.New(lis, clientTLS, databases, logrus.StandardLogger())
+				if err != nil {
+					return err
+				}
+				for _, db := range dbs {
+					db.lis = mux.Listener(db.name)
+				}
+				creds = dbmux.Credentials()
+				go func() { _ = mux.Serve() }()
 			}
 			logrus.WithFields(logrus.Fields{
 				"listen_addr": listenAddr,
 				"client_tls":  tlsMode(clientTLSCert, clientTLSCA),
 				"auth":        authEnabled,
+				"databases":   len(dbs),
 			}).Info("etcd gRPC server listening")
 
-			srv := grpc.NewServer(grpcOpts...)
-			t4etcd.New(node, authStore, tokens).Register(srv)
-
-			go func() {
-				if err := srv.Serve(lis); err != nil {
-					logrus.Errorf("gRPC serve: %v", err)
+			// ── gRPC server per database ─────────────────────────────────────
+			for _, db := range dbs {
+				var (
+					authStore *auth.Store
+					tokens    *auth.TokenStore
+				)
+				if authEnabled {
+					authStore, err = auth.NewStore(db.node)
+					if err != nil {
+						return fmt.Errorf("init auth store%s: %w", db.label(), err)
+					}
+					tokens = auth.NewTokenStore(cmd.Context(), time.Duration(tokenTTLSec)*time.Second, db.node)
 				}
-			}()
 
+				var grpcOpts []grpc.ServerOption
+				if creds != nil {
+					grpcOpts = append(grpcOpts, grpc.Creds(creds))
+				}
+				grpcOpts = append(grpcOpts, t4etcd.NewServerOptions(authStore, tokens,
+					t4etcd.WithKeepalive(t4etcd.KeepaliveOptions{
+						MinTime:             grpcKeepaliveMinTime,
+						PermitWithoutStream: grpcKeepalivePermitWithoutStream,
+						Time:                grpcKeepaliveTime,
+						Timeout:             grpcKeepaliveTimeout,
+					}),
+					t4etcd.WithStreamWorkers(grpcStreamWorkers),
+				)...)
+				grpcOpts = append(grpcOpts, t4etcd.TracingOptions(tp)...)
+
+				db.srv = grpc.NewServer(grpcOpts...)
+				t4etcd.New(db.node, authStore, tokens).Register(db.srv)
+				go func() {
+					if err := db.srv.Serve(db.lis); err != nil {
+						logrus.Errorf("gRPC serve%s: %v", db.label(), err)
+					}
+				}()
+			}
+			if authEnabled {
+				logrus.Infof("auth enabled (token TTL %ds)", tokenTTLSec)
+			}
+
+			stopped := make(chan *database, len(dbs))
+			for _, db := range dbs {
+				go func() {
+					<-db.node.Done()
+					stopped <- db
+				}()
+			}
 			quit := make(chan os.Signal, 1)
 			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+			defer signal.Stop(quit)
+			stop := func() {
+				var wg sync.WaitGroup
+				for _, db := range dbs {
+					wg.Go(db.srv.GracefulStop)
+				}
+				wg.Wait()
+				logrus.Info("gRPC server stopped")
+			}
 			select {
 			case sig := <-quit:
 				logrus.WithField("signal", sig.String()).Info("shutdown signal received")
-				srv.GracefulStop()
-				logrus.Info("gRPC server stopped")
+				stop()
 				return nil
-			case <-node.Done():
+			case <-cmd.Context().Done():
+				stop()
+				return nil
+			case db := <-stopped:
 				// The node cannot serve again without a restart: exit so
 				// that whatever runs t4 starts it again, as a follower.
-				srv.Stop()
-				return fmt.Errorf("node stopped: %w", node.Err())
+				for _, db := range dbs {
+					db.srv.Stop()
+				}
+				return fmt.Errorf("node%s stopped: %w", db.label(), db.node.Err())
 			}
 		},
 	}
@@ -365,6 +440,8 @@ func runCmd() *cobra.Command {
 	// branch node
 	cmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "S3 key prefix of the source node to branch from (uses --s3-bucket) (env: T4_BRANCH_PREFIX)")
 	cmd.Flags().StringVar(&branchCheckpoint, "branch-checkpoint", "", "checkpoint index key returned by 't4 branch fork' (required with --branch-prefix) (env: T4_BRANCH_CHECKPOINT)")
+	// several databases
+	cmd.Flags().StringSliceVar(&databases, "db", nil, "serve this database; repeat or comma-separate for several. Each is stored below dbs/<name> in --data-dir and --s3-prefix, and clients reach the one named by the Common Name of their certificate (requires client mTLS) (env: T4_DBS)")
 	// gRPC keepalive — match etcd CLI flag names + defaults so etcd v3 clients
 	// (kube-apiserver, etcdctl) don't get GOAWAY too_many_pings.
 	defaultsKA := t4etcd.DefaultKeepaliveOptions()
@@ -409,6 +486,7 @@ func runCmd() *cobra.Command {
 			"pprof":                                "T4_PPROF",
 			"branch-prefix":                        "T4_BRANCH_PREFIX",
 			"branch-checkpoint":                    "T4_BRANCH_CHECKPOINT",
+			"db":                                   "T4_DBS",
 			"grpc-keepalive-min-time":              "T4_GRPC_KEEPALIVE_MIN_TIME",
 			"grpc-keepalive-interval":              "T4_GRPC_KEEPALIVE_INTERVAL",
 			"grpc-keepalive-timeout":               "T4_GRPC_KEEPALIVE_TIMEOUT",
@@ -558,11 +636,11 @@ func authMode(enabled bool, tokenTTLSec int) string {
 	return fmt.Sprintf("enabled (token_ttl=%ds)", tokenTTLSec)
 }
 
-// buildClientTLS constructs TLS credentials for the client-facing gRPC server.
+// buildClientTLS constructs the TLS configuration for the client-facing gRPC server.
 // cert and key are required. ca is optional: when provided, mutual TLS is
 // enforced (client cert required); when absent, only the server presents a
 // certificate (encryption-only).
-func buildClientTLS(cert, key, ca string) (credentials.TransportCredentials, error) {
+func buildClientTLS(cert, key, ca string) (*tls.Config, error) {
 	tlsCert, err := tls.LoadX509KeyPair(cert, key)
 	if err != nil {
 		return nil, fmt.Errorf("load cert/key: %w", err)
@@ -583,7 +661,7 @@ func buildClientTLS(cert, key, ca string) (credentials.TransportCredentials, err
 		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 		tlsCfg.ClientCAs = caPool
 	}
-	return credentials.NewTLS(tlsCfg), nil
+	return tlsCfg, nil
 }
 
 // buildPeerTLS constructs mTLS credentials for both the leader's gRPC server
@@ -696,9 +774,12 @@ func warnLargeGOMAXPROCS() {
 		"which can cost tens of cores on a large host. Set a container CPU limit or GOMAXPROCS (for example 8)", n)
 }
 
-func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled bool) {
+// serveMetrics serves metricsHandler at /metrics and health on addr. With
+// several databases a health endpoint reports OK only when it holds for every
+// database.
+func serveMetrics(ctx context.Context, addr string, metricsHandler http.Handler, nodes []*t4.Node, pprofEnabled bool) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Gatherer(), promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", metricsHandler)
 	if pprofEnabled {
 		mux.HandleFunc("/debug/pprof/", pprof.Index)
 		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
@@ -707,26 +788,33 @@ func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled 
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		select {
-		case <-node.Done():
-			http.Error(w, "node stopped", http.StatusServiceUnavailable)
-		default:
-			w.WriteHeader(http.StatusOK)
+		for _, node := range nodes {
+			select {
+			case <-node.Done():
+				http.Error(w, "node stopped", http.StatusServiceUnavailable)
+				return
+			default:
+			}
 		}
+		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/healthz/leader", func(w http.ResponseWriter, _ *http.Request) {
-		if node.IsLeader() {
-			w.WriteHeader(http.StatusOK)
-			return
+		for _, node := range nodes {
+			if !node.IsLeader() {
+				http.Error(w, "not leader", http.StatusServiceUnavailable)
+				return
+			}
 		}
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if node.CurrentRevision() >= 0 {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
+		for _, node := range nodes {
+			if node.CurrentRevision() < 0 {
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
 		}
+		w.WriteHeader(http.StatusOK)
 	})
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {

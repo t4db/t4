@@ -44,6 +44,7 @@ type Store struct {
 	users   map[string]User
 	roles   map[string]Role
 	rateLim *rateLimiter
+	metrics *metrics.Metrics
 }
 
 // NewStore creates a Store backed by n and loads the current auth state from
@@ -54,6 +55,7 @@ func NewStore(n node) (*Store, error) {
 		users:   make(map[string]User),
 		roles:   make(map[string]Role),
 		rateLim: newRateLimiter(),
+		metrics: metrics.For(n.MetricsRegisterer()),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -161,7 +163,7 @@ func (s *Store) ListUsers() ([]User, error) {
 // CheckPassword returns nil when password matches the stored hash for name.
 func (s *Store) CheckPassword(name, password string) error {
 	if s.rateLim.IsLocked(name) {
-		metrics.AuthAttemptsTotal.WithLabelValues("locked").Inc()
+		s.metrics.AuthAttemptsTotal.WithLabelValues("locked").Inc()
 		return errors.New("authentication failed: too many attempts, try again later")
 	}
 
@@ -171,16 +173,16 @@ func (s *Store) CheckPassword(name, password string) error {
 
 	if err != nil {
 		s.rateLim.RecordFailure(name)
-		metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
+		s.metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
 		return errors.New("authentication failed")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
 		s.rateLim.RecordFailure(name)
-		metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
+		s.metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
 		return errors.New("authentication failed")
 	}
 	s.rateLim.RecordSuccess(name)
-	metrics.AuthAttemptsTotal.WithLabelValues("success").Inc()
+	s.metrics.AuthAttemptsTotal.WithLabelValues("success").Inc()
 	return nil
 }
 

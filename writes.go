@@ -503,8 +503,8 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		// fail: answer once it commits, and evaluate again if it does not.
 		aborted := n.abortedBatches
 		n.mu.Unlock()
-		observeTxnPreparation(lockWait, prepareDuration, kind)
-		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
+		observeTxnPreparation(n.m, lockWait, prepareDuration, kind)
+		n.m.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
 		committed, werr := n.awaitObservedWrites(ctx, observed, aborted)
 		if werr != nil {
 			return TxnResponse{}, werr
@@ -516,8 +516,8 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 	}
 	if err != nil {
 		n.mu.Unlock()
-		observeTxnPreparation(lockWait, prepareDuration, kind)
-		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
+		observeTxnPreparation(n.m, lockWait, prepareDuration, kind)
+		n.m.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
 		return TxnResponse{}, err
 	}
 	if e.Op == 0 {
@@ -531,8 +531,8 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		current := curRev >= n.sharedRev.Load()
 		if current && observed.rev <= curRev && observed.metaToken == 0 {
 			n.mu.Unlock()
-			observeTxnPreparation(lockWait, prepareDuration, kind)
-			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
+			observeTxnPreparation(n.m, lockWait, prepareDuration, kind)
+			n.m.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
 			return TxnResponse{Succeeded: succeeded, Revision: curRev}, nil
 		}
 		// The result depends on a write still being committed, which may yet
@@ -544,15 +544,15 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 			committedNoop, committedSucceeded, err = n.evalCommittedNoop(req, curRev)
 			if err != nil {
 				n.mu.Unlock()
-				observeTxnPreparation(lockWait, prepareDuration, kind)
-				metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
+				observeTxnPreparation(n.m, lockWait, prepareDuration, kind)
+				n.m.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
 				return TxnResponse{}, err
 			}
 		}
 		if committedNoop {
 			n.mu.Unlock()
-			observeTxnPreparation(lockWait, prepareDuration, kind)
-			metrics.TxnRequestsTotal.WithLabelValues(kind, txnCompareLabel(committedSucceeded), "noop").Inc()
+			observeTxnPreparation(n.m, lockWait, prepareDuration, kind)
+			n.m.TxnRequestsTotal.WithLabelValues(kind, txnCompareLabel(committedSucceeded), "noop").Inc()
 			return TxnResponse{Succeeded: committedSucceeded, Revision: curRev}, nil
 		}
 		// Otherwise answer once the in-flight writes commit, and evaluate
@@ -563,30 +563,30 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		observed.rev = n.nextRev
 		aborted := n.abortedBatches
 		n.mu.Unlock()
-		observeTxnPreparation(lockWait, prepareDuration, kind)
+		observeTxnPreparation(n.m, lockWait, prepareDuration, kind)
 		committed, err := n.awaitObservedWrites(ctx, observed, aborted)
 		if err != nil {
-			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
+			n.m.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
 			return TxnResponse{}, err
 		}
 		if !committed {
 			return TxnResponse{}, errReevaluateTxn
 		}
-		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
+		n.m.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
 		return TxnResponse{Succeeded: succeeded, Revision: observed.rev}, nil
 	}
 	wr := newWriteReq(ctx, e)
 	wr.metaToken = metaToken
 	n.writeC <- wr
 	n.mu.Unlock()
-	observeTxnPreparation(lockWait, prepareDuration, kind)
+	observeTxnPreparation(n.m, lockWait, prepareDuration, kind)
 	rev, err := n.await(ctx, wr, "txn", start, "", e.Revision)
 	if err != nil {
-		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
+		n.m.TxnRequestsTotal.WithLabelValues(kind, compare, "error").Inc()
 		return TxnResponse{}, err
 	}
-	metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "committed").Inc()
-	stats.observeCommitted()
+	n.m.TxnRequestsTotal.WithLabelValues(kind, compare, "committed").Inc()
+	stats.observeCommitted(n.m)
 	return TxnResponse{Succeeded: succeeded, Revision: rev, DeletedKeys: deletedKeys}, nil
 }
 
@@ -625,21 +625,21 @@ func (s txnStats) kind() string {
 	}
 }
 
-func (s txnStats) observeCommitted() {
+func (s txnStats) observeCommitted(m *metrics.Metrics) {
 	if s.creates > 0 {
-		metrics.TxnSubOpsTotal.WithLabelValues("create").Add(float64(s.creates))
+		m.TxnSubOpsTotal.WithLabelValues("create").Add(float64(s.creates))
 	}
 	if s.updates > 0 {
-		metrics.TxnSubOpsTotal.WithLabelValues("update").Add(float64(s.updates))
+		m.TxnSubOpsTotal.WithLabelValues("update").Add(float64(s.updates))
 	}
 	if s.deletes > 0 {
-		metrics.TxnSubOpsTotal.WithLabelValues("delete").Add(float64(s.deletes))
+		m.TxnSubOpsTotal.WithLabelValues("delete").Add(float64(s.deletes))
 	}
 }
 
-func observeTxnPreparation(lockWait, prepareDuration time.Duration, kind string) {
-	metrics.TxnLockWaitDuration.Observe(lockWait.Seconds())
-	metrics.TxnPrepareDuration.WithLabelValues(kind).Observe(prepareDuration.Seconds())
+func observeTxnPreparation(m *metrics.Metrics, lockWait, prepareDuration time.Duration, kind string) {
+	m.TxnLockWaitDuration.Observe(lockWait.Seconds())
+	m.TxnPrepareDuration.WithLabelValues(kind).Observe(prepareDuration.Seconds())
 }
 
 func txnCompareLabel(succeeded bool) string {
@@ -1113,12 +1113,12 @@ func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.T
 		err = n.checkLease()
 	}
 	if err != nil {
-		metrics.WriteErrors.WithLabelValues(op).Inc()
+		n.m.WriteErrors.WithLabelValues(op).Inc()
 		return 0, fmt.Errorf("t4: commit: %w", err)
 	}
-	metrics.WritesTotal.WithLabelValues(op).Inc()
-	metrics.WriteDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
-	metrics.CurrentRevision.Set(float64(rev))
+	n.m.WritesTotal.WithLabelValues(op).Inc()
+	n.m.WriteDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	n.m.CurrentRevision.Set(float64(rev))
 	count := atomic.AddInt64(&n.entriesSinceCheckpoint, 1)
 	if n.checkpointTriggerC != nil && count >= n.cfg.CheckpointEntries {
 		select {
@@ -1348,7 +1348,7 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 	n.mu.Unlock()
 	_, err = n.await(ctx, req, "compact", start, "", e.Revision)
 	if err == nil {
-		metrics.CompactRevision.Set(float64(revision))
+		n.m.CompactRevision.Set(float64(revision))
 	}
 	return err
 }
