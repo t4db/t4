@@ -292,7 +292,7 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("listen %s: %w", listenAddr, err)
 			}
-			defer lis.Close()
+			defer func() { _ = lis.Close() }()
 
 			var creds credentials.TransportCredentials
 			if len(databases) == 0 {
