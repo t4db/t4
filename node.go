@@ -208,6 +208,9 @@ type Node struct {
 	db  atomic.Pointer[istore.Store]
 	wal WALWriter // non-nil on leader/single; non-nil on follower (local WAL, no uploader)
 
+	// renewals holds client lease renewals while this node leads.
+	renewals leaseRenewals
+
 	// mu serialises all leader writes for CAS safety and role transitions.
 	mu sync.Mutex
 
@@ -845,6 +848,7 @@ func Open(cfg Config) (*Node, error) {
 
 	// ── Determine role ───────────────────────────────────────────────────────
 	if cfg.PeerListenAddr == "" || cfg.ObjectStore == nil {
+		n.renewals.startTerm(time.Now())
 		n.storeRole(roleSingle)
 	} else {
 		if err := n.electAndStart(bgCtx); err != nil {

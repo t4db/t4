@@ -20,6 +20,12 @@ var LegacyNewDatabases atomic.Bool
 // release stay compatible with a leader that has not been upgraded yet.
 var V1Leader atomic.Bool
 
+// LeaderWithoutLeaseRenewal makes a leader reject forwarded client lease
+// renewals and reads of renewal times, as a leader built before they were
+// kept in memory does. Tests use it to check that followers then store
+// renewals instead.
+var LeaderWithoutLeaseRenewal atomic.Bool
+
 // BeforeMetaGenesis, if set, runs in Open on a leader just before it fixes the
 // meta mode of a new database, with the peer server already serving. Tests
 // use it to hold a leader in that window.

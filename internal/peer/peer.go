@@ -258,6 +258,8 @@ const (
 	ForwardMetaPut                    // set a meta keyspace key
 	ForwardMetaDelete                 // delete a meta keyspace key
 	ForwardGetSequence                // ReadIndex for the meta keyspace: returns the leader's applied WAL sequence
+	ForwardLeaseRenew                 // renew client lease Lease, granted with TTL Revision (nanoseconds), in the leader's memory
+	ForwardLeaseRenewedAt             // read how long ago each of Leases was last renewed (ForwardResponse.Ages)
 )
 
 // KVMsg is the wire representation of a key-value record.
@@ -306,7 +308,8 @@ type ForwardRequest struct {
 	Value    []byte     `json:"value,omitempty"`
 	Revision int64      `json:"revision,omitempty"` // CAS revision / compact target
 	Lease    int64      `json:"lease,omitempty"`
-	TxnReq   *TxnReqMsg `json:"txn,omitempty"` // ForwardTxn only
+	TxnReq   *TxnReqMsg `json:"txn,omitempty"`    // ForwardTxn only
+	Leases   []int64    `json:"leases,omitempty"` // ForwardLeaseRenewedAt only
 }
 
 // ForwardResponse encodes the leader's reply to a forwarded write.
@@ -317,6 +320,7 @@ type ForwardResponse struct {
 	ErrCode     string   `json:"err_code,omitempty"`
 	ErrMsg      string   `json:"err_msg,omitempty"`
 	DeletedKeys []string `json:"deleted_keys,omitempty"` // ForwardTxn: keys actually removed
+	Ages        []int64  `json:"ages,omitempty"`         // ForwardLeaseRenewedAt: nanoseconds since each lease was renewed
 }
 
 // ForwardHandler is implemented by the Node to handle forwarded writes on the

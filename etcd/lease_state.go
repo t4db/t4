@@ -111,10 +111,70 @@ func (s *Server) getLease(ctx context.Context, id int64, linearizable bool) (*le
 	if err != nil {
 		return nil, err
 	}
+	if err := s.leaseExpiries(ctx, []*leaseRecord{rec}, false); err != nil {
+		return nil, err
+	}
 	if time.Now().UnixNano() >= rec.ExpiryUnixNs {
 		return nil, errLeaseNotFound
 	}
 	return rec, nil
+}
+
+// renewLease renews the lease of rec. In a database with the meta keyspace
+// the leader keeps renewals in memory, as etcd does (see Node.RenewLease).
+// Elsewhere, and under a leader that predates that, a renewal is stored as
+// the record's expiry: a database created before the meta keyspace may be led
+// by a v1.1 node during a rolling upgrade, which expires leases by the stored
+// expiry alone and would revoke a lease renewed only in memory.
+func (s *Server) renewLease(ctx context.Context, rec *leaseRecord) error {
+	on, err := s.node.MetaEnabledSync(ctx)
+	if err != nil {
+		return err
+	}
+	if on {
+		err := s.node.RenewLease(ctx, rec.ID, time.Duration(rec.GrantedTTL)*time.Second)
+		if !errors.Is(err, t4.ErrLeaseRenewUnsupported) {
+			return err
+		}
+	}
+	rec.ExpiryUnixNs = time.Now().Add(time.Duration(rec.GrantedTTL) * time.Second).UnixNano()
+	return s.refreshLease(ctx, rec)
+}
+
+// leaseExpiries sets each record's expiry to when its lease expires: its
+// stored expiry, or its last renewal in the leader's memory plus its TTL,
+// whichever is later (see renewLease); a follower asks the leader. Unless
+// exact, only records whose stored expiry has passed are looked up: the
+// others are alive either way.
+func (s *Server) leaseExpiries(ctx context.Context, recs []*leaseRecord, exact bool) error {
+	if on, err := s.node.MetaEnabledSync(ctx); err != nil || !on {
+		return err
+	}
+	now := time.Now().UnixNano()
+	var due []*leaseRecord
+	for _, rec := range recs {
+		if exact || rec.ExpiryUnixNs <= now {
+			due = append(due, rec)
+		}
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(due))
+	for i, rec := range due {
+		ids[i] = rec.ID
+	}
+	renewed, err := s.node.LeaseRenewedAt(ctx, ids)
+	if errors.Is(err, t4.ErrLeaseRenewUnsupported) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for i, rec := range due {
+		rec.ExpiryUnixNs = max(rec.ExpiryUnixNs, renewed[i].Add(time.Duration(rec.GrantedTTL)*time.Second).UnixNano())
+	}
+	return nil
 }
 
 // refreshLease stores rec over the existing record of its lease. It returns
@@ -291,6 +351,10 @@ func (s *Server) leaseLoop() {
 			if err == t4.ErrClosed {
 				return
 			}
+			continue
+		}
+		if err := s.leaseExpiries(ctx, leases, false); err != nil {
+			cancel()
 			continue
 		}
 		now := time.Now()

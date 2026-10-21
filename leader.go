@@ -126,6 +126,8 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// TryAcquire never set it) and here.
 	n.objectStoreComplete.Store(false)
 	n.lockObjectStoreComplete.Store(false)
+	// Every client lease counts as renewed now (see lease_keepalive.go).
+	n.renewals.startTerm(time.Now())
 	n.storeRole(roleLeader)
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
 	n.nextSeq = nextSeq
@@ -406,6 +408,12 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		err := n.MetaDelete(ctx, req.Key)
 		code, msg := encodeErr(err)
 		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
+
+	case peer.ForwardLeaseRenew, peer.ForwardLeaseRenewedAt:
+		if testhook.LeaderWithoutLeaseRenewal.Load() {
+			return nil, fmt.Errorf("t4: unknown forward op %d", req.Op)
+		}
+		return n.handleLeaseForward(ctx, req)
 
 	case peer.ForwardGetSequence:
 		// A follower that has applied no entry asks for this to learn the

@@ -143,8 +143,7 @@ func (s *Server) LeaseKeepAlive(stream etcdserverpb.Lease_LeaseKeepAliveServer) 
 		if err != nil {
 			return err
 		}
-		rec.ExpiryUnixNs = time.Now().Add(time.Duration(rec.GrantedTTL) * time.Second).UnixNano()
-		if err := s.refreshLease(stream.Context(), rec); err != nil {
+		if err := s.renewLease(stream.Context(), rec); err != nil {
 			return err
 		}
 		if err := stream.Send(&etcdserverpb.LeaseKeepAliveResponse{
@@ -160,6 +159,9 @@ func (s *Server) LeaseKeepAlive(stream etcdserverpb.Lease_LeaseKeepAliveServer) 
 func (s *Server) LeaseTimeToLive(ctx context.Context, r *etcdserverpb.LeaseTimeToLiveRequest) (*etcdserverpb.LeaseTimeToLiveResponse, error) {
 	rec, err := s.getLease(ctx, r.ID, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.leaseExpiries(ctx, []*leaseRecord{rec}, true); err != nil {
 		return nil, err
 	}
 	if err := s.checkLeaseKeys(ctx, r.ID, auth.READ); err != nil {
@@ -186,6 +188,9 @@ func (s *Server) LeaseTimeToLive(ctx context.Context, r *etcdserverpb.LeaseTimeT
 func (s *Server) LeaseLeases(ctx context.Context, _ *etcdserverpb.LeaseLeasesRequest) (*etcdserverpb.LeaseLeasesResponse, error) {
 	leases, err := s.listLeases(ctx, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.leaseExpiries(ctx, leases, false); err != nil {
 		return nil, err
 	}
 	resp := &etcdserverpb.LeaseLeasesResponse{Header: s.header()}

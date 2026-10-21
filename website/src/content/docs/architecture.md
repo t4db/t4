@@ -222,7 +222,9 @@ Mapping summary:
 | `Watch` | `node.Watch` |
 | `Compact` | `node.Compact` |
 
-Leases are fully implemented: `LeaseGrant` stores a record with a real expiry timestamp, `LeaseKeepAlive` extends it, and the leader runs a background eviction loop (1 s tick) that deletes expired leases and all keys attached to them. `LeaseTimeToLive` and `LeaseLeases` are also supported. Cluster operations return a single synthetic member.
+Leases are fully implemented: `LeaseGrant` stores a record with a real expiry timestamp, and the leader runs a background eviction loop (1 s tick) that deletes expired leases and all keys attached to them. `LeaseTimeToLive` and `LeaseLeases` are also supported. Cluster operations return a single synthetic member.
+
+As in etcd, `LeaseKeepAlive` is not a write: the leader keeps when each lease was last renewed in memory, and followers forward keepalives and `LeaseTimeToLive` to it. A node that becomes leader, including a single node that restarts, treats every lease as renewed when its term starts, so a failover extends leases to a full TTL and never shortens one: a node takes over only after the previous leader's lease has lapsed. Databases created before the meta keyspace still store each keepalive, because a v1.1 node that may lead them during a rolling upgrade expires leases by the stored timestamp alone.
 
 ## Branches
 
