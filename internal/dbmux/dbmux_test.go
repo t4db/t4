@@ -16,7 +16,7 @@ func TestNewRequiresVerifiedClientCertificates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lis.Close()
+	defer func() { _ = lis.Close() }()
 
 	for name, cfg := range map[string]*tls.Config{
 		"no client auth":   {},
