@@ -401,9 +401,19 @@ func Open(cfg Config) (*Node, error) {
 		cp.SetSingleWriter()
 	}
 
-	// The t4 metrics registered on the configured registerer; nil means
-	// prometheus.DefaultRegisterer.
-	m := metrics.For(cfg.MetricsRegisterer)
+	// The t4 metrics on the configured registerer; nil means
+	// prometheus.DefaultRegisterer. Close releases them, as does a failed
+	// Open.
+	m, err := metrics.Register(cfg.MetricsRegisterer)
+	if err != nil {
+		return nil, err
+	}
+	opened := false
+	defer func() {
+		if !opened {
+			m.Release()
+		}
+	}()
 
 	if err := applyObjectStoreEncryption(&cfg); err != nil {
 		return nil, err
@@ -413,7 +423,7 @@ func Open(cfg Config) (*Node, error) {
 	// operation is counted and timed without scattering metrics calls
 	// throughout the codebase.
 	if cfg.ObjectStore != nil {
-		cfg.ObjectStore = object.NewInstrumentedStoreFor(cfg.ObjectStore, cfg.MetricsRegisterer)
+		cfg.ObjectStore = object.NewObservedStore(cfg.ObjectStore, m)
 	}
 
 	pebbleDir := filepath.Join(cfg.DataDir, "db")
@@ -905,6 +915,7 @@ func Open(cfg Config) (*Node, error) {
 		return uint64(size), err == nil
 	})
 
+	opened = true
 	return n, nil
 }
 
@@ -1154,6 +1165,7 @@ func (n *Node) Close() error {
 		if dberr := n.db.Load().Close(); dberr != nil {
 			err = dberr
 		}
+		n.m.Release()
 		n.stopOnce.Do(func() { close(n.stopped) })
 	})
 	return err

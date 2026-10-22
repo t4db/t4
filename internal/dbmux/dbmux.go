@@ -26,6 +26,7 @@ const handshakeTimeout = 10 * time.Second
 
 // Logger is the subset of logging the mux needs.
 type Logger interface {
+	Debugf(format string, args ...any)
 	Warnf(format string, args ...any)
 }
 
@@ -103,7 +104,9 @@ func (m *Mux) route(raw net.Conn) {
 	err := conn.HandshakeContext(ctx)
 	cancel()
 	if err != nil {
-		m.log.Warnf("dbmux: TLS handshake from %s: %v", raw.RemoteAddr(), err)
+		// TCP probes and load-balancer health checks connect without a
+		// handshake all the time.
+		m.log.Debugf("dbmux: TLS handshake from %s: %v", raw.RemoteAddr(), err)
 		_ = conn.Close()
 		return
 	}

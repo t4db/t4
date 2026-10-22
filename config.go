@@ -292,10 +292,12 @@ type Config struct {
 	// t4 metrics. When nil, prometheus.DefaultRegisterer is used.
 	// Pass a *prometheus.Registry to isolate t4 metrics from the global
 	// registry (useful when embedding t4 in applications that manage their
-	// own Prometheus registries). Nodes opened with the same registerer share
+	// own Prometheus registries). Nodes open on the same registerer share
 	// their metrics; give each node its own registerer, e.g. one from
 	// prometheus.WrapRegistererWith with a distinguishing label, to report
-	// them separately.
+	// them separately. Open registers the metrics and fails if they collide
+	// with ones already registered; Close of the last node sharing them
+	// unregisters them.
 	MetricsRegisterer prometheus.Registerer
 
 	// TracerProvider supplies the OpenTelemetry tracer used to span the write

@@ -5,8 +5,10 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/internal/metrics"
 )
 
 // TestNodeReadMetrics proves the read path records one counter increment and
@@ -49,19 +51,21 @@ func TestNodeReadMetrics(t *testing.T) {
 		}
 	}
 
-	// A read on a closed node is an error.
+	// A read on a closed node is an error. Close unregisters the metrics of
+	// the last node on the registry, so read the node's own from here on.
+	m := metrics.Lookup(nil)
 	if err := n.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	errBefore := gatherReadMetrics(t)
+	errsBefore := testutil.ToFloat64(m.ReadErrors.WithLabelValues("get"))
+	readsBefore := testutil.ToFloat64(m.ReadsTotal.WithLabelValues("get"))
 	if _, err := n.Get("k"); !errors.Is(err, t4.ErrClosed) {
 		t.Fatalf("Get on closed node: %v", err)
 	}
-	errAfter := gatherReadMetrics(t)
-	if got := errAfter.errs["get"] - errBefore.errs["get"]; got != 1 {
+	if got := testutil.ToFloat64(m.ReadErrors.WithLabelValues("get")) - errsBefore; got != 1 {
 		t.Errorf("t4_read_errors_total{op=\"get\"} after closed read: delta want 1 got %v", got)
 	}
-	if got := errAfter.reads["get"] - errBefore.reads["get"]; got != 0 {
+	if got := testutil.ToFloat64(m.ReadsTotal.WithLabelValues("get")) - readsBefore; got != 0 {
 		t.Errorf("t4_reads_total{op=\"get\"} must not count errors: delta %v", got)
 	}
 }

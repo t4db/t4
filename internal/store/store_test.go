@@ -743,7 +743,11 @@ func TestWatchLiveTxnFanout(t *testing.T) {
 }
 
 func TestWatchMetrics(t *testing.T) {
-	m := metrics.For(prometheus.NewRegistry())
+	m, err := metrics.Register(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Release()
 	s := openMem(t)
 	s.SetMetrics(m)
 

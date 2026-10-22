@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
@@ -65,7 +67,7 @@ func TestUploaderPublishesSegment(t *testing.T) {
 	path := writeSegment(t, dir, "seg-1", "entries")
 	store := object.NewMem()
 
-	if err := makeUploader(store, NoopLogger, metrics.For(nil))(context.Background(), path, "wal/1/1"); err != nil {
+	if err := makeUploader(store, NoopLogger, testMetrics(t))(context.Background(), path, "wal/1/1"); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	if got := readObject(t, store, "wal/1/1"); got != "entries" {
@@ -90,7 +92,7 @@ func TestUploaderKeepsExistingSegmentOnConflict(t *testing.T) {
 	}
 
 	path := writeSegment(t, dir, "seg-1", "entry1entry2")
-	if err := makeUploader(store, NoopLogger, metrics.For(nil))(ctx, path, "wal/1/1"); err != nil {
+	if err := makeUploader(store, NoopLogger, testMetrics(t))(ctx, path, "wal/1/1"); err != nil {
 		t.Fatalf("conflict with a superset of the local segment must succeed, got: %v", err)
 	}
 
@@ -119,7 +121,7 @@ func TestUploaderRejectsConflictWithDifferentEntries(t *testing.T) {
 				t.Fatalf("seed object: %v", err)
 			}
 			path := writeSegment(t, dir, "seg-1", local)
-			err := makeUploader(store, NoopLogger, metrics.For(nil))(ctx, path, "wal/1/1")
+			err := makeUploader(store, NoopLogger, testMetrics(t))(ctx, path, "wal/1/1")
 			if !errors.Is(err, wal.ErrSegmentConflict) {
 				t.Fatalf("upload err = %v, want ErrSegmentConflict", err)
 			}
@@ -151,7 +153,7 @@ func TestUploadLocalWALSegmentsSkipsConflictingSegment(t *testing.T) {
 
 	// Hide the conflicting key from List so the upload reaches PutIfAbsent,
 	// as it does when the outgoing leader publishes between List and Put.
-	if err := uploadLocalWALSegments(ctx, dir, hideKeys{store, conflicting}, NoopLogger, metrics.For(nil)); err != nil {
+	if err := uploadLocalWALSegments(ctx, dir, hideKeys{store, conflicting}, NoopLogger, testMetrics(t)); err != nil {
 		t.Fatalf("uploadLocalWALSegments: %v", err)
 	}
 	if got := readObject(t, store, conflicting); got != "published" {
@@ -184,7 +186,7 @@ func (s hideKeys) List(ctx context.Context, prefix string) ([]string, error) {
 func TestUploaderRetryIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	store := object.NewMem()
-	up := makeUploader(store, NoopLogger, metrics.For(nil))
+	up := makeUploader(store, NoopLogger, testMetrics(t))
 	ctx := context.Background()
 
 	first := writeSegment(t, dir, "seg-1", "entries")
@@ -207,10 +209,21 @@ func TestUploaderFallsBackToPlainPut(t *testing.T) {
 	path := writeSegment(t, dir, "seg-1", "entries")
 	store := plainStore{inner: object.NewMem()}
 
-	if err := makeUploader(store, NoopLogger, metrics.For(nil))(context.Background(), path, "wal/1/1"); err != nil {
+	if err := makeUploader(store, NoopLogger, testMetrics(t))(context.Background(), path, "wal/1/1"); err != nil {
 		t.Fatalf("upload via non-conditional store: %v", err)
 	}
 	if got := readObject(t, store, "wal/1/1"); got != "entries" {
 		t.Fatalf("object content = %q, want %q", got, "entries")
 	}
+}
+
+// testMetrics returns metrics on a registry of their own for the test.
+func testMetrics(t *testing.T) *metrics.Metrics {
+	t.Helper()
+	m, err := metrics.Register(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Release)
+	return m
 }

@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-
-	"github.com/t4db/t4/internal/metrics"
 )
 
 // TestInternalReadsLeaveClientMetrics pins that reads T4 makes for its own
@@ -18,7 +16,7 @@ func TestInternalReadsLeaveClientMetrics(t *testing.T) {
 	}
 	defer func() { _ = n.Close() }()
 
-	reads := func(op string) float64 { return testutil.ToFloat64(metrics.For(nil).ReadsTotal.WithLabelValues(op)) }
+	reads := func(op string) float64 { return testutil.ToFloat64(n.m.ReadsTotal.WithLabelValues(op)) }
 	ops := map[string]func(opts ...ReadOption) error{
 		"get":    func(o ...ReadOption) error { _, err := n.Get("/k", o...); return err },
 		"exists": func(o ...ReadOption) error { _, err := n.Exists("/k", o...); return err },
