@@ -14,9 +14,9 @@ import (
 // list traffic: an idle server must report no list reads.
 func TestLeaseLoopNotCountedAsClientReads(t *testing.T) {
 	newServer(t) // starts the lease loop on a single-node leader
-	before := testutil.ToFloat64(metrics.For(nil).ReadsTotal.WithLabelValues("list"))
+	before := testutil.ToFloat64(metrics.Lookup(nil).ReadsTotal.WithLabelValues("list"))
 	time.Sleep(2500 * time.Millisecond) // at least two ticks
-	if got := testutil.ToFloat64(metrics.For(nil).ReadsTotal.WithLabelValues("list")) - before; got != 0 {
+	if got := testutil.ToFloat64(metrics.Lookup(nil).ReadsTotal.WithLabelValues("list")) - before; got != 0 {
 		t.Errorf("idle server counted %v list reads", got)
 	}
 }

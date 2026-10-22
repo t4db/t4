@@ -1,14 +1,18 @@
 // Package metrics defines Prometheus metrics for a t4 node.
 //
-// For returns the metrics registered on a registerer, registering them on
-// first use. Nodes that share a registerer share their metrics; a node that
-// should report separately, such as one database of several served by one
-// process, uses its own registerer, e.g. one wrapped with a "db" label.
+// A node registers its metrics when it opens and releases them when it
+// closes (Register, Metrics.Release). Open nodes that share a registerer share
+// their metrics; a node that should report separately, such as one database
+// of several served by one process, uses its own registerer, e.g. one wrapped
+// with a "db" label.
 package metrics
 
 import (
+	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -139,28 +143,98 @@ type Metrics struct {
 	WatchScanEntriesTotal *prometheus.CounterVec
 
 	dbSizeFunc atomic.Pointer[func() (uint64, bool)]
+
+	reg    prometheus.Registerer
+	shared bool // listed in byReg, shared by the open nodes on reg
+	refs   int  // open nodes using these metrics, under mu
 }
 
 var (
-	mu    sync.Mutex
+	mu sync.Mutex
+	// byReg holds the metrics of every pointer registerer an open node uses.
+	// Registerers of other kinds are not shared: they may not be comparable,
+	// and every registerer the Prometheus client returns is a pointer.
 	byReg = map[prometheus.Registerer]*Metrics{}
 )
 
-// For returns the metrics registered on reg, creating and registering them
-// on the first call for reg. If reg is nil, prometheus.DefaultRegisterer is
-// used. reg must be comparable, as every registerer the Prometheus client
-// returns is.
-func For(reg prometheus.Registerer) *Metrics {
+// Register returns the t4 metrics on reg (prometheus.DefaultRegisterer when
+// nil) for a node that is opening, registering them unless an open node
+// shares them already. Release them when the node closes: the last release
+// unregisters them, so that a node opened again later, on reg or on another
+// registerer wrapping the same registry, registers anew.
+func Register(reg prometheus.Registerer) (*Metrics, error) {
 	if reg == nil {
 		reg = prometheus.DefaultRegisterer
 	}
+	shared := reflect.ValueOf(reg).Kind() == reflect.Pointer
 	mu.Lock()
 	defer mu.Unlock()
-	if m, ok := byReg[reg]; ok {
-		return m
+	if shared {
+		if m, ok := byReg[reg]; ok {
+			m.refs++
+			return m, nil
+		}
 	}
 	m := newMetrics()
-	reg.MustRegister(
+	m.reg, m.shared, m.refs = reg, shared, 1
+	for i, c := range m.collectors() {
+		if err := reg.Register(c); err != nil {
+			for _, done := range m.collectors()[:i] {
+				reg.Unregister(done)
+			}
+			return nil, fmt.Errorf("t4: register metrics: %w", err)
+		}
+	}
+	if shared {
+		byReg[reg] = m
+	}
+	return m, nil
+}
+
+// Lookup returns the metrics an open node registered on reg
+// (prometheus.DefaultRegisterer when nil), or nil if there are none or reg is
+// not a pointer. It takes no reference: the caller must not outlive the node.
+func Lookup(reg prometheus.Registerer) *Metrics {
+	if reg == nil {
+		reg = prometheus.DefaultRegisterer
+	}
+	if reflect.ValueOf(reg).Kind() != reflect.Pointer {
+		return nil
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return byReg[reg]
+}
+
+// Release gives up a reference Register returned. The last one unregisters
+// the metrics.
+func (m *Metrics) Release() {
+	mu.Lock()
+	defer mu.Unlock()
+	if m.refs--; m.refs > 0 {
+		return
+	}
+	if m.shared {
+		delete(byReg, m.reg)
+	}
+	for _, c := range m.collectors() {
+		m.reg.Unregister(c)
+	}
+}
+
+// ObserveObjectStoreOp records an object store operation (see
+// object.Observer).
+func (m *Metrics) ObserveObjectStoreOp(op string, d time.Duration, err error) {
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	m.ObjectStoreOpsTotal.WithLabelValues(op, result).Inc()
+	m.ObjectStoreDuration.WithLabelValues(op).Observe(d.Seconds())
+}
+
+func (m *Metrics) collectors() []prometheus.Collector {
+	return []prometheus.Collector{
 		m.WritesTotal,
 		m.WriteErrors,
 		m.WriteDuration,
@@ -195,9 +269,7 @@ func For(reg prometheus.Registerer) *Metrics {
 		m.WatchScanDuration,
 		m.WatchScanRevisionSpan,
 		m.WatchScanEntriesTotal,
-	)
-	byReg[reg] = m
-	return m
+	}
 }
 
 func newMetrics() *Metrics {

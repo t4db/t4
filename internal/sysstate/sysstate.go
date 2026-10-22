@@ -21,8 +21,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/t4db/t4"
 )
 
@@ -42,7 +40,6 @@ type Node interface {
 	MetaList(prefix string) ([]t4.MetaKV, error)
 	LinearizableMetaGet(ctx context.Context, key string) ([]byte, bool, error)
 	LinearizableMetaList(ctx context.Context, prefix string) ([]t4.MetaKV, error)
-	MetricsRegisterer() prometheus.Registerer
 }
 
 // Change is one state write: Value is stored under Key, or Key is removed

@@ -5,17 +5,20 @@ import (
 	"io"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/t4db/t4/internal/metrics"
 )
 
-// instrumentedStore wraps a Store and records Prometheus metrics for every
-// operation: t4_object_store_ops_total{op, result} and
+// Observer records the outcome and latency of each object store operation.
+type Observer interface {
+	ObserveObjectStoreOp(op string, d time.Duration, err error)
+}
+
+// instrumentedStore wraps a Store and reports every operation to an
+// Observer: for a node, t4_object_store_ops_total{op, result} and
 // t4_object_store_duration_seconds{op}.
 type instrumentedStore struct {
 	inner Store
-	m     *metrics.Metrics
+	o     Observer
 }
 
 // instrumentedConditionalStore additionally implements ConditionalStore.
@@ -35,19 +38,20 @@ type instrumentedConditionalVersionedStore struct {
 	versioned   VersionedStore
 }
 
-// NewInstrumentedStore wraps s with metrics instrumentation recorded on
-// prometheus.DefaultRegisterer. If s also implements optional Store
-// extensions, the returned value implements them too, so callers that
-// type-assert to ConditionalStore or VersionedStore continue to work.
+// NewInstrumentedStore wraps s with metrics instrumentation recorded on the
+// t4 metrics of the nodes open on prometheus.DefaultRegisterer, while there
+// are any. If s also implements optional Store extensions, the returned value
+// implements them too, so callers that type-assert to ConditionalStore or
+// VersionedStore continue to work.
 func NewInstrumentedStore(s Store) Store {
-	return NewInstrumentedStoreFor(s, nil)
+	return NewObservedStore(s, defaultObserver{})
 }
 
-// NewInstrumentedStoreFor is NewInstrumentedStore recording on the t4 metrics
-// registered on reg (prometheus.DefaultRegisterer when nil), the registerer
-// a node with Config.MetricsRegisterer = reg reports on.
-func NewInstrumentedStoreFor(s Store, reg prometheus.Registerer) Store {
-	base := instrumentedStore{inner: s, m: metrics.For(reg)}
+// NewObservedStore wraps s so that every operation is reported to o. Like
+// NewInstrumentedStore, the result implements the optional Store extensions
+// s implements.
+func NewObservedStore(s Store, o Observer) Store {
+	base := instrumentedStore{inner: s, o: o}
 	cs, hasConditional := s.(ConditionalStore)
 	vs, hasVersioned := s.(VersionedStore)
 	switch {
@@ -72,13 +76,18 @@ func NewInstrumentedStoreFor(s Store, reg prometheus.Registerer) Store {
 	}
 }
 
-func (s *instrumentedStore) record(op string, start time.Time, err error) {
-	result := "success"
-	if err != nil {
-		result = "error"
+// defaultObserver records on the metrics of the nodes open on
+// prometheus.DefaultRegisterer.
+type defaultObserver struct{}
+
+func (defaultObserver) ObserveObjectStoreOp(op string, d time.Duration, err error) {
+	if m := metrics.Lookup(nil); m != nil {
+		m.ObserveObjectStoreOp(op, d, err)
 	}
-	s.m.ObjectStoreOpsTotal.WithLabelValues(op, result).Inc()
-	s.m.ObjectStoreDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+}
+
+func (s *instrumentedStore) record(op string, start time.Time, err error) {
+	s.o.ObserveObjectStoreOp(op, time.Since(start), err)
 }
 
 func (s *instrumentedStore) Put(ctx context.Context, key string, r io.Reader) error {

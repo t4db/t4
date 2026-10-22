@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/t4db/t4"
@@ -27,7 +28,7 @@ func TestHealthzFailsOnceNodeStops(t *testing.T) {
 	_ = lis.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go serveMetrics(ctx, addr, promhttp.Handler(), []*t4.Node{node}, false)
+	go serveMetrics(ctx, addr, promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{}), []*t4.Node{node}, false)
 
 	status := func() int {
 		t.Helper()

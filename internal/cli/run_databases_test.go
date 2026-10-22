@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,8 @@ import (
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+
+	"github.com/t4db/t4"
 )
 
 // TestRunServesSeveralDatabases runs t4 run with two databases and checks
@@ -110,6 +113,7 @@ func TestRunRejectsInvalidDatabases(t *testing.T) {
 		want string
 	}{
 		{"no client mTLS", []string{"--db", "a"}, "--db requires --client-tls-cert"},
+		{"no client key", []string{"--db", "a", "--client-tls-cert", serverCert, "--client-tls-ca", pki.caPath}, "--db requires --client-tls-cert"},
 		{"invalid name", append([]string{"--db", "A/b"}, tlsFlags...), "must be a DNS label"},
 		{"duplicate name", append([]string{"--db", "a", "--db", "a"}, tlsFlags...), "listed twice"},
 		{"peers", append([]string{"--db", "a", "--peer-listen", "127.0.0.1:0"}, tlsFlags...), "does not support --peer-listen"},
@@ -262,4 +266,23 @@ func get(t *testing.T, c *clientv3.Client, key string) string {
 		return ""
 	}
 	return string(resp.Kvs[0].Value)
+}
+
+// TestSingleDatabaseMetricsUnchanged: without --db, /metrics serves the
+// default registry as before, without promhttp's own handler series.
+func TestSingleDatabaseMetricsUnchanged(t *testing.T) {
+	dbs, handler, err := openDatabases(t4.Config{DataDir: t.TempDir()}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dbs[0].node.Close() })
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "t4_current_revision ") {
+		t.Fatalf("/metrics lacks t4_current_revision:\n%s", body)
+	}
+	if strings.Contains(body, "promhttp_metric_handler") {
+		t.Fatal("/metrics without --db gained promhttp_metric_handler series")
+	}
 }

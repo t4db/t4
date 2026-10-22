@@ -9,7 +9,8 @@ import (
 
 type nopLogger struct{}
 
-func (nopLogger) Warnf(string, ...any) {}
+func (nopLogger) Debugf(string, ...any) {}
+func (nopLogger) Warnf(string, ...any)  {}
 
 func TestNewRequiresVerifiedClientCertificates(t *testing.T) {
 	lis, err := net.Listen("tcp", "127.0.0.1:0")

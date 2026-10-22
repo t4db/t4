@@ -16,14 +16,17 @@ func TestNodeDBSizeMetric(t *testing.T) {
 	if _, err := n.Put(ctx(t), "k", []byte("v"), 0); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if got := testutil.ToFloat64(metrics.For(nil).DBSizeBytes); got <= 0 {
+	// The node reports on the default registerer; keep its metrics past
+	// Close, when the last node on it unregisters them.
+	m := metrics.Lookup(nil)
+	if got := testutil.ToFloat64(m.DBSizeBytes); got <= 0 {
 		t.Fatalf("t4_db_size_bytes on open node: want > 0, got %v", got)
 	}
 
 	if err := n.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got := testutil.ToFloat64(metrics.For(nil).DBSizeBytes); got != 0 {
+	if got := testutil.ToFloat64(m.DBSizeBytes); got != 0 {
 		t.Fatalf("t4_db_size_bytes on closed node: want 0, got %v", got)
 	}
 }

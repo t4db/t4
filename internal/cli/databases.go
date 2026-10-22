@@ -72,7 +72,7 @@ func openDatabases(cfg t4.Config, s3Store *object.S3Store, names []string) ([]*d
 		if err != nil {
 			return nil, nil, fmt.Errorf("open node: %w", err)
 		}
-		return []*database{{node: node}}, promhttp.Handler(), nil
+		return []*database{{node: node}}, promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{}), nil
 	}
 
 	reg := prometheus.NewRegistry()
@@ -94,5 +94,5 @@ func openDatabases(cfg t4.Config, s3Store *object.S3Store, names []string) ([]*d
 		}
 		dbs = append(dbs, &database{name: name, node: node})
 	}
-	return dbs, promhttp.InstrumentMetricHandler(reg, promhttp.HandlerFor(reg, promhttp.HandlerOpts{})), nil
+	return dbs, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), nil
 }

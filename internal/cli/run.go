@@ -137,7 +137,7 @@ func runCmd() *cobra.Command {
 				if err := validateDatabases(databases); err != nil {
 					return err
 				}
-				if clientTLSCert == "" || clientTLSCA == "" {
+				if clientTLSCert == "" || clientTLSKey == "" || clientTLSCA == "" {
 					return fmt.Errorf("--db requires --client-tls-cert, --client-tls-key and --client-tls-ca: clients reach the database named by the Common Name of their certificate")
 				}
 				if peerListenAddr != "" {
@@ -293,7 +293,7 @@ func runCmd() *cobra.Command {
 			}
 			go serveMetrics(cmd.Context(), metricsAddr, metricsHandler, nodes, pprofEnabled)
 
-			// ── Client listener ──────────────────────────────────────────────
+			// ── Client TLS ───────────────────────────────────────────────────
 			var clientTLSConf *tls.Config // nil when the client port is plaintext
 			if clientTLSCert != "" {
 				clientTLSConf, err = buildClientTLSConfig(clientTLSCert, clientTLSKey, clientTLSCA)
@@ -307,45 +307,23 @@ func runCmd() *cobra.Command {
 				}
 			}
 
-			lis, err := net.Listen("tcp", listenAddr)
-			if err != nil {
-				return fmt.Errorf("listen %s: %w", listenAddr, err)
-			}
-			defer func() { _ = lis.Close() }()
-
+			// Every database's auth store and gRPC server are set up before
+			// the port opens, so that a failure leaves nothing serving.
 			var creds credentials.TransportCredentials
-			if len(databases) == 0 {
-				dbs[0].lis = lis
-				// With a gateway, TLS is terminated before gRPC sees a
-				// connection: on a shared port because the protocols can only
-				// be told apart above HTTP, and on a separate port so that the
-				// in-process loopback the gateway dials stays plaintext. A gRPC
-				// server holding credentials would try to handshake that pipe
-				// too, and giving it credentials as well as decrypted
-				// connections would start a second handshake inside the first.
-				if clientTLSConf != nil && !enableGRPCGateway {
-					creds = credentials.NewTLS(clientTLSConf)
-				}
-			} else {
-				// One listener for every database: the mux routes each
-				// connection by the Common Name of its client certificate.
-				mux, err := dbmux.New(lis, clientTLSConf, databases, logrus.StandardLogger())
-				if err != nil {
-					return err
-				}
-				for _, db := range dbs {
-					db.lis = mux.Listener(db.name)
-				}
+			switch {
+			case len(databases) > 0:
+				// The mux below completes the TLS handshake.
 				creds = dbmux.Credentials()
-				go func() { _ = mux.Serve() }()
+			// With a gateway, TLS is terminated before gRPC sees a connection:
+			// on a shared port because the protocols can only be told apart
+			// above HTTP, and on a separate port so that the in-process
+			// loopback the gateway dials stays plaintext. A gRPC server holding
+			// credentials would try to handshake that pipe too, and giving it
+			// credentials as well as decrypted connections would start a second
+			// handshake inside the first.
+			case clientTLSConf != nil && !enableGRPCGateway:
+				creds = credentials.NewTLS(clientTLSConf)
 			}
-			logrus.WithFields(logrus.Fields{
-				"listen_addr": listenAddr,
-				"client_tls":  tlsMode(clientTLSCert, clientTLSCA),
-				"auth":        authEnabled,
-				"databases":   len(dbs),
-				"gateway":     enableGRPCGateway && len(databases) == 0,
-			}).Info("etcd gRPC server listening")
 
 			// ── gRPC server per database ─────────────────────────────────────
 			for _, db := range dbs {
@@ -378,7 +356,27 @@ func runCmd() *cobra.Command {
 
 				db.srv = grpc.NewServer(grpcOpts...)
 				t4etcd.New(db.node, authStore, tokens).Register(db.srv)
-				if len(databases) > 0 {
+			}
+
+			// ── Client listener ──────────────────────────────────────────────
+			lis, err := net.Listen("tcp", listenAddr)
+			if err != nil {
+				return fmt.Errorf("listen %s: %w", listenAddr, err)
+			}
+			defer func() { _ = lis.Close() }()
+
+			var mux *dbmux.Mux
+			if len(databases) == 0 {
+				dbs[0].lis = lis
+			} else {
+				// One listener for every database: the mux routes each
+				// connection by the Common Name of its client certificate.
+				mux, err = dbmux.New(lis, clientTLSConf, databases, logrus.StandardLogger())
+				if err != nil {
+					return err
+				}
+				for _, db := range dbs {
+					db.lis = mux.Listener(db.name)
 					go func() {
 						if err := db.srv.Serve(db.lis); err != nil {
 							logrus.Errorf("gRPC serve%s: %v", db.label(), err)
@@ -386,6 +384,16 @@ func runCmd() *cobra.Command {
 					}()
 				}
 			}
+			if mux != nil {
+				go func() { _ = mux.Serve() }()
+			}
+			logrus.WithFields(logrus.Fields{
+				"listen_addr": listenAddr,
+				"client_tls":  tlsMode(clientTLSCert, clientTLSCA),
+				"auth":        authEnabled,
+				"databases":   len(dbs),
+				"gateway":     enableGRPCGateway && len(databases) == 0,
+			}).Info("etcd gRPC server listening")
 			if authEnabled {
 				logrus.Infof("auth enabled (token TTL %ds)", tokenTTLSec)
 			}
