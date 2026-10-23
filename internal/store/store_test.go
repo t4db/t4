@@ -743,8 +743,13 @@ func TestWatchLiveTxnFanout(t *testing.T) {
 }
 
 func TestWatchMetrics(t *testing.T) {
-	metrics.Register(prometheus.NewRegistry())
+	m, err := metrics.Register(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Release()
 	s := openMem(t)
+	s.SetMetrics(m)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ch1, err := s.Watch(ctx, "/metrics/", 0, WatchOptions{})
@@ -756,14 +761,14 @@ func TestWatchMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := testutil.ToFloat64(metrics.WatchActive); got != 2 {
+	if got := testutil.ToFloat64(m.WatchActive); got != 2 {
 		t.Fatalf("active watches: want 2 got %v", got)
 	}
-	if got := testutil.ToFloat64(metrics.WatchActivePrefixes); got != 1 {
+	if got := testutil.ToFloat64(m.WatchActivePrefixes); got != 1 {
 		t.Fatalf("active watch prefixes: want 1 got %v", got)
 	}
-	beforeScanned := testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("scanned"))
-	beforeMatched := testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("matched"))
+	beforeScanned := testutil.ToFloat64(m.WatchScanEntriesTotal.WithLabelValues("scanned"))
+	beforeMatched := testutil.ToFloat64(m.WatchScanEntriesTotal.WithLabelValues("matched"))
 
 	apply(t, s,
 		createEntry(1, "/metrics/a", []byte("1")),
@@ -779,13 +784,13 @@ func TestWatchMetrics(t *testing.T) {
 	}
 
 	waitForMetric(t, func() float64 {
-		return testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("scanned"))
+		return testutil.ToFloat64(m.WatchScanEntriesTotal.WithLabelValues("scanned"))
 	}, func(v float64) bool { return v-beforeScanned >= 2 }, "shared live scan metrics")
 	waitForMetric(t, func() float64 {
-		return testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("matched"))
+		return testutil.ToFloat64(m.WatchScanEntriesTotal.WithLabelValues("matched"))
 	}, func(v float64) bool { return v-beforeMatched >= 2 }, "shared live match metrics")
-	afterScanned := testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("scanned"))
-	afterMatched := testutil.ToFloat64(metrics.WatchScanEntriesTotal.WithLabelValues("matched"))
+	afterScanned := testutil.ToFloat64(m.WatchScanEntriesTotal.WithLabelValues("scanned"))
+	afterMatched := testutil.ToFloat64(m.WatchScanEntriesTotal.WithLabelValues("matched"))
 	if delta := afterScanned - beforeScanned; delta != 2 {
 		t.Fatalf("live scan amplification: want 2 decoded entries once, got %v", delta)
 	}
@@ -795,10 +800,10 @@ func TestWatchMetrics(t *testing.T) {
 
 	cancel()
 	waitForMetric(t, func() float64 {
-		return testutil.ToFloat64(metrics.WatchActive)
+		return testutil.ToFloat64(m.WatchActive)
 	}, func(v float64) bool { return v == 0 }, "active watches after cancel")
 	waitForMetric(t, func() float64 {
-		return testutil.ToFloat64(metrics.WatchActivePrefixes)
+		return testutil.ToFloat64(m.WatchActivePrefixes)
 	}, func(v float64) bool { return v == 0 }, "active watch prefixes after cancel")
 }
 

@@ -569,6 +569,8 @@ The dashboard contains eight sections:
 
 `op` label values: `put`, `create`, `update`, `delete`, `compact` for write metrics; `get`, `exists`, `list`, `count` for read metrics.
 
+With `t4 run --db`, every metric carries a `db` label naming the database it reports on.
+
 ---
 
 ### Distributed tracing

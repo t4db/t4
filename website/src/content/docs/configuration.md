@@ -139,6 +139,28 @@ Start a node. All flags below are sub-flags of the `run` subcommand.
 t4 run [flags]
 ```
 
+### Serving several databases
+
+`--db` makes one `t4 run` serve several independent databases, for example the datastores of many small hosted
+Kubernetes control planes:
+
+```bash
+t4 run --db tenant-a --db tenant-b \
+  --client-tls-cert server.crt --client-tls-key server.key --client-tls-ca ca.crt \
+  --s3-bucket my-bucket --s3-prefix t4/
+```
+
+- Each database has its own revisions, compaction, checkpoints and auth, stored in `<data-dir>/dbs/<name>/` and below
+  `<s3-prefix>/dbs/<name>/`. Point `t4 status`, `t4 restore` or `t4 branch` at a database with
+  `--s3-prefix <s3-prefix>/dbs/<name>`.
+- All databases share the client port. A client reaches the database named by the Common Name of its certificate,
+  so client mTLS is required, and a certificate for a database that is not served gets no connection. A name is a DNS
+  label: lowercase letters, digits and `-`, at most 63 characters.
+- Metrics carry a `db` label. `/healthz`, `/healthz/leader` and `/readyz` report OK only when that holds for every
+  database.
+- `--db` runs a single node: it cannot yet be combined with `--peer-listen` or `--branch-prefix`.
+- If one database stops, `t4 run` exits so that its supervisor restarts it, as it does with a single database.
+
 ### Environment variables
 
 Most `t4` CLI flags can also be set via `T4_*` environment variables. Command-line flags take precedence over
@@ -251,6 +273,7 @@ metadata.
 | `t4 run` | `T4_CLIENT_TLS_CERT` | `--client-tls-cert` |
 | `t4 run` | `T4_CLIENT_TLS_KEY` | `--client-tls-key` |
 | `t4 run` | `T4_DATA_DIR` | `--data-dir` |
+| `t4 run` | `T4_DBS` | `--db` |
 | `t4 run` | `T4_FOLLOWER_MAX_RETRIES` | `--follower-max-retries` |
 | `t4 run` | `T4_FOLLOWER_WAIT_MODE` | `--follower-wait-mode` |
 | `t4 run` | `T4_GRPC_KEEPALIVE_INTERVAL` | `--grpc-keepalive-interval` |
@@ -401,6 +424,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--client-tls-cert` | — | `T4_CLIENT_TLS_CERT` | No | server certificate file for client-facing TLS (PEM) |
 | `t4 run` | `--client-tls-key` | — | `T4_CLIENT_TLS_KEY` | No | server private key file for client-facing TLS (PEM) |
 | `t4 run` | `--data-dir` | `/var/lib/t4` | `T4_DATA_DIR` | No | directory for Pebble data and local WAL segments |
+| `t4 run` | `--db` | `[]` | `T4_DBS` | No | serve this database; repeat or comma-separate for several. Each is stored below dbs/<name> in --data-dir and --s3-prefix, and clients reach the one named by the Common Name of their certificate (requires client mTLS) |
 | `t4 run` | `--follower-max-retries` | `5` | `T4_FOLLOWER_MAX_RETRIES` | No | consecutive stream failures before a follower attempts a leader takeover |
 | `t4 run` | `--follower-wait-mode` | `quorum` | `T4_FOLLOWER_WAIT_MODE` | No | leader wait policy for follower ACKs before commit: none, quorum, or all |
 | `t4 run` | `--grpc-keepalive-interval` | `2h0m0s` | `T4_GRPC_KEEPALIVE_INTERVAL` | No | server keepalive ping interval; how often the server pings idle connections |

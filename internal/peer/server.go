@@ -130,6 +130,9 @@ type Server struct {
 	// members tracks every follower that has streamed from this leader.
 	members map[string]*member
 
+	// metrics, when set, records follower lag and resyncs (see SetMetrics).
+	metrics *metrics.Metrics
+
 	log peerLogger
 }
 
@@ -148,6 +151,18 @@ func NewServer(cap int, log peerLogger) *Server {
 		DisconnectC:      make(chan struct{}, 1),
 		members:          make(map[string]*member),
 		log:              log,
+	}
+}
+
+// SetMetrics sets the metrics follower lag and resyncs are recorded on.
+// Call it before the server accepts followers.
+func (s *Server) SetMetrics(m *metrics.Metrics) {
+	s.metrics = m
+}
+
+func (s *Server) recordResync(reason string) {
+	if s.metrics != nil {
+		s.metrics.FollowerResyncsTotal.WithLabelValues(reason).Inc()
 	}
 }
 
@@ -461,13 +476,13 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 		s.mu.Unlock()
 		s.log.Warnf("peer: follower %q needs resync (fromRev=%d < leaderStartRev=%d)",
 			req.NodeID, req.FromRevision, s.startRev)
-		metrics.FollowerResyncsTotal.WithLabelValues("behind_leader_start").Inc()
+		s.recordResync("behind_leader_start")
 		return ErrResyncRequired
 	}
 	snapshot, ok := s.buf.since(req.FromRevision)
 	if !ok {
 		s.mu.Unlock()
-		metrics.FollowerResyncsTotal.WithLabelValues("ring_buffer_miss").Inc()
+		s.recordResync("ring_buffer_miss")
 		return ErrResyncRequired
 	}
 	ch := make(chan *WalEntryMsg, 512)
@@ -521,7 +536,9 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 		s.mu.Unlock()
 		if owned {
 			// Remove the lag metric so disconnected followers don't linger in dashboards.
-			metrics.FollowerLag.DeleteLabelValues(req.NodeID)
+			if s.metrics != nil {
+				s.metrics.FollowerLag.DeleteLabelValues(req.NodeID)
+			}
 			// Wake WaitForFollowers: this follower is no longer required.
 			s.notifyACK()
 		}
@@ -557,7 +574,9 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				lag = 0
 			}
 			s.mu.Unlock()
-			metrics.FollowerLag.WithLabelValues(req.NodeID).Set(float64(lag))
+			if s.metrics != nil {
+				s.metrics.FollowerLag.WithLabelValues(req.NodeID).Set(float64(lag))
+			}
 			s.notifyACK()
 		}
 	}()

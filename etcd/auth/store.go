@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/t4db/t4/internal/metrics"
@@ -44,6 +45,23 @@ type Store struct {
 	users   map[string]User
 	roles   map[string]Role
 	rateLim *rateLimiter
+	metrics *metrics.Metrics
+}
+
+// nodeMetrics returns the metrics of n's node, if it has any (a *t4.Node
+// does), so that auth attempts are counted next to them.
+func nodeMetrics(n node) *metrics.Metrics {
+	r, ok := n.(interface{ MetricsRegisterer() prometheus.Registerer })
+	if !ok {
+		return nil
+	}
+	return metrics.Lookup(r.MetricsRegisterer())
+}
+
+func (s *Store) recordAttempt(result string) {
+	if s.metrics != nil {
+		s.metrics.AuthAttemptsTotal.WithLabelValues(result).Inc()
+	}
 }
 
 // NewStore creates a Store backed by n and loads the current auth state from
@@ -54,6 +72,7 @@ func NewStore(n node) (*Store, error) {
 		users:   make(map[string]User),
 		roles:   make(map[string]Role),
 		rateLim: newRateLimiter(),
+		metrics: nodeMetrics(n),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -161,7 +180,7 @@ func (s *Store) ListUsers() ([]User, error) {
 // CheckPassword returns nil when password matches the stored hash for name.
 func (s *Store) CheckPassword(name, password string) error {
 	if s.rateLim.IsLocked(name) {
-		metrics.AuthAttemptsTotal.WithLabelValues("locked").Inc()
+		s.recordAttempt("locked")
 		return errors.New("authentication failed: too many attempts, try again later")
 	}
 
@@ -171,16 +190,16 @@ func (s *Store) CheckPassword(name, password string) error {
 
 	if err != nil {
 		s.rateLim.RecordFailure(name)
-		metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
+		s.recordAttempt("fail")
 		return errors.New("authentication failed")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
 		s.rateLim.RecordFailure(name)
-		metrics.AuthAttemptsTotal.WithLabelValues("fail").Inc()
+		s.recordAttempt("fail")
 		return errors.New("authentication failed")
 	}
 	s.rateLim.RecordSuccess(name)
-	metrics.AuthAttemptsTotal.WithLabelValues("success").Inc()
+	s.recordAttempt("success")
 	return nil
 }
 
