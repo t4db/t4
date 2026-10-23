@@ -740,6 +740,9 @@ func kvError(err error) error {
 		return rpctypes.ErrGRPCNoLeader
 	case errors.Is(err, t4.ErrClosed):
 		return status.Error(codes.Unavailable, err.Error())
+	case errors.Is(err, t4.ErrTimeout):
+		// Unavailable, which etcd clients do not send again for a write.
+		return rpctypes.ErrGRPCTimeout
 	case errors.Is(err, t4.ErrCompacted):
 		return rpctypes.ErrGRPCCompacted
 	case errors.Is(err, t4.ErrFutureRevision):
