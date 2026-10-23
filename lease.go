@@ -118,46 +118,6 @@ type leaseGrant struct {
 	slow  bool      // written in slow mode (valid for slowTTL)
 }
 
-// extendLease records a successful lock write that started at start.
-func (n *Node) extendLease(start time.Time, slow bool) {
-	g := &leaseGrant{start: start, slow: slow}
-	for {
-		cur := n.lease.Load()
-		if cur != nil && !start.After(cur.start) {
-			return
-		}
-		if n.lease.CompareAndSwap(cur, g) {
-			return
-		}
-	}
-}
-
-// slowTTL is how long a lock written in slow mode stays valid.
-func (n *Node) slowTTL() time.Duration {
-	return slowTTLFactor * n.cfg.LeaderWatchInterval
-}
-
-// slowSafe reports whether every follower that could take over is hearing
-// this leader (see peer.Server.SlowSafe).
-func (n *Node) slowSafe(now time.Time) bool {
-	srv := n.leasePeers.Load()
-	return srv == nil || srv.SlowSafe(now, silenceTimeout, knownFollowerWindow)
-}
-
-// leaseDeadline returns when this leader's lease ends, or the zero time if it
-// has none.
-func (n *Node) leaseDeadline(now time.Time) time.Time {
-	g := n.lease.Load()
-	if g == nil {
-		return time.Time{}
-	}
-	ttl := fastTTL
-	if g.slow && n.slowSafe(now) {
-		ttl = n.slowTTL()
-	}
-	return g.start.Add(ttl - leaseSafetyMargin)
-}
-
 // checkLease returns an error wrapping ErrNoLeader when this node is the
 // leader but can no longer be sure it still is: acknowledging a write or
 // serving a linearizable read could then contradict a newer leader. Nodes in
@@ -167,7 +127,7 @@ func (n *Node) checkLease() error {
 		return nil
 	}
 	now := time.Now()
-	if !now.Before(n.leaseDeadline(now)) {
+	if !now.Before(n.grp.leaseDeadline(now)) {
 		return fmt.Errorf("%w: leader lease expired; leadership cannot be confirmed", ErrNoLeader)
 	}
 	return nil
@@ -242,6 +202,34 @@ func (n *Node) leaderKnownFence() election.Fence {
 	return election.Fence{Rev: db.CurrentRevision(), Seq: pos.Seq, Term: pos.Term}
 }
 
+// lockFence returns what the group's next lock write records for this
+// database: the election fence, the sequence it covers, and the object
+// storage flag, which counts as written from here on (see
+// flagWriteStarting). The fence covers pending fence requests.
+func (n *Node) lockFence() (fence election.Fence, seq int64, complete bool) {
+	// Position before revision: the revision read afterwards covers it.
+	pos := n.db.Load().LastPosition()
+	rev := n.db.Load().CurrentRevision()
+	if wantSeq, wantRev, wantTerm := n.fenceWanted(); wantSeq > pos.Seq {
+		pos.Seq, pos.Term = wantSeq, max(pos.Term, wantTerm)
+		if wantRev > rev {
+			rev = wantRev
+		}
+	}
+	// The flag as the commit loop wants it now; a write waiting on it is
+	// acknowledged only once this renewal has recorded it.
+	complete = n.objectStoreComplete.Load()
+	n.flagWriteStarting(complete)
+	return election.Fence{Rev: rev, Seq: pos.Seq, Term: pos.Term}, pos.Seq, complete
+}
+
+// lockWritten records a successful lock write that recorded the fence
+// covering seq and the object storage flag complete.
+func (n *Node) lockWritten(seq int64, complete bool) {
+	n.flagWritten(complete)
+	n.fenced(seq)
+}
+
 // fenced records a successful lock write whose CommittedRev covers seq.
 func (n *Node) fenced(seq int64) {
 	for {
@@ -311,7 +299,7 @@ func (n *Node) awaitFence(ctx context.Context, seq, rev int64, term uint64) erro
 		done := n.fence.done
 		n.fence.mu.Unlock()
 		select {
-		case n.fenceReqC <- struct{}{}:
+		case n.grp.fenceReqC <- struct{}{}:
 		default:
 		}
 		select {
