@@ -279,19 +279,18 @@ type Node struct {
 	// follower-only (write forwarding); updated atomically when leader changes.
 	leaderCli atomic.Pointer[peer.Client]
 
-	// lease is this node's last successful lock write as leader (see
-	// lease.go); nil until it first holds the lock.
-	lease atomic.Pointer[leaseGrant]
+	// grp is the election side of this node: its leader lock and lease
+	// (see group.go).
+	grp *group
 	// leasePeers is the peer server whose followers the lease depends on;
 	// nil unless leader.
 	leasePeers atomic.Pointer[peer.Server]
 	// fenceSeq is the sequence covered by the CommittedRev of this leader's
 	// last lock write; termStartSeq the last sequence it held when its term
-	// began. fence and fenceReqC coordinate fence moves (see lease.go).
+	// began. fence and grp.fenceReqC coordinate fence moves (see lease.go).
 	fenceSeq     atomic.Int64
 	termStartSeq atomic.Int64
 	fence        fenceState
-	fenceReqC    chan struct{}
 	// objectStoreComplete is set by the commit loop while object storage
 	// holds every write this leader acknowledged; lockObjectStoreComplete is
 	// what the lock's ObjectStoreComplete may say: true from any attempt to
@@ -812,12 +811,12 @@ func Open(cfg Config) (*Node, error) {
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,
 		pebbleOpts:  pebbleOpts,
-		fenceReqC:   make(chan struct{}, 1),
 
 		metaGenesisDone: make(chan struct{}),
 	}
 	n.fence.done = make(chan struct{})
 	n.log = log
+	n.grp = newGroup(cfg, log, n)
 	n.cp = cp
 	n.db.Store(db)
 	if cfg.NodeID != "" {
@@ -919,19 +918,17 @@ func (n *Node) updateMetrics() {
 
 // electAndStart runs leader election and configures the node as leader or follower.
 func (n *Node) electAndStart(bgCtx context.Context) error {
-	lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	acquireStart := time.Now()
-	rec, won, err := lock.TryAcquire(ctx, n.term, n.committedFence())
+	rec, won, err := n.grp.lock.TryAcquire(ctx, n.term, n.committedFence())
 	if err != nil {
 		return fmt.Errorf("t4: election: %w", err)
 	}
 
 	if won {
-		return n.becomeLeader(bgCtx, lock, rec, acquireStart, true)
+		return n.becomeLeader(bgCtx, rec, acquireStart, true)
 	}
 
 	n.observeTerm(rec.Term)
@@ -942,6 +939,20 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 	metrics.ElectionsTotal.WithLabelValues("lost").Inc()
 	n.log.Infof("t4: following leader at %s (term=%d)", rec.LeaderAddr, rec.Term)
 	return nil
+}
+
+// stepDown stops a leader whose lock was superseded or can no longer be
+// renewed. It fences writes while cancelling the node's background work,
+// then stops the peer server so followers lose their streams and find the
+// new leader. fenceMu is released before grpcSrv.Stop(): Stop waits for
+// in-flight handlers, which take fenceMu.RLock themselves.
+func (n *Node) stepDown(err error) {
+	n.fenceMu.Lock()
+	n.stop(err)
+	n.fenceMu.Unlock()
+	if grpcSrv := n.peerGRPC; grpcSrv != nil {
+		grpcSrv.Stop()
+	}
 }
 
 // gracefulLeaderShutdown drains in-flight writes, uploads the WAL synchronously
@@ -1009,8 +1020,7 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 	//    left alone.
 	if n.cfg.ObjectStore != nil {
 		tCtx, tCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
-		switch rerr := lock.Relinquish(tCtx, n.term, n.committedFence()); {
+		switch rerr := n.grp.lock.Relinquish(tCtx, n.term, n.committedFence()); {
 		case errors.Is(rerr, election.ErrNotOwner):
 			n.log.Infof("t4: graceful shutdown: lock already held by a newer leader — leaving it")
 		case rerr != nil:
