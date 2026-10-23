@@ -1,45 +1,43 @@
+# Bisect branch only: robustness under DelayPeerLeader, 8 runs.
 name: Nightly stress test
 
+# Runs etcd's robustness tests against a three-node cluster, several times in
+# parallel, optionally narrowed to one traffic scenario and failpoint: to
+# reproduce an intermittent failure, or to compare commits. The nightly
+# workflow runs them once, over every scenario and failpoint.
+
 on:
-  schedule:
-    - cron: "0 22 * * *" # 22:00 UTC every night
-  workflow_dispatch: # allow manual trigger
-  workflow_call: # the release workflow runs these before building (see image-release.yml)
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  jepsen:
-    uses: ./.github/workflows/jepsen-workflow.yml
-    # Nightly runs the full nemesis × workload matrix. Per-PR runs use a
-    # smaller smoke matrix (see jepsen.yml).
-    with:
-      nemeses: '["partition-halves", "kill", "partition-s3"]'
-
-  stress:
-    name: Stress (30m)
+  plan:
+    name: Plan runs
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-
+    outputs:
+      runs: ${{ steps.runs.outputs.runs }}
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Download dependencies
-        run: go mod download
-
-      - name: TestLongRunningConsistency (30m)
-        run: |
-          go test -run TestLongRunningConsistency -v -timeout 35m -count=1 ./tests/integration
+      - id: runs
         env:
-          TEST_DURATION: 30m
+          RUNS: "8"
+        run: |
+          if ! [[ "$RUNS" =~ ^[0-9]+$ ]] || (( RUNS < 1 || RUNS > 32 )); then
+            echo "runs must be a number from 1 to 32, got '$RUNS'" >&2
+            exit 1
+          fi
+          echo "runs=$(seq 1 "$RUNS" | jq -cs .)" >> "$GITHUB_OUTPUT"
 
   robustness:
-    name: etcd robustness tests (3 nodes)
+    name: Robustness run ${{ matrix.run }}
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ${{ fromJSON(needs.plan.outputs.runs) }}
 
     steps:
       - uses: actions/checkout@v7
@@ -72,32 +70,14 @@ jobs:
         run: make test-robustness
         env:
           T4_ROBUSTNESS_S3: "1"
+          T4_ROBUSTNESS_SCENARIO: ""
+          T4_ROBUSTNESS_FAILPOINT: DelayPeerLeader
 
       - name: Upload failure reports
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: robustness-reports-${{ github.sha }}
+          name: robustness-reports-${{ github.sha }}-run-${{ matrix.run }}
           path: .tmp/robustness/results/
-          retention-days: 30
-          if-no-files-found: ignore
-
-  conformance:
-    name: Kubernetes conformance (k0s on T4)
-    runs-on: ubuntu-latest
-    timeout-minutes: 270
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Run Kubernetes conformance with Sonobuoy
-        run: make test-conformance
-
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: conformance-results-${{ github.sha }}
-          path: .tmp/conformance/
           retention-days: 30
           if-no-files-found: ignore
