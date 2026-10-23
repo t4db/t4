@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	grpcpeer "google.golang.org/grpc/peer"
 
 	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/election"
@@ -378,6 +379,11 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		return resp, nil
 
 	case peer.ForwardCompact:
+		from := "a follower"
+		if p, ok := grpcpeer.FromContext(ctx); ok {
+			from = p.Addr.String()
+		}
+		n.log.Infof("t4: compaction to revision %d forwarded by %s", req.Revision, from)
 		err := n.Compact(ctx, req.Revision)
 		code, msg := encodeErr(err)
 		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil

@@ -1311,6 +1311,8 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 	if n.loadRole() == roleFollower {
 		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardCompact, Revision: revision})
 		if err != nil {
+			// Its outcome is unknown: the leader may have compacted.
+			n.log.Warnf("t4: forwarding compaction to revision %d: %v", revision, err)
 			return err
 		}
 		return decodeErr(resp.ErrCode, resp.ErrMsg)
@@ -1336,14 +1338,17 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 	}
 	// Like etcd, a revision is reached once applied: a write assigned a
 	// revision may still fail, and the revision then never exists.
-	if revision > n.db.Load().CurrentRevision() {
+	if applied := n.db.Load().CurrentRevision(); revision > applied {
 		n.mu.Unlock()
+		n.log.Infof("t4: compaction to revision %d refused: applied revision is %d", revision, applied)
 		return ErrFutureRevision
 	}
 	// A compaction submitted earlier counts even if its caller never learned
 	// whether it applied.
 	if floor := max(n.db.Load().CompactRevision(), n.compactSubmitted); floor > 0 && revision <= floor {
+		compacted, submitted := n.db.Load().CompactRevision(), n.compactSubmitted
 		n.mu.Unlock()
+		n.log.Infof("t4: compaction to revision %d refused: compacted to %d, submitted to %d", revision, compacted, submitted)
 		return ErrCompacted
 	}
 	n.compactSubmitted = revision
@@ -1354,9 +1359,14 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 	req := newWriteReq(ctx, e)
 	n.writeC <- req
 	n.mu.Unlock()
+	n.log.Infof("t4: compacting to revision %d", revision)
 	_, err = n.await(ctx, req, "compact", start, "", e.Revision)
 	if err == nil {
 		metrics.CompactRevision.Set(float64(revision))
+	} else {
+		// Submitted, so later compactions to revision or below are refused
+		// as compacted even if this one never applies.
+		n.log.Warnf("t4: compaction to revision %d: %v", revision, err)
 	}
 	return err
 }
