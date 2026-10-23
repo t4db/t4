@@ -1100,6 +1100,14 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 		}
 		return decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
+	// A follower may already serve a revision this leader has sent it as
+	// committed but not applied yet (see sharedRev). It exists: wait until it
+	// is applied here rather than refuse it as a future revision below.
+	if revision <= n.sharedRev.Load() {
+		if err := n.WaitForRevision(ctx, revision); err != nil {
+			return err
+		}
+	}
 	n.fenceMu.RLock()
 	defer n.fenceMu.RUnlock()
 	if err := n.checkLease(); err != nil {
