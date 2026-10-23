@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anishathalye/porcupine"
 	gocmp "github.com/google/go-cmp/cmp"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/robustness/client"
@@ -189,7 +190,7 @@ func testRobustness(t *testing.T, s scenario, fp failpoint, size int, s3 *s3Conf
 	persisted := persistedRequests(history, reports, compacted)
 	t.Logf("compacted to revision %d; compactions: %s", compacted, compactionOutcomes(reports))
 	result := validate.ValidateAndReturnVisualize(lg, validate.Config{ExpectRevisionUnique: s.traffic.ExpectUniqueRevision()}, reports, persisted, 5*time.Minute)
-	r.SetVisualizer(result.Linearization.Visualize)
+	r.SetVisualizer(visualizeLinearization(result.Linearization))
 	if err := result.Error(); err != nil {
 		t.Error(err)
 		if result.Linearization.Status == validate.Failure {
@@ -549,4 +550,18 @@ func resultsDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// visualizeLinearization saves the linearization of a run to path, whatever
+// its outcome. etcd's LinearizationResult.Visualize skips a failed one, which
+// is the one that needs looking at.
+func visualizeLinearization(l validate.LinearizationResult) func(*zap.Logger, string) error {
+	return func(lg *zap.Logger, path string) error {
+		if l.Model.Init == nil {
+			lg.Info("No linearization to visualize", zap.String("status", string(l.Status)))
+			return nil
+		}
+		lg.Info("Saving visualization", zap.String("path", path), zap.String("status", string(l.Status)))
+		return porcupine.VisualizePath(l.Model, l.Info, path)
+	}
 }
