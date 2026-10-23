@@ -3,6 +3,7 @@ module github.com/t4db/t4-robustness
 go 1.26.0
 
 require (
+	github.com/anishathalye/porcupine v1.1.0
 	github.com/google/go-cmp v0.7.0
 	github.com/minio/minio-go/v7 v7.3.0
 	go.etcd.io/etcd/api/v3 v3.7.2
@@ -15,7 +16,6 @@ require (
 
 require (
 	github.com/VividCortex/ewma v1.2.0 // indirect
-	github.com/anishathalye/porcupine v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.2.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
