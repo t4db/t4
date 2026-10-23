@@ -175,10 +175,7 @@ func (n *Node) forwardLeaseOp(ctx context.Context, req *peer.ForwardRequest) (*p
 		if isUnknownForwardOp(err) {
 			return nil, ErrLeaseRenewUnsupported
 		}
-		if isLeaderUnavailable(err) {
-			return nil, ErrNoLeader
-		}
-		return nil, err
+		return nil, forwardError(ctx, err)
 	}
 	if err := decodeErr(resp.ErrCode, resp.ErrMsg); err != nil {
 		return nil, err

@@ -37,6 +37,10 @@ var (
 	ErrClosed         = errors.New("t4: node is closed")
 	ErrCompacted      = istore.ErrCompacted
 	ErrFutureRevision = istore.ErrFutureRevision
+	// ErrTimeout is returned for a write forwarded to the leader that ended
+	// without the leader's answer although its caller did not give up: the
+	// leader may or may not have applied it.
+	ErrTimeout = errors.New("t4: request timed out")
 	// ErrMetaDisabled is returned by meta keyspace writes before the cluster
 	// has been upgraded to a WAL format that supports them.
 	ErrMetaDisabled = errors.New("t4: meta keyspace is not enabled for this database")
