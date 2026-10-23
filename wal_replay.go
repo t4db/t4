@@ -165,7 +165,11 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	}
 	n.db.Store(newDB)
 	n.readMu.Unlock()
+	// n.mu guards the term (observeTerm, currentTerm); fenceMu is taken
+	// before it, as in the write path.
+	n.mu.Lock()
 	n.term = newTerm
+	n.mu.Unlock()
 	n.fenceMu.Unlock()
 	if n.sstUploader != nil {
 		// Checkpoints upload what this misses themselves.
