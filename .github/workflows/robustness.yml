@@ -1,0 +1,95 @@
+name: Robustness
+
+# Runs etcd's robustness tests against a three-node cluster, several times in
+# parallel, optionally narrowed to one traffic scenario and failpoint: to
+# reproduce an intermittent failure, or to compare commits. The nightly
+# workflow runs them once, over every scenario and failpoint.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Only this traffic scenario (e.g. EtcdPutDeleteLease); empty runs every scenario
+        required: false
+        default: ""
+      failpoint:
+        description: Only this failpoint (e.g. DelayPeerLeader); empty runs every failpoint
+        required: false
+        default: ""
+      runs:
+        description: How many runs, in parallel (1-32)
+        required: false
+        default: "8"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan runs
+    runs-on: ubuntu-latest
+    outputs:
+      runs: ${{ steps.runs.outputs.runs }}
+    steps:
+      - id: runs
+        env:
+          RUNS: ${{ inputs.runs }}
+        run: |
+          if ! [[ "$RUNS" =~ ^[0-9]+$ ]] || (( RUNS < 1 || RUNS > 32 )); then
+            echo "runs must be a number from 1 to 32, got '$RUNS'" >&2
+            exit 1
+          fi
+          echo "runs=$(seq 1 "$RUNS" | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  robustness:
+    name: Robustness run ${{ matrix.run }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ${{ fromJSON(needs.plan.outputs.runs) }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tests/robustness/go.mod
+          cache: true
+          cache-dependency-path: tests/robustness/go.sum
+
+      - name: Start S3 server
+        run: |
+          docker run -d --name t4-robustness-s3 \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=t4testadmin \
+            -e RUSTFS_SECRET_KEY=t4testadmin \
+            rustfs/rustfs:1.0.0
+
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:9000/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs t4-robustness-s3
+          exit 1
+
+      - name: Test with etcd's robustness tests
+        run: make test-robustness
+        env:
+          T4_ROBUSTNESS_S3: "1"
+          T4_ROBUSTNESS_SCENARIO: ${{ inputs.scenario }}
+          T4_ROBUSTNESS_FAILPOINT: ${{ inputs.failpoint }}
+
+      - name: Upload failure reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: robustness-reports-${{ github.sha }}-run-${{ matrix.run }}
+          path: .tmp/robustness/results/
+          retention-days: 30
+          if-no-files-found: ignore
