@@ -223,26 +223,26 @@ func TestCommitLoopDeathUnblocksWrites(t *testing.T) {
 		writeErr <- err
 	}()
 
-	// The write context expires; the caller should get an error promptly —
-	// not hang past the deadline.
+	// The write context expires; the caller should get its deadline promptly
+	// — not hang past it. The write stays queued: it holds a revision.
 	select {
 	case err := <-writeErr:
-		if err == nil {
-			t.Fatal("write succeeded despite blocked commit loop")
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			t.Fatal("write returned DeadlineExceeded: caller was not unblocked promptly")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("write against a blocked commit loop: %v, want the caller's deadline", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("write goroutine never returned: stuck waiting on done channel")
 	}
 }
 
-// TestCanceledWriteDoesNotConsumeWALSequence guards the recovery failure seen
-// under large Kubernetes loads: a request timeout used to abandon its already
-// allocated sequence, so the next committed WAL entry skipped an ID and strict
-// follower/S3 replay treated the legitimate cancellation as data loss.
-func TestCanceledWriteDoesNotConsumeWALSequence(t *testing.T) {
+// TestCanceledWriteLeavesNoGap guards two gaps a request timeout used to
+// leave. Under large Kubernetes loads it abandoned its already allocated
+// sequence, so the next committed WAL entry skipped an ID and strict
+// follower/S3 replay treated the legitimate cancellation as data loss. Later
+// it dropped a write that held a revision, so the next write skipped that
+// revision, which no etcd history does. A write whose caller gave up is still
+// written, as an etcd proposal is: the caller learns nothing of its outcome.
+func TestCanceledWriteLeavesNoGap(t *testing.T) {
 	n, err := Open(Config{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -259,23 +259,28 @@ func TestCanceledWriteDoesNotConsumeWALSequence(t *testing.T) {
 	}
 
 	fw := newFakeWAL(n)
-	fw.setBlockChan(make(chan struct{}))
+	blockC := make(chan struct{})
+	fw.setBlockChan(blockC)
 	cancelCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
-	if _, err := n.Put(cancelCtx, "/gap/canceled", []byte("no"), 0); err == nil {
+	if _, err := n.Put(cancelCtx, "/gap/canceled", []byte("yes"), 0); err == nil {
 		t.Fatal("blocked Put unexpectedly succeeded")
 	}
 	fw.setBlockChan(nil)
+	close(blockC)
 
 	if _, err := n.Put(ctx, "/gap/after", []byte("yes"), 0); err != nil {
 		t.Fatalf("Put after canceled batch: %v", err)
 	}
 
-	if got := n.db.Load().LastSequence(); got != baseSeq+2 {
-		t.Fatalf("LastSequence after seed/cancel/commit = %d, want %d", got, baseSeq+2)
+	if got := n.db.Load().LastSequence(); got != baseSeq+3 {
+		t.Fatalf("LastSequence after seed/cancel/commit = %d, want %d", got, baseSeq+3)
 	}
 	if got := n.db.Load().CurrentRevision(); got != 3 {
 		t.Fatalf("CurrentRevision after seed/cancel/commit = %d, want 3", got)
+	}
+	if kv, err := n.Get("/gap/canceled"); err != nil || kv == nil || kv.Revision != 2 {
+		t.Fatalf("canceled write: %+v, %v; want it written at revision 2", kv, err)
 	}
 }
 
@@ -565,7 +570,7 @@ func TestFollowerTakesOverAfterLeaderFatalWALError(t *testing.T) {
 	}
 }
 
-func TestFollowerReconnectDropsStagedUncommittedEntries(t *testing.T) {
+func TestFollowerReconnectConvergesOnHeldWrite(t *testing.T) {
 	store := object.NewMem()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -616,40 +621,37 @@ func TestFollowerReconnectDropsStagedUncommittedEntries(t *testing.T) {
 		t.Fatalf("follower seed WaitForRevision: %v", err)
 	}
 
-	// Stage an entry on the follower by letting the leader broadcast it, but
-	// keep the leader WAL append blocked until the client context expires.
+	// Hold a write in the leader's WAL append until its caller gives up.
 	fw := newFakeWAL(leader)
-	fw.setBlockChan(make(chan struct{}))
+	blockC := make(chan struct{})
+	fw.setBlockChan(blockC)
 	writeCtx, writeCancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	defer writeCancel()
 	if _, err := leader.Put(writeCtx, "/reconnect/ghost", []byte("staged-only"), 0); err == nil {
 		t.Fatal("expected blocked Put to fail, got nil")
 	}
 
-	// Drop the follower stream while the uncommitted entry is only staged in
-	// memory. After reconnect it must resume from the last committed revision.
+	// Drop the follower stream while the write is held. After reconnect the
+	// follower must resume from the last committed revision.
 	proxy.block()
 	time.Sleep(200 * time.Millisecond)
 	proxy.unblock()
 
-	// Restore the real WAL for future writes. The cancelled batch above should
-	// have already unwound via ctx.Done(); give it a brief window to exit
-	// before swapping the WAL back so the timed-out request cannot later
-	// succeed and turn the ghost write into a real commit.
-	time.Sleep(100 * time.Millisecond)
+	// Release the WAL. The held write holds a revision, so it is committed
+	// although its caller gave up, before the write below.
 	fw.setBlockChan(nil)
+	close(blockC)
 
 	afterRev, err := leader.Put(ctx, "/reconnect/after", []byte("committed"), 0)
 	if err != nil {
 		t.Fatalf("post-heal Put: %v", err)
 	}
-	_ = afterRev // used implicitly by eventual visibility checks below
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		ghostKV, ghostErr := follower.Get("/reconnect/ghost")
 		afterKV, afterErr := follower.Get("/reconnect/after")
-		if ghostErr == nil && ghostKV == nil && afterErr == nil && afterKV != nil && string(afterKV.Value) == "committed" {
+		if ghostErr == nil && ghostKV != nil && ghostKV.Revision < afterRev && afterErr == nil && afterKV != nil && string(afterKV.Value) == "committed" {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)

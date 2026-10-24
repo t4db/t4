@@ -134,9 +134,9 @@ func holdMetaPut(t *testing.T, n *Node, fw *fakeWAL, key string) (func(), contex
 
 // A meta-exists condition that reads an in-flight meta write depends on that
 // write's outcome, like a data condition reading a pending data write: the
-// transaction must not be answered before it, and is evaluated again if the
-// write is abandoned. Create-if-absent (sysstate.Create, a lease grant) has
-// exactly this shape.
+// transaction must not be answered before it, even when the write's caller
+// gives up, since the write is committed all the same. Create-if-absent
+// (sysstate.Create, a lease grant) has exactly this shape.
 func TestNoopTxnWaitsForObservedMetaWrite(t *testing.T) {
 	n, fw := openMetaWithValue(t, "/k", "v1")
 	release, cancelPut, putErr := holdMetaPut(t, n, fw, "m")
@@ -153,18 +153,18 @@ func TestNoopTxnWaitsForObservedMetaWrite(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	// The in-flight write is abandoned, so m was never written: the txn
-	// finds it absent after all and writes it.
+	// The in-flight write's caller gives up; the write is committed all the
+	// same once the WAL is released, so the txn finds m present.
 	cancelPut()
 	if err := <-putErr; err == nil {
 		t.Fatal("abandoned MetaPut reported success")
 	}
 	release()
 	r := <-txnC
-	if r.err != nil || !r.resp.Succeeded {
-		t.Fatalf("txn = %+v, %v; want succeeded: the observed meta write was never committed", r.resp, r.err)
+	if r.err != nil || r.resp.Succeeded {
+		t.Fatalf("txn = %+v, %v; want failed: the observed meta write was committed first", r.resp, r.err)
 	}
-	if v, ok, err := n.db.Load().MetaGet("m"); err != nil || !ok || string(v) != "mine" {
-		t.Fatalf("meta m = %q, %v, %v; want the txn's write", v, ok, err)
+	if v, ok, err := n.db.Load().MetaGet("m"); err != nil || !ok || string(v) != "x" {
+		t.Fatalf("meta m = %q, %v, %v; want the observed write", v, ok, err)
 	}
 }

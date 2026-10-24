@@ -580,25 +580,6 @@ func (n *Node) commitLoop(ctx context.Context) {
 			}
 		}
 
-		// Cancel the WAL attempt only after every caller in this group has
-		// abandoned it. One short request deadline must not abort unrelated
-		// writes that happened to be drained into the same group-commit batch.
-		batchCtx, batchCancel := context.WithCancel(ctx)
-		var abandoned atomic.Int32
-		batchLen := int32(len(batch)) // batch is reused; don't read it from these goroutines
-		for _, req := range batch {
-			r := req
-			go func() {
-				select {
-				case <-r.ctx.Done():
-					if abandoned.Add(1) == batchLen {
-						batchCancel()
-					}
-				case <-batchCtx.Done():
-				}
-			}()
-		}
-
 		// Assign sequence IDs only to the batch currently being attempted. The
 		// IDs are based on the last applied sequence and are not published to
 		// followers until WAL append succeeds. A canceled batch can therefore
@@ -639,7 +620,11 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// sacrifices a small amount of fsync/network overlap, but ensures failed
 		// attempts never enter the peer replay buffer under reusable IDs.
 		walStart := time.Now()
-		err := n.wal.AppendBatch(batchCtx, entries)
+		// Every write in the batch holds its revision since it was queued, so
+		// it is written even if its callers have given up: dropping it would
+		// leave its revision unused, a gap no etcd history has. As with an
+		// etcd proposal, a caller that gave up learns nothing of its outcome.
+		err := n.wal.AppendBatch(ctx, entries)
 		walEnd := time.Now()
 		if err == nil && degraded {
 			// A synchronous upload uploads every earlier segment still pending
@@ -659,10 +644,6 @@ func (n *Node) commitLoop(ctx context.Context) {
 			n.peerSrv.BroadcastCommit(startRev, maxRev)
 
 			// Wait for follower ACKs according to the configured policy.
-			// Use the commit loop's own context (node lifetime), NOT batchCtx:
-			// batchCtx is cancelled after AppendBatch returns and passing it
-			// here would cause WaitForFollowers to return instantly.
-			//
 			// Availability policy: if all followers disconnect mid-wait, we
 			// proceed anyway — the entry is already durable in the leader's
 			// WAL and will be replayed by followers when they reconnect.
@@ -677,7 +658,6 @@ func (n *Node) commitLoop(ctx context.Context) {
 			}
 			quorumEnd = time.Now()
 		}
-		batchCancel() // release watcher goroutines
 
 		// Apply all entries to Pebble as one batch (in order).
 		if err == nil {
@@ -724,8 +704,8 @@ func (n *Node) commitLoop(ctx context.Context) {
 		clear(dbEntries)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				// Callers abandoned the batch; this is not a permanent fault.
-				// Let the loop continue for the next batch.
+				// The node is stopping (ctx is the commit loop's own): not a
+				// fault of the WAL. The loop exits at its next turn.
 				continue
 			}
 			// A WAL or Pebble error leaves the segment in an unknown state.
