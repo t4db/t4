@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/t4db/t4/internal/election"
 	"github.com/t4db/t4/internal/metrics"
 	"github.com/t4db/t4/internal/peer"
@@ -335,10 +338,26 @@ func (n *Node) forwardWrite(ctx context.Context, req *peer.ForwardRequest) (*pee
 	resp, err := cli.ForwardWrite(ctx, req)
 	metrics.ForwardedWritesTotal.WithLabelValues(op).Inc()
 	metrics.ForwardDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
-	if err != nil && isLeaderUnavailable(err) {
-		return nil, ErrNoLeader
+	if err != nil {
+		return nil, forwardError(ctx, err)
 	}
-	return resp, err
+	return resp, nil
+}
+
+// forwardError is the error to report for a forward to the leader that
+// failed with err. A forward the peer connection cut short (it closed, or
+// timed out) fails with a gRPC Canceled or DeadlineExceeded status, which
+// etcd clients take for the end of their own attempt and send again, even a
+// write the leader may have applied already. Unless ctx itself ended, report
+// the outcome unknown instead, as etcd does.
+func forwardError(ctx context.Context, err error) error {
+	switch {
+	case isLeaderUnavailable(err):
+		return ErrNoLeader
+	case ctx.Err() == nil && (status.Code(err) == codes.Canceled || status.Code(err) == codes.DeadlineExceeded):
+		return fmt.Errorf("%w: %v", ErrTimeout, err)
+	}
+	return err
 }
 
 func fwdOpLabel(op peer.ForwardOp) string {
