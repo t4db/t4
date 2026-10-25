@@ -417,7 +417,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 		for {
 			select {
 			case req := <-n.writeC:
-				req.done <- ErrClosed
+				n.finish(req, ErrClosed)
 			default:
 				break drain
 			}
@@ -430,7 +430,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 		for {
 			select {
 			case req := <-n.writeC:
-				req.done <- ErrClosed
+				n.finish(req, ErrClosed)
 			default:
 				if fatalExit {
 					n.stepDownOnFatalCommitError()
@@ -468,29 +468,10 @@ func (n *Node) commitLoop(ctx context.Context) {
 			}
 		}
 
-		// Cancel the WAL attempt only after every caller in this group has
-		// abandoned it. One short request deadline must not abort unrelated
-		// writes that happened to be drained into the same group-commit batch.
-		batchCtx, batchCancel := context.WithCancel(ctx)
-		var abandoned atomic.Int32
-		batchLen := int32(len(batch)) // batch is reused; don't read it from these goroutines
-		for _, req := range batch {
-			r := req
-			go func() {
-				select {
-				case <-r.ctx.Done():
-					if abandoned.Add(1) == batchLen {
-						batchCancel()
-					}
-				case <-batchCtx.Done():
-				}
-			}()
-		}
-
 		// Assign sequence IDs only to the batch currently being attempted. The
 		// IDs are based on the last applied sequence and are not published to
-		// followers until WAL append succeeds. A canceled batch can therefore
-		// reuse the same IDs without leaving a hole or stale staged entries.
+		// followers until WAL append succeeds, so a batch that fails, which
+		// ends the loop, leaves neither a hole nor stale staged entries.
 		baseSeq := n.db.Load().LastSequence()
 		entries = entries[:0]
 		for i, req := range batch {
@@ -527,7 +508,11 @@ func (n *Node) commitLoop(ctx context.Context) {
 		// sacrifices a small amount of fsync/network overlap, but ensures failed
 		// attempts never enter the peer replay buffer under reusable IDs.
 		walStart := time.Now()
-		err := n.wal.AppendBatch(batchCtx, entries)
+		// Every write in the batch holds its revision since it was queued, so
+		// it is written even if its callers have given up: dropping it would
+		// leave its revision unused, a gap no etcd history has. As with an
+		// etcd proposal, a caller that gave up learns nothing of its outcome.
+		err := n.wal.AppendBatch(ctx, entries)
 		walEnd := time.Now()
 		if err == nil && degraded {
 			// A synchronous upload uploads every earlier segment still pending
@@ -547,10 +532,6 @@ func (n *Node) commitLoop(ctx context.Context) {
 			n.peerSrv.BroadcastCommit(startRev, maxRev)
 
 			// Wait for follower ACKs according to the configured policy.
-			// Use the commit loop's own context (node lifetime), NOT batchCtx:
-			// batchCtx is cancelled after AppendBatch returns and passing it
-			// here would cause WaitForFollowers to return instantly.
-			//
 			// Availability policy: if all followers disconnect mid-wait, we
 			// proceed anyway — the entry is already durable in the leader's
 			// WAL and will be replayed by followers when they reconnect.
@@ -565,7 +546,6 @@ func (n *Node) commitLoop(ctx context.Context) {
 			}
 			quorumEnd = time.Now()
 		}
-		batchCancel() // release watcher goroutines
 
 		// Apply all entries to Pebble as one batch (in order).
 		if err == nil {
@@ -579,6 +559,16 @@ func (n *Node) commitLoop(ctx context.Context) {
 				n.nextSeq = dbEntries[len(dbEntries)-1].Sequence()
 				n.mu.Unlock()
 				n.maybeRecordRevisionSample(dbEntries)
+				// Counted before the batch's writes are finished, so a
+				// checkpoint, which waits for them (waitQueued), covers
+				// exactly this count. Writes whose callers gave up count too.
+				count := atomic.AddInt64(&n.entriesSinceCheckpoint, int64(len(dbEntries)))
+				if n.checkpointTriggerC != nil && count >= n.cfg.CheckpointEntries {
+					select {
+					case n.checkpointTriggerC <- struct{}{}:
+					default: // already a pending trigger; don't block
+					}
+				}
 			}
 		}
 
@@ -603,7 +593,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 			req.walStart, req.walEnd = walStart, walEnd
 			req.quorumStart, req.quorumEnd = quorumStart, quorumEnd
 			req.batchSize = len(batch)
-			req.done <- ackErr
+			n.finish(req, ackErr)
 		}
 		// Drop references so reused scratch doesn't keep finished requests
 		// and their values alive until the next batch overwrites them.
@@ -612,9 +602,11 @@ func (n *Node) commitLoop(ctx context.Context) {
 		clear(dbEntries)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				// Callers abandoned the batch; this is not a permanent fault.
-				// Let the loop continue for the next batch.
-				continue
+				// The node is stopping (ctx is the commit loop's own): not a
+				// fault of the WAL. Stop here rather than drop later batches,
+				// which would leave their revisions unused; a batch already in
+				// the WAL is replayed when the node opens again.
+				return
 			}
 			// A WAL or Pebble error leaves the segment in an unknown state.
 			// Stop accepting writes immediately; the defer fences the node
@@ -745,9 +737,10 @@ func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Sto
 
 // ── Background checkpoint loop ────────────────────────────────────────────────
 
-// checkpointShutdownWait bounds how long graceful leader shutdown waits for an
-// in-flight checkpoint upload before giving up on a clean handoff.
-const checkpointShutdownWait = 30 * time.Second
+// shutdownWait bounds how long graceful leader shutdown waits for an
+// in-flight checkpoint upload, and then for queued writes, before giving up
+// on a clean handoff.
+const shutdownWait = 30 * time.Second
 
 func (n *Node) checkpointLoop(ctx context.Context) {
 	// Write an immediate checkpoint before entering the ticker so that any
@@ -798,6 +791,7 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 		return 0, false
 	}
 	n.fenceMu.Lock()
+	n.waitQueued()
 	db := n.db.Load()
 	rev := db.CurrentRevision()
 	if rev == 0 {
@@ -828,8 +822,9 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 		n.log.Errorf("t4: checkpoint pebble copy: %v", err)
 		return 0, false
 	}
-	// Writes bump entriesSinceCheckpoint while holding fenceMu.RLock, so this
-	// is exactly the number of entries the pinned copy covers.
+	// The commit loop counts entries in entriesSinceCheckpoint as it applies
+	// them, and waitQueued above let it apply everything queued, so this is
+	// exactly the number of entries the pinned copy covers.
 	covered := atomic.LoadInt64(&n.entriesSinceCheckpoint)
 	n.fenceMu.Unlock()
 	defer func() { _ = os.RemoveAll(tmpDir) }()

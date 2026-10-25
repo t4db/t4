@@ -131,9 +131,9 @@ func TestNoopTxnWaitsForObservedWrite(t *testing.T) {
 	}
 }
 
-// When the in-flight write the txn read is abandoned, the txn is evaluated
-// again against what was actually written.
-func TestNoopTxnReevaluatesAfterAbandonedWrite(t *testing.T) {
+// When the caller of the in-flight write the txn read gives up, the write is
+// still committed, and the txn is answered against it.
+func TestNoopTxnWaitsForAbandonedWrite(t *testing.T) {
 	n, fw := openWithValue(t, "/k", "v1")
 	release, cancelPut, putErr := holdPut(t, n, fw, "/k", "v2")
 	defer release()
@@ -141,19 +141,22 @@ func TestNoopTxnReevaluatesAfterAbandonedWrite(t *testing.T) {
 	txnC := goTxn(n, valueIsThenPut("/k", "v1", "/other"))
 	time.Sleep(50 * time.Millisecond)
 
-	// The writer gives up before its WAL append completes, so the commit loop
-	// abandons the batch and v2 is never written.
+	// The writer gives up before its WAL append completes. v2 holds a
+	// revision, so it is written all the same once the WAL is released.
 	cancelPut()
 	if err := <-putErr; err == nil {
 		t.Fatal("abandoned Put reported success")
 	}
 	release()
 	r := <-txnC
-	if r.err != nil || !r.resp.Succeeded {
-		t.Fatalf("txn = %+v, %v; want succeeded: v2 was never written, so /k is still v1", r.resp, r.err)
+	if r.err != nil || r.resp.Succeeded {
+		t.Fatalf("txn = %+v, %v; want failed: v2 was written before it", r.resp, r.err)
 	}
-	if kv, err := n.Get("/other"); err != nil || kv == nil {
-		t.Fatalf("Get /other = %+v, %v; want the txn's write", kv, err)
+	if kv, err := n.Get("/k"); err != nil || kv == nil || string(kv.Value) != "v2" {
+		t.Fatalf("Get /k = %+v, %v; want v2", kv, err)
+	}
+	if kv, err := n.Get("/other"); err != nil || kv != nil {
+		t.Fatalf("Get /other = %+v, %v; want nothing: the txn failed", kv, err)
 	}
 }
 
