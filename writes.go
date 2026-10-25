@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -104,15 +103,44 @@ func (n *Node) Put(ctx context.Context, key string, value []byte, lease int64) (
 		n.mu.Unlock()
 		return 0, ErrClosed
 	}
+	// A write enters the queue only for a caller still waiting: once queued
+	// it holds a revision and is committed whatever the caller does.
+	if err := ctx.Err(); err != nil {
+		n.mu.Unlock()
+		return 0, err
+	}
 	e, err := n.preparePut(key, value, lease)
 	if err != nil {
 		n.mu.Unlock()
 		return 0, err
 	}
 	req := newWriteReq(ctx, e)
-	n.writeC <- req
+	n.enqueue(req)
 	n.mu.Unlock()
 	return n.await(ctx, req, opLabel(e.Op), start, key, e.Revision)
+}
+
+// enqueue sends req to the commit loop. The caller holds fenceMu.RLock, so
+// that a holder of it exclusively can wait for every queued write to finish
+// (waitQueued).
+func (n *Node) enqueue(req *writeReq) {
+	n.queued.Add(1)
+	n.writeC <- req
+}
+
+// finish answers a write the commit loop took from its queue.
+func (n *Node) finish(req *writeReq, err error) {
+	req.done <- err
+	n.queued.Done()
+}
+
+// waitQueued waits until the commit loop has finished every write queued so
+// far. Call it holding fenceMu exclusively, which keeps new writes out: that
+// alone does not drain the queue, since a write whose caller gave up has
+// released its share of fenceMu while the write, which holds its revision,
+// is still queued and will still be committed.
+func (n *Node) waitQueued() {
+	n.queued.Wait()
 }
 
 // preparePut builds the WAL entry for a Put. Must be called under n.mu.
@@ -169,6 +197,12 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 		n.mu.Unlock()
 		return 0, ErrClosed
 	}
+	// A write enters the queue only for a caller still waiting: once queued
+	// it holds a revision and is committed whatever the caller does.
+	if err := ctx.Err(); err != nil {
+		n.mu.Unlock()
+		return 0, err
+	}
 	existing, err := n.readKey(key)
 	if err != nil {
 		n.mu.Unlock()
@@ -192,7 +226,7 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 		Key: key, Value: value, Lease: lease, CreateRevision: newRev, Version: 1,
 	}
 	req := newWriteReq(ctx, e)
-	n.writeC <- req
+	n.enqueue(req)
 	n.mu.Unlock()
 	return n.await(ctx, req, "create", start, key, newRev)
 }
@@ -218,6 +252,12 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 	if n.closed.Load() {
 		n.mu.Unlock()
 		return 0, nil, false, ErrClosed
+	}
+	// A write enters the queue only for a caller still waiting: once queued
+	// it holds a revision and is committed whatever the caller does.
+	if err := ctx.Err(); err != nil {
+		n.mu.Unlock()
+		return 0, nil, false, err
 	}
 	existing, err := n.readKey(key)
 	if err != nil {
@@ -247,7 +287,7 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 	}
 	oldKV := toKV(existing)
 	req := newWriteReq(ctx, e)
-	n.writeC <- req
+	n.enqueue(req)
 	n.mu.Unlock()
 	newRev, err = n.await(ctx, req, "update", start, key, newRev)
 	if err != nil {
@@ -279,13 +319,19 @@ func (n *Node) Delete(ctx context.Context, key string) (rev int64, err error) {
 		n.mu.Unlock()
 		return 0, ErrClosed
 	}
+	// A write enters the queue only for a caller still waiting: once queued
+	// it holds a revision and is committed whatever the caller does.
+	if err := ctx.Err(); err != nil {
+		n.mu.Unlock()
+		return 0, err
+	}
 	e, err := n.prepareDelete(key)
 	if err != nil || e.Key == "" {
 		n.mu.Unlock()
 		return 0, err // key not found — no-op
 	}
 	req := newWriteReq(ctx, e)
-	n.writeC <- req
+	n.enqueue(req)
 	n.mu.Unlock()
 	return n.await(ctx, req, "delete", start, key, e.Revision)
 }
@@ -313,6 +359,12 @@ func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64)
 		n.mu.Unlock()
 		return 0, nil, false, ErrClosed
 	}
+	// A write enters the queue only for a caller still waiting: once queued
+	// it holds a revision and is committed whatever the caller does.
+	if err := ctx.Err(); err != nil {
+		n.mu.Unlock()
+		return 0, nil, false, err
+	}
 	existing, err := n.readKey(key)
 	if err != nil {
 		n.mu.Unlock()
@@ -334,7 +386,7 @@ func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64)
 		return 0, nil, false, err
 	}
 	req := newWriteReq(ctx, e)
-	n.writeC <- req
+	n.enqueue(req)
 	n.mu.Unlock()
 	newRev, err := n.await(ctx, req, "delete", start, key, e.Revision)
 	if err != nil {
@@ -488,6 +540,12 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		n.mu.Unlock()
 		return TxnResponse{}, ErrClosed
 	}
+	// A write enters the queue only for a caller still waiting: once queued
+	// it holds a revision and is committed whatever the caller does.
+	if err := ctx.Err(); err != nil {
+		n.mu.Unlock()
+		return TxnResponse{}, err
+	}
 	prepareStart := time.Now()
 	e, succeeded, deletedKeys, observedRev, stats, err := n.prepareTxn(req)
 	prepareDuration := time.Since(prepareStart)
@@ -555,7 +613,7 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		return TxnResponse{Succeeded: succeeded, Revision: observedRev}, nil
 	}
 	wr := newWriteReq(ctx, e)
-	n.writeC <- wr
+	n.enqueue(wr)
 	n.mu.Unlock()
 	observeTxnPreparation(lockWait, prepareDuration, kind)
 	rev, err := n.await(ctx, wr, "txn", start, "", e.Revision)
@@ -906,20 +964,10 @@ func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.T
 	select {
 	case err = <-req.done:
 	case <-ctx.Done():
-		// Give the commit loop a brief window to react: it may have already
-		// detected our cancellation (via batchCtx) and is about to signal us
-		// with a meaningful error. If it does, use that result instead of
-		// ctx.Err() so callers see a system-level error rather than their own
-		// deadline expiry.
-		timer := time.NewTimer(5 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case err = <-req.done:
-			// commit loop responded promptly; fall through to normal handling
-		case <-timer.C:
-			go func() { <-req.done; cleanPending() }()
-			return 0, ctx.Err()
-		}
+		// The write is still committed: it holds its revision. Its caller
+		// learns nothing of its outcome.
+		go func() { <-req.done; cleanPending() }()
+		return 0, ctx.Err()
 	}
 	cleanPending()
 	n.recordCommitSpans(ctx, req)
@@ -936,13 +984,6 @@ func (n *Node) await(ctx context.Context, req *writeReq, op string, start time.T
 	metrics.WritesTotal.WithLabelValues(op).Inc()
 	metrics.WriteDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
 	metrics.CurrentRevision.Set(float64(rev))
-	count := atomic.AddInt64(&n.entriesSinceCheckpoint, 1)
-	if n.checkpointTriggerC != nil && count >= n.cfg.CheckpointEntries {
-		select {
-		case n.checkpointTriggerC <- struct{}{}:
-		default: // already a pending trigger; don't block
-		}
-	}
 	return rev, nil
 }
 
@@ -1119,6 +1160,12 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 		n.mu.Unlock()
 		return ErrClosed
 	}
+	// A write enters the queue only for a caller still waiting: once queued
+	// it holds a revision and is committed whatever the caller does.
+	if err := ctx.Err(); err != nil {
+		n.mu.Unlock()
+		return err
+	}
 	// Like etcd, a revision is reached once applied: a write assigned a
 	// revision may still fail, and the revision then never exists.
 	if revision > n.db.Load().CurrentRevision() {
@@ -1137,7 +1184,7 @@ func (n *Node) Compact(ctx context.Context, revision int64) (err error) {
 		PrevRevision: revision,
 	}
 	req := newWriteReq(ctx, e)
-	n.writeC <- req
+	n.enqueue(req)
 	n.mu.Unlock()
 	_, err = n.await(ctx, req, "compact", start, "", e.Revision)
 	if err == nil {

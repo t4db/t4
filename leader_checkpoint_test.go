@@ -388,7 +388,7 @@ func TestGracefulShutdownStopsCheckpointUpload(t *testing.T) {
 
 // TestGracefulShutdownSkipsHandoffOnStalledCheckpoint pins that a checkpoint
 // upload stuck on a stalled object store does not hang graceful shutdown.
-// Shutdown gives up after checkpointShutdownWait and, with the upload still
+// Shutdown gives up after shutdownWait and, with the upload still
 // running, must not hand off: the lock is left held (not relinquished), so
 // followers wait for its lease to expire instead of taking over at once.
 func TestGracefulShutdownSkipsHandoffOnStalledCheckpoint(t *testing.T) {
@@ -414,7 +414,7 @@ func TestGracefulShutdownSkipsHandoffOnStalledCheckpoint(t *testing.T) {
 	if !n.IsLeader() {
 		t.Fatal("node did not become leader")
 	}
-	n.checkpointShutdownWait = 200 * time.Millisecond
+	n.shutdownWait = 200 * time.Millisecond
 
 	if _, err := n.Put(context.Background(), "k", []byte("v"), 0); err != nil {
 		t.Fatalf("Put: %v", err)
