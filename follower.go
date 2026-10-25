@@ -393,7 +393,7 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 		wal.WithLogger(n.log),
 	)
-	if rerr := newWal.Open(walDir, n.term, newSeq+1); rerr != nil {
+	if rerr := newWal.Open(walDir, n.currentTerm(), newSeq+1); rerr != nil {
 		return fmt.Errorf("open new wal after resync: %w", rerr)
 	}
 	newWal.Start(bgCtx)
@@ -404,6 +404,6 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 	n.nextSeq = newSeq
 	n.mu.Unlock()
 
-	n.log.Infof("t4: follower in-place resync complete (rev=%d seq=%d term=%d)", newRev, newSeq, n.term)
+	n.log.Infof("t4: follower in-place resync complete (rev=%d seq=%d term=%d)", newRev, newSeq, n.currentTerm())
 	return nil
 }
