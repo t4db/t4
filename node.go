@@ -306,6 +306,10 @@ type Node struct {
 	lockObjectStoreComplete atomic.Bool
 
 	entriesSinceCheckpoint int64
+
+	// queued counts the writes sent to the commit loop that it has not
+	// finished yet (enqueue, finish, waitQueued).
+	queued                 sync.WaitGroup
 	checkpointTriggerC     chan struct{}         // non-nil when CheckpointEntries > 0; signals entry-count-based checkpoint
 	checkpointMu           sync.Mutex            // serializes checkpoints and checkpoint GC; taken before fenceMu
 	sstSweepMarks          map[string]struct{}   // SSTs the last sweep found unreferenced; guarded by checkpointMu
@@ -983,13 +987,14 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 		n.log.Warnf("t4: graceful shutdown: checkpoint still uploading after %v; skipping leader handoff", n.checkpointShutdownWait)
 	}
 
-	// 1. Fence in-flight writes. Put holds fenceMu.RLock for its entire
-	//    duration (writes.go), so this Lock waits until commitLoop has
-	//    signalled done for every batch already in writeC. New Puts are
-	//    rejected by the n.closed.Load() check at the top of Put because
-	//    closeOnce already set n.closed before calling us.
+	// 1. Fence in-flight writes. The Lock keeps new writes out: they hold
+	//    fenceMu.RLock (writes.go), and closeOnce already set n.closed,
+	//    which they check first. waitQueued then waits until commitLoop has
+	//    finished every write already in writeC, including those whose
+	//    callers gave up and released their RLock: those are committed too.
 	n.fenceMu.Lock()
 	defer n.fenceMu.Unlock()
+	n.waitQueued()
 
 	// 2. Seal and synchronously upload all WAL segments to S3, including
 	//    the active segment containing our most recent acks. wal.Close
@@ -1620,6 +1625,7 @@ func (n *Node) Flush() error {
 	if n.closed.Load() {
 		return ErrClosed
 	}
+	n.waitQueued()
 	seq := n.db.Load().LastSequence()
 	if err := n.wal.SealAndFlush(seq + 1); err != nil {
 		return err

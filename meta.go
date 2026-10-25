@@ -146,12 +146,14 @@ func (n *Node) initMetaAtGenesis(ctx context.Context) (err error) {
 	if hook := testhook.BeforeMetaGenesis.Load(); hook != nil {
 		(*hook)()
 	}
-	// Held exclusively until the marker is acknowledged: this drains writes
-	// already in flight, so LastSequence covers every queued entry, and keeps
-	// later writes behind the marker. stepDown and shutdown wait for it as
-	// for any write, which holds fenceMu.RLock until acknowledged.
+	// Held exclusively until the marker is acknowledged: with waitQueued this
+	// drains writes already in flight, so LastSequence covers every queued
+	// entry, and keeps later writes behind the marker. stepDown and shutdown
+	// wait for it as for any write, which holds fenceMu.RLock until
+	// acknowledged.
 	n.fenceMu.Lock()
 	defer n.fenceMu.Unlock()
+	n.waitQueued()
 	if n.closed.Load() {
 		return ErrClosed
 	}
@@ -181,7 +183,7 @@ func (n *Node) initMetaAtGenesis(ctx context.Context) (err error) {
 	}
 	wr := newWriteReq(ctx, e)
 	wr.metaToken = metaToken
-	n.writeC <- wr
+	n.enqueue(wr)
 	n.mu.Unlock()
 	if _, err := n.await(ctx, wr, "txn", start, "", e.Revision); err != nil {
 		return fmt.Errorf("t4: enable meta keyspace: %w", err)
@@ -229,6 +231,12 @@ func (n *Node) writeMeta(ctx context.Context, op wal.Op, key string, value []byt
 		n.mu.Unlock()
 		return ErrClosed
 	}
+	// A write enters the queue only for a caller still waiting: once queued
+	// it holds a revision and is committed whatever the caller does.
+	if err := ctx.Err(); err != nil {
+		n.mu.Unlock()
+		return err
+	}
 	if err := n.requireMetaLocked(); err != nil {
 		n.mu.Unlock()
 		return err
@@ -243,7 +251,7 @@ func (n *Node) writeMeta(ctx context.Context, op wal.Op, key string, value []byt
 	}
 	req := newWriteReq(ctx, e)
 	req.metaToken = metaToken
-	n.writeC <- req
+	n.enqueue(req)
 	n.mu.Unlock()
 	_, err = n.await(ctx, req, opLabel(op), start, "", e.Revision)
 	return err

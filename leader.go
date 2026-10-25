@@ -529,7 +529,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 		for {
 			select {
 			case req := <-n.writeC:
-				req.done <- ErrClosed
+				n.finish(req, ErrClosed)
 			default:
 				break drain
 			}
@@ -542,7 +542,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 		for {
 			select {
 			case req := <-n.writeC:
-				req.done <- ErrClosed
+				n.finish(req, ErrClosed)
 			default:
 				if fatalExit {
 					n.stepDownOnFatalCommitError()
@@ -582,8 +582,8 @@ func (n *Node) commitLoop(ctx context.Context) {
 
 		// Assign sequence IDs only to the batch currently being attempted. The
 		// IDs are based on the last applied sequence and are not published to
-		// followers until WAL append succeeds. A canceled batch can therefore
-		// reuse the same IDs without leaving a hole or stale staged entries.
+		// followers until WAL append succeeds, so a batch that fails, which
+		// ends the loop, leaves neither a hole nor stale staged entries.
 		baseSeq := n.db.Load().LastSequence()
 		entries = entries[:0]
 		for i, req := range batch {
@@ -671,6 +671,16 @@ func (n *Node) commitLoop(ctx context.Context) {
 				n.nextSeq = dbEntries[len(dbEntries)-1].Sequence()
 				n.mu.Unlock()
 				n.maybeRecordRevisionSample(dbEntries)
+				// Counted before the batch's writes are finished, so a
+				// checkpoint, which waits for them (waitQueued), covers
+				// exactly this count. Writes whose callers gave up count too.
+				count := atomic.AddInt64(&n.entriesSinceCheckpoint, int64(len(dbEntries)))
+				if n.checkpointTriggerC != nil && count >= n.cfg.CheckpointEntries {
+					select {
+					case n.checkpointTriggerC <- struct{}{}:
+					default: // already a pending trigger; don't block
+					}
+				}
 			}
 		}
 
@@ -695,7 +705,7 @@ func (n *Node) commitLoop(ctx context.Context) {
 			req.walStart, req.walEnd = walStart, walEnd
 			req.quorumStart, req.quorumEnd = quorumStart, quorumEnd
 			req.batchSize = len(batch)
-			req.done <- ackErr
+			n.finish(req, ackErr)
 		}
 		// Drop references so reused scratch doesn't keep finished requests
 		// and their values alive until the next batch overwrites them.
@@ -705,8 +715,10 @@ func (n *Node) commitLoop(ctx context.Context) {
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				// The node is stopping (ctx is the commit loop's own): not a
-				// fault of the WAL. The loop exits at its next turn.
-				continue
+				// fault of the WAL. Stop here rather than drop later batches,
+				// which would leave their revisions unused; a batch already in
+				// the WAL is replayed when the node opens again.
+				return
 			}
 			// A WAL or Pebble error leaves the segment in an unknown state.
 			// Stop accepting writes immediately; the defer fences the node
@@ -890,6 +902,7 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 		return 0, false
 	}
 	n.fenceMu.Lock()
+	n.waitQueued()
 	db := n.db.Load()
 	rev := db.CurrentRevision()
 	if rev == 0 {
