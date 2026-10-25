@@ -314,7 +314,7 @@ type Node struct {
 	checkpointMu           sync.Mutex            // serializes checkpoints and checkpoint GC; taken before fenceMu
 	sstSweepMarks          map[string]struct{}   // SSTs the last sweep found unreferenced; guarded by checkpointMu
 	sstSweepTerm           uint64                // term sstSweepMarks was collected under; guarded by checkpointMu
-	checkpointShutdownWait time.Duration         // how long graceful shutdown waits for an in-flight checkpoint
+	shutdownWait           time.Duration         // how long graceful shutdown waits for an in-flight checkpoint, and then for queued writes
 	sstUploader            *istore.SSTUploader   // non-nil when ObjectStore is set; streams SSTs to S3
 	compactSubmitted       int64                 // highest compaction this leader submitted; guarded by mu
 	pebbleOpts             []istore.PebbleOption // options every Pebble this node opens uses
@@ -848,7 +848,7 @@ func Open(cfg Config) (*Node, error) {
 	if cfg.CheckpointEntries > 0 {
 		n.checkpointTriggerC = make(chan struct{}, 1)
 	}
-	n.checkpointShutdownWait = checkpointShutdownWait
+	n.shutdownWait = shutdownWait
 
 	if starter, ok := w.(interface{ Start(context.Context) }); ok {
 		starter.Start(bgCtx)
@@ -982,9 +982,9 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 	//    running, so followers must not be told to take over. They take over
 	//    once the lock's lease expires, as after a crash, and Close cancels
 	//    the upload right after we return.
-	handoff := n.checkpointIdle(n.checkpointShutdownWait)
+	handoff := n.checkpointIdle(n.shutdownWait)
 	if !handoff {
-		n.log.Warnf("t4: graceful shutdown: checkpoint still uploading after %v; skipping leader handoff", n.checkpointShutdownWait)
+		n.log.Warnf("t4: graceful shutdown: checkpoint still uploading after %v; skipping leader handoff", n.shutdownWait)
 	}
 
 	// 1. Fence in-flight writes. The Lock keeps new writes out: they hold
@@ -992,9 +992,30 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 	//    which they check first. waitQueued then waits until commitLoop has
 	//    finished every write already in writeC, including those whose
 	//    callers gave up and released their RLock: those are committed too.
-	n.fenceMu.Lock()
+	//
+	//    Taking the fence and draining the queue are bounded together, as
+	//    in step 0: the commit loop can be stuck on a follower that never
+	//    acknowledges or, in degraded mode, on the object store, and a
+	//    checkpoint holding the fence waits for the same queue. On timeout
+	//    we return without closing the WAL, which the commit loop is still
+	//    writing; Close cancels the loop right after and closes the WAL once
+	//    it has exited, and the fence is released as soon as it is taken.
+	//    Followers take over when the lock's lease expires.
+	fenced := make(chan struct{})
+	go func() {
+		n.fenceMu.Lock()
+		n.waitQueued()
+		close(fenced)
+	}()
+	if !doneWithin(n.shutdownWait, func() { <-fenced }) {
+		go func() {
+			<-fenced
+			n.fenceMu.Unlock()
+		}()
+		n.log.Warnf("t4: graceful shutdown: writes still committing after %v; skipping WAL close and leader handoff", n.shutdownWait)
+		return
+	}
 	defer n.fenceMu.Unlock()
-	n.waitQueued()
 
 	// 2. Seal and synchronously upload all WAL segments to S3, including
 	//    the active segment containing our most recent acks. wal.Close
@@ -1041,10 +1062,18 @@ func (n *Node) gracefulLeaderShutdown(peerSrv *peer.Server) {
 // reports whether it did. Only called once n.closed is set, so no new
 // checkpoint can start meanwhile.
 func (n *Node) checkpointIdle(d time.Duration) bool {
-	idle := make(chan struct{})
-	go func() {
+	return doneWithin(d, func() {
 		n.checkpointMu.Lock()
 		n.checkpointMu.Unlock() //nolint:staticcheck // empty critical section: only waits for the holder
+	})
+}
+
+// doneWithin runs wait and reports whether it returned within d. On timeout
+// wait keeps running in the background until it returns.
+func doneWithin(d time.Duration, wait func()) bool {
+	idle := make(chan struct{})
+	go func() {
+		wait()
 		close(idle)
 	}()
 	t := time.NewTimer(d)

@@ -849,9 +849,10 @@ func uploadLocalWALSegments(ctx context.Context, walDir string, store object.Sto
 
 // ── Background checkpoint loop ────────────────────────────────────────────────
 
-// checkpointShutdownWait bounds how long graceful leader shutdown waits for an
-// in-flight checkpoint upload before giving up on a clean handoff.
-const checkpointShutdownWait = 30 * time.Second
+// shutdownWait bounds how long graceful leader shutdown waits for an
+// in-flight checkpoint upload, and then for queued writes, before giving up
+// on a clean handoff.
+const shutdownWait = 30 * time.Second
 
 func (n *Node) checkpointLoop(ctx context.Context) {
 	// Write an immediate checkpoint before entering the ticker so that any
@@ -940,8 +941,9 @@ func (n *Node) runCheckpoint(ctx context.Context) (int64, bool) {
 		n.log.Errorf("t4: checkpoint pebble copy: %v", err)
 		return 0, false
 	}
-	// Writes bump entriesSinceCheckpoint while holding fenceMu.RLock, so this
-	// is exactly the number of entries the pinned copy covers.
+	// The commit loop counts entries in entriesSinceCheckpoint as it applies
+	// them, and waitQueued above let it apply everything queued, so this is
+	// exactly the number of entries the pinned copy covers.
 	covered := atomic.LoadInt64(&n.entriesSinceCheckpoint)
 	n.fenceMu.Unlock()
 	defer func() { _ = os.RemoveAll(tmpDir) }()
