@@ -1590,23 +1590,39 @@ func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
 }
 
 // waitForStore runs wait on the current store as an in-flight read, which
-// Close drains, and maps the store closing to ErrClosed.
+// Close drains, and maps the store closing to ErrClosed. An in-place restore
+// closes the store too, to release its waiters before it swaps in the
+// restored one: the wait then goes on against the restored store.
 func (n *Node) waitForStore(ctx context.Context, wait func(*istore.Store) error) error {
+	for {
+		db, err := n.waitOnStore(wait)
+		if !errors.Is(err, istore.ErrClosed) {
+			return err
+		}
+		// A restore holds fenceMu from before it closes the store until it
+		// has swapped in the restored one or given up, so once fenceMu is
+		// free the store has been replaced, or it never will be.
+		n.fenceMu.RLock()
+		n.fenceMu.RUnlock() //nolint:staticcheck // empty critical section: only waits for the holder
+		if n.closed.Load() || n.db.Load() == db {
+			return ErrClosed
+		}
+	}
+}
+
+// waitOnStore runs wait once on the current store, holding readMu.RLock, and
+// returns the store it ran on.
+func (n *Node) waitOnStore(wait func(*istore.Store) error) (*istore.Store, error) {
 	if n.closed.Load() {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	n.readMu.RLock()
 	defer n.readMu.RUnlock()
 	if n.closed.Load() {
-		return ErrClosed
+		return nil, ErrClosed
 	}
-	if err := wait(n.db.Load()); err != nil {
-		if errors.Is(err, istore.ErrClosed) {
-			return ErrClosed
-		}
-		return err
-	}
-	return nil
+	db := n.db.Load()
+	return db, wait(db)
 }
 
 // Flush seals the current WAL segment and flushes Pebble's memtable to the
