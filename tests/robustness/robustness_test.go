@@ -201,7 +201,11 @@ func testRobustness(t *testing.T, s scenario, fp failpoint, size int, s3 *s3Conf
 			logHistoricalReadMismatches(t, reports, persisted)
 		}
 	}
-	if err := checkHashKV(ctx, c); err != nil {
+	// Validation may outlast ctx: give the nodes their own minute to answer,
+	// or a long validation reads as a node that never answers.
+	hctx, hcancel := context.WithTimeout(t.Context(), time.Minute)
+	defer hcancel()
+	if err := checkHashKV(hctx, c); err != nil {
 		t.Error(err)
 	}
 	panicked = false
