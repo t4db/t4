@@ -304,12 +304,22 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 	// Range / prefix delete: list all keys in range and delete them in atomic
 	// Txn batches. This is O(1) WAL entries per batch instead of O(n), and each
 	// batch commits at a single revision.
+	// The listing is only read for key names — matchRange compares keys and
+	// the ops carry nothing else — so the values stay in the store unless the
+	// client asked for them back. Loading them would put the whole collection
+	// in memory to delete it, which is how a namespace teardown or a CRD
+	// deletion arrives.
+	listOpts := []t4.ReadOption{}
+	if !r.PrevKv {
+		listOpts = append(listOpts, t4.WithKeysOnly())
+	}
+
 	var all []*t4.KeyValue
 	var err error
 	if scanPrefix, ok := rangeScan(key, rangeEnd); ok {
-		all, err = s.node.List(scanPrefix, t4.WithFromKey(key))
+		all, err = s.node.List(scanPrefix, append(listOpts, t4.WithFromKey(key))...)
 	} else {
-		all, err = s.node.List("")
+		all, err = s.node.List("", listOpts...)
 	}
 	if err != nil {
 		return nil, err
