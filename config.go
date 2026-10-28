@@ -250,6 +250,15 @@ type Config struct {
 	// follower catch-up. Default: 10 000.
 	PeerBufferSize int
 
+	// PeerBufferBytes bounds that same buffer in memory. Entries are
+	// retained with their values, so the entry count alone does not bound
+	// what the leader holds: 10 000 entries is tens of megabytes of small
+	// objects and gigabytes of large ones. Whichever bound is reached first
+	// evicts the oldest entries; a follower that falls behind the buffer
+	// resyncs instead. Default: 64 MiB; a negative value leaves the buffer
+	// bounded by PeerBufferSize alone, as it was before this bound existed.
+	PeerBufferBytes int
+
 	// WatchSendTimeout is the maximum time the etcd Watch surface waits for
 	// a single WatchResponse to enter the per-stream send buffer before the
 	// watch is considered slow and canceled. On cancellation the server
@@ -382,6 +391,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.PeerBufferSize == 0 {
 		c.PeerBufferSize = 10_000
+	}
+	if c.PeerBufferBytes == 0 {
+		c.PeerBufferBytes = 64 << 20
 	}
 	if c.WatchSendTimeout == 0 {
 		c.WatchSendTimeout = 30 * time.Second

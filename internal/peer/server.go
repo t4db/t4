@@ -134,12 +134,12 @@ type Server struct {
 }
 
 // NewServer creates a Server with a ring buffer of capacity cap.
-func NewServer(cap int, log peerLogger) *Server {
+func NewServer(cap, maxBytes int, log peerLogger) *Server {
 	if log == nil {
 		log = stdlibPeerLogger{}
 	}
 	return &Server{
-		buf:              newEntryBuffer(cap),
+		buf:              newEntryBuffer(cap, maxBytes),
 		followers:        make(map[string]chan *WalEntryMsg),
 		followerAckRevs:  make(map[string]int64),
 		ackNotify:        make(chan struct{}, 1),
@@ -690,17 +690,39 @@ func (s *Server) Forward(ctx context.Context, req *ForwardRequest) (*ForwardResp
 
 // ── entry ring buffer ─────────────────────────────────────────────────────────
 
+// entryBuffer retains recent WAL entries so a follower that reconnects can be
+// caught up from memory instead of resyncing.
+//
+// It is bounded by entry count and by bytes. The count alone says nothing
+// about the memory held: entries carry their values, so the same 10 000-entry
+// buffer is 40 MB of 4 KiB objects or 10 GB of 1 MiB ones, and a transaction
+// counts as one entry however many values it carries. The byte budget is what
+// actually bounds the leader's footprint; the count keeps the catch-up window
+// from growing without end when entries are small.
 type entryBuffer struct {
-	entries []*wal.Entry
-	cap     int
+	entries  []*wal.Entry
+	cap      int
+	maxBytes int
+	bytes    int
 }
 
-func newEntryBuffer(cap int) *entryBuffer { return &entryBuffer{cap: cap} }
+func newEntryBuffer(cap, maxBytes int) *entryBuffer {
+	return &entryBuffer{cap: cap, maxBytes: maxBytes}
+}
 
 func (b *entryBuffer) push(e *wal.Entry) {
 	b.entries = append(b.entries, e)
-	if len(b.entries) > b.cap {
-		b.entries = b.entries[len(b.entries)-b.cap:]
+	b.bytes += e.MemSize()
+	// Drop from the front until both bounds hold, always keeping the newest
+	// entry: a follower asking for one larger than the whole budget is better
+	// served by a resync than by a buffer that cannot hold anything.
+	for len(b.entries) > 1 && (len(b.entries) > b.cap || (b.maxBytes > 0 && b.bytes > b.maxBytes)) {
+		b.bytes -= b.entries[0].MemSize()
+		// Clear the slot before dropping it: re-slicing forward leaves the
+		// vacated pointers in the backing array, which would keep the entries
+		// they point at alive until the array is reallocated.
+		b.entries[0] = nil
+		b.entries = b.entries[1:]
 	}
 }
 

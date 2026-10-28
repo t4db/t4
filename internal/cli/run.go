@@ -50,6 +50,7 @@ func runCmd() *cobra.Command {
 		autoCompactSampleInt  time.Duration
 		readConsistency       string
 		historyRingSize       int
+		peerBufferMB          int
 		logLevel              string
 		// multi-node
 		nodeID                 string
@@ -156,6 +157,7 @@ func runCmd() *cobra.Command {
 				DataDir:                      dataDir,
 				ReadConsistency:              t4.ReadConsistency(readConsistency),
 				HistoryRingSize:              historyRingSize,
+				PeerBufferBytes:              peerBufferMB << 20,
 				SegmentMaxSize:               segmentMaxSizeMB << 20,
 				SegmentMaxAge:                time.Duration(segmentMaxAgeSec) * time.Second,
 				CheckpointInterval:           time.Duration(checkpointIntervalMin) * time.Minute,
@@ -339,6 +341,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&autoCompactSampleInt, "auto-compact-sample-interval", 0, "time strategy: revision/time sampling interval; 0 defaults to clamp(retention/7, 1m, 24h) when enabled (env: T4_AUTO_COMPACT_SAMPLE_INTERVAL)")
 	cmd.Flags().StringVar(&readConsistency, "read-consistency", "linearizable", "read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale) (env: T4_READ_CONSISTENCY)")
 	cmd.Flags().IntVar(&historyRingSize, "history-ring-size", 0, "in-memory recent-history ring capacity in revisions; covered revision-pinned reads skip the log-tail scan (0 defaults to 16384, negative disables) (env: T4_HISTORY_RING_SIZE)")
+	cmd.Flags().IntVar(&peerBufferMB, "peer-buffer-mb", 0, "memory bound on the leader's follower catch-up buffer, in MiB; entries are held with their values, so the entry count alone does not bound it (0 defaults to 64, negative disables) (env: T4_PEER_BUFFER_MB)")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level (trace/debug/info/warn/error) (env: T4_LOG_LEVEL)")
 	// multi-node
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "stable unique node identifier (default: hostname) (env: T4_NODE_ID)")
@@ -389,6 +392,7 @@ func runCmd() *cobra.Command {
 			"auto-compact-sample-interval":         "T4_AUTO_COMPACT_SAMPLE_INTERVAL",
 			"read-consistency":                     "T4_READ_CONSISTENCY",
 			"history-ring-size":                    "T4_HISTORY_RING_SIZE",
+			"peer-buffer-mb":                       "T4_PEER_BUFFER_MB",
 			"log-level":                            "T4_LOG_LEVEL",
 			"node-id":                              "T4_NODE_ID",
 			"peer-listen":                          "T4_PEER_LISTEN",

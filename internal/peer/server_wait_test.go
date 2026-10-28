@@ -11,7 +11,7 @@ import (
 )
 
 func TestWaitForFollowersNoneReturnsImmediately(t *testing.T) {
-	srv := NewServer(16, nil)
+	srv := NewServer(16, 0, nil)
 	srv.mu.Lock()
 	srv.followers["f1"] = make(chan *WalEntryMsg)
 	srv.followers["f2"] = make(chan *WalEntryMsg)
@@ -26,7 +26,7 @@ func TestWaitForFollowersNoneReturnsImmediately(t *testing.T) {
 }
 
 func TestWaitForFollowersQuorumNeedsOneOfTwoFollowers(t *testing.T) {
-	srv := NewServer(16, nil)
+	srv := NewServer(16, 0, nil)
 	srv.mu.Lock()
 	srv.followers["f1"] = make(chan *WalEntryMsg)
 	srv.followers["f2"] = make(chan *WalEntryMsg)
@@ -62,7 +62,7 @@ func TestWaitForFollowersQuorumNeedsOneOfTwoFollowers(t *testing.T) {
 }
 
 func TestWaitForFollowersAllNeedsEveryConnectedFollower(t *testing.T) {
-	srv := NewServer(16, nil)
+	srv := NewServer(16, 0, nil)
 	srv.mu.Lock()
 	srv.followers["f1"] = make(chan *WalEntryMsg)
 	srv.followers["f2"] = make(chan *WalEntryMsg)
@@ -103,7 +103,7 @@ func TestWaitForFollowersAllNeedsEveryConnectedFollower(t *testing.T) {
 }
 
 func TestWaitForFollowersAllReturnsWhenRemainingFollowersDisconnect(t *testing.T) {
-	srv := NewServer(16, nil)
+	srv := NewServer(16, 0, nil)
 	srv.mu.Lock()
 	srv.followers["f1"] = make(chan *WalEntryMsg)
 	srv.followers["f2"] = make(chan *WalEntryMsg)
@@ -185,7 +185,7 @@ func waitForStreamMessage(t *testing.T, ch <-chan *WalEntryMsg, pred func(*WalEn
 }
 
 func TestFollowCleanupDoesNotDropReplacementFollower(t *testing.T) {
-	srv := NewServer(16, nil)
+	srv := NewServer(16, 0, nil)
 	for rev := int64(1); rev <= 3; rev++ {
 		srv.Broadcast(&wal.Entry{
 			Revision:       rev,
@@ -258,7 +258,7 @@ func TestFollowCleanupDoesNotDropReplacementFollower(t *testing.T) {
 // predates them. It would take a heartbeat for a WAL entry, and it never
 // sends one, so the leader must neither send it any nor time it out.
 func TestNoHeartbeatsForOldFollower(t *testing.T) {
-	srv := NewServer(16, nil)
+	srv := NewServer(16, 0, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	stream := newFakeFollowStream(ctx) // never sends an ACK

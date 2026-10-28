@@ -105,7 +105,7 @@ func waitConnected(t *testing.T, srv *peer.Server, n int) {
 // connection, so without heartbeats the follower waits on its stream forever
 // and never looks for a new leader.
 func TestFollowerDetectsSilentLeader(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	proxy := newStallingProxy(t, startServer(t, srv))
 	cli := peer.NewClient(proxy.Addr(), "follower-1", 2, nil, nil, nil)
 	defer cli.Close()
@@ -133,7 +133,7 @@ func TestFollowerDetectsSilentLeader(t *testing.T) {
 // TestLeaderDropsSilentFollower: the leader ends the stream of a follower it
 // no longer hears from, which releases writes waiting for that follower.
 func TestLeaderDropsSilentFollower(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	proxy := newStallingProxy(t, startServer(t, srv))
 	cli := peer.NewClient(proxy.Addr(), "follower-1", 0, nil, nil, nil)
 	defer cli.Close()
@@ -172,7 +172,7 @@ func (s oldLeader) Follow(req *peer.FollowRequest, stream peer.WalStream_FollowS
 // TestFollowerKeepsIdleStreamToOldLeader: a leader that sends no heartbeats
 // is not taken for a silent one.
 func TestFollowerKeepsIdleStreamToOldLeader(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	addr := startServer(t, oldLeader{srv})
 	cli := peer.NewClient(addr, "follower-1", 1, nil, nil, nil)
 	defer cli.Close()
@@ -210,7 +210,7 @@ func TestFollowerKeepsIdleStreamToOldLeader(t *testing.T) {
 // heartbeating, so it looks alive, but it stops acknowledging. The leader
 // must drop it rather than keep writes waiting for it indefinitely.
 func TestLeaderDropsStalledFollower(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	cli := peer.NewClient(startServer(t, srv), "follower-1", 0, nil, nil, nil)
 	defer cli.Close()
 

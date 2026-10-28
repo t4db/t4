@@ -44,7 +44,7 @@ func noopWAL([]wal.Entry) error { return nil }
 
 // TestStreamDelivery verifies that entries broadcast by the leader reach the follower.
 func TestStreamDelivery(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	addr := startServer(t, srv)
 
 	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
@@ -88,7 +88,7 @@ func TestStreamDelivery(t *testing.T) {
 // TestCatchUp verifies that a follower connecting after entries were broadcast
 // receives the buffered entries first, then live ones.
 func TestCatchUp(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	addr := startServer(t, srv)
 
 	// Broadcast some entries before the follower connects.
@@ -139,7 +139,7 @@ func TestCatchUp(t *testing.T) {
 // TestResyncRequired verifies that a follower whose fromRevision is too old
 // receives ErrResyncRequired rather than hanging or getting partial data.
 func TestResyncRequired(t *testing.T) {
-	srv := peer.NewServer(3, nil) // tiny buffer: 3 entries max
+	srv := peer.NewServer(3, 0, nil) // tiny buffer: 3 entries max
 
 	// Fill the buffer past capacity so old entries are evicted.
 	for i := int64(1); i <= 10; i++ {
@@ -174,7 +174,7 @@ func TestResyncRequired(t *testing.T) {
 func TestForwardWrite(t *testing.T) {
 	// Stub ForwardHandler that records calls and returns canned responses.
 	handler := &stubForwardHandler{}
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	srv.SetForwardHandler(handler)
 	addr := startServer(t, srv)
 
@@ -234,7 +234,7 @@ func TestLeaderUnreachable(t *testing.T) {
 
 // TestMultipleFollowers verifies fan-out to multiple concurrent followers.
 func TestMultipleFollowers(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	addr := startServer(t, srv)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -277,7 +277,7 @@ func TestMultipleFollowers(t *testing.T) {
 // TestNoDuplicatesOnCatchUp ensures entries in both the snapshot and the live
 // stream are not delivered twice.
 func TestNoDuplicatesOnCatchUp(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 
 	// Pre-populate buffer.
 	for i := int64(1); i <= 5; i++ {
@@ -324,7 +324,7 @@ func TestNoDuplicatesOnCatchUp(t *testing.T) {
 }
 
 func TestFollowerAppliesOnlyAfterCommit(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	addr := startServer(t, srv)
 
 	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)
@@ -362,7 +362,7 @@ func TestFollowerAppliesOnlyAfterCommit(t *testing.T) {
 }
 
 func TestCommitWithoutStagedEntryTriggersResyncRequired(t *testing.T) {
-	srv := peer.NewServer(1000, nil)
+	srv := peer.NewServer(1000, 0, nil)
 	addr := startServer(t, srv)
 
 	cli := peer.NewClient(addr, "follower-1", 3, nil, nil, nil)

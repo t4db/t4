@@ -125,6 +125,14 @@ type Entry struct {
 	Version        int64 // etcd-style per-key modification count
 }
 
+// MemSize is roughly what retaining e costs in memory: the struct itself plus
+// the bytes its key and value point at. It is for sizing buffers that hold
+// entries, where the value dominates and an exact figure is not needed.
+func (e *Entry) MemSize() int {
+	const structBytes = 96 // fields plus the key and value headers
+	return structBytes + len(e.Key) + len(e.Value)
+}
+
 // Sequence returns the identity used for WAL ordering and peer-stream ACKs.
 func (e Entry) Sequence() int64 {
 	if e.ID != 0 {
