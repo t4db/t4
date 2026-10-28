@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -33,12 +34,15 @@ var (
 	fEndpoints   = flag.String("endpoints", "localhost:2379", "comma-separated etcd v3 endpoints")
 	fClients     = flag.Int("clients", 1, "concurrent clients (ignored for seq-* workloads)")
 	fTotal       = flag.Int("total", 50000, "total operations to issue")
-	fWorkload    = flag.String("workload", "seq-put", "seq-put|par-put|seq-get|par-get|mixed|watch")
+	fWorkload    = flag.String("workload", "seq-put", "seq-put|par-put|seq-get|par-get|mixed|watch|list|list-paged|watch-fanout")
 	fKeySize     = flag.Int("key-size", 64, "target key length in bytes (including prefix)")
 	fValSize     = flag.Int("val-size", 256, "value size in bytes")
 	fOutput      = flag.String("output", "text", "output format: text|jsonl")
 	fPrefix      = flag.String("prefix", "/bench/", "key prefix")
 	fKeySpace    = flag.Int64("key-space", 0, "distinct keys to cycle through (0 = every write a new key)")
+	fReps        = flag.Int("reps", 20, "repetitions of the measured operation (list workloads)")
+	fListLimit   = flag.Int64("list-limit", 500, "page size for the list-paged workload")
+	fWatchers    = flag.Int("watchers", 1000, "concurrent prefix watchers for the watch-fanout workload")
 	fScenario    = flag.String("scenario", "", "scenario label written into jsonl output")
 	fSystem      = flag.String("system", "", "system label written into jsonl output (e.g. t4, etcd)")
 	fDialTimeout = flag.Duration("dial-timeout", 10*time.Second, "connection timeout")
@@ -61,6 +65,15 @@ type Result struct {
 	P90Us     int64   `json:"p90_us"`
 	P99Us     int64   `json:"p99_us"`
 	P999Us    int64   `json:"p999_us"`
+
+	// Memory is sampled from outside the container by run.sh, which appends
+	// its own record for the same (scenario, system, workload) key. The load
+	// generator never fills these in; compare merges the two records.
+	PeakMemMB float64 `json:"peak_mem_mb,omitempty"`
+	EndMemMB  float64 `json:"end_mem_mb,omitempty"`
+	// Objects is the number of keys resident in the store while the workload
+	// ran, which is what the memory numbers have to be read against.
+	Objects int `json:"objects,omitempty"`
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -120,8 +133,17 @@ func main() {
 		latencies, errors, elapsed = runMixed(val, *fTotal, *fClients)
 	case "watch":
 		latencies, errors, elapsed = runWatch(cli, val, *fTotal)
+	case "list":
+		populate(val, *fTotal)
+		latencies, errors, elapsed = runList(cli, 0)
+	case "list-paged":
+		populate(val, *fTotal)
+		latencies, errors, elapsed = runList(cli, *fListLimit)
+	case "watch-fanout":
+		populate(val, *fTotal)
+		latencies, errors, elapsed = runWatchFanout(val, *fWatchers)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown workload %q; choose: seq-put par-put seq-get par-get mixed watch\n", *fWorkload)
+		fmt.Fprintf(os.Stderr, "unknown workload %q; choose: seq-put par-put seq-get par-get mixed watch list list-paged watch-fanout\n", *fWorkload)
 		os.Exit(1)
 	}
 
@@ -131,6 +153,12 @@ func main() {
 	r.Clients = *fClients
 	r.Scenario = *fScenario
 	r.System = *fSystem
+	switch *fWorkload {
+	case "seq-get", "par-get", "mixed", "list", "list-paged", "watch-fanout":
+		// These seed the keyspace first, so the store holds this many keys
+		// while the workload runs.
+		r.Objects = *fTotal
+	}
 
 	switch *fOutput {
 	case "jsonl":
@@ -437,6 +465,142 @@ func runWatch(cli *clientv3.Client, val string, n int) ([]int64, int, time.Durat
 	return lat, errs, time.Since(start)
 }
 
+// runList measures a full-collection read: the shape a Kubernetes apiserver
+// issues when it fills a watch cache, and the single largest allocation either
+// store makes. With limit 0 the whole prefix comes back in one response; with
+// a limit the collection is walked page by page, continuing from the last key
+// as apiserver's paginated lists do.
+//
+// Latency is per call for the unpaginated form and per page for the paginated
+// one, so the two are not comparable to each other — each is only meant to be
+// compared across systems. What matters here is the memory the server holds
+// while answering, which run.sh samples from outside.
+func runList(cli *clientv3.Client, limit int64) ([]int64, int, time.Duration) {
+	ctx := context.Background()
+	prefix := *fPrefix
+
+	lat := make([]int64, 0, *fReps)
+	var errs int
+	start := time.Now()
+	for i := 0; i < *fReps; i++ {
+		if limit <= 0 {
+			t0 := time.Now()
+			resp, err := cli.Get(ctx, prefix, clientv3.WithPrefix())
+			if err != nil {
+				errs++
+				continue
+			}
+			lat = append(lat, time.Since(t0).Microseconds())
+			if len(resp.Kvs) != *fTotal {
+				fmt.Fprintf(os.Stderr, "list: got %d keys, want %d\n", len(resp.Kvs), *fTotal)
+			}
+			continue
+		}
+
+		// Paged walk. Each page is pinned to the revision the first page
+		// reported, so the walk sees one consistent snapshot the way
+		// apiserver's chunked lists do.
+		var (
+			key  = prefix
+			rev  int64
+			seen int
+		)
+		for {
+			opts := []clientv3.OpOption{
+				clientv3.WithRange(clientv3.GetPrefixRangeEnd(prefix)),
+				clientv3.WithLimit(limit),
+			}
+			if rev != 0 {
+				opts = append(opts, clientv3.WithRev(rev))
+			}
+			t0 := time.Now()
+			resp, err := cli.Get(ctx, key, opts...)
+			if err != nil {
+				errs++
+				break
+			}
+			lat = append(lat, time.Since(t0).Microseconds())
+			if rev == 0 {
+				rev = resp.Header.Revision
+			}
+			seen += len(resp.Kvs)
+			if !resp.More || len(resp.Kvs) == 0 {
+				break
+			}
+			// Continue just past the last key returned.
+			key = string(resp.Kvs[len(resp.Kvs)-1].Key) + "\x00"
+		}
+		if seen != *fTotal {
+			fmt.Fprintf(os.Stderr, "list-paged: walked %d keys, want %d\n", seen, *fTotal)
+		}
+	}
+	return lat, errs, time.Since(start)
+}
+
+// runWatchFanout holds many concurrent prefix watchers open over a populated
+// keyspace and then writes to it, measuring how long the last watcher takes to
+// see each event. A control plane with many controllers looks like this, and it
+// is where a store pays for every copy of an event it keeps per watcher.
+func runWatchFanout(val string, watchers int) ([]int64, int, time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watchPrefix := *fPrefix + "fanout/"
+
+	// One client per 100 watchers: watches are cheap on the wire but share a
+	// stream, and a single HTTP/2 connection head-of-line blocks the fan-out
+	// we are trying to measure.
+	nClients := watchers/100 + 1
+	clients := make([]*clientv3.Client, 0, nClients)
+	defer func() {
+		for _, c := range clients {
+			c.Close()
+		}
+	}()
+	for i := 0; i < nClients; i++ {
+		c, err := newClient()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "watch-fanout: connect: %v\n", err)
+			return nil, 1, 0
+		}
+		clients = append(clients, c)
+	}
+
+	// The last watcher registered is the one measured; the rest are there to
+	// make the server fan out.
+	var last clientv3.WatchChan
+	for i := 0; i < watchers; i++ {
+		ch := clients[i%nClients].Watch(ctx, watchPrefix, clientv3.WithPrefix())
+		if i == watchers-1 {
+			last = ch
+		}
+	}
+	// Give every watcher time to register before writing.
+	time.Sleep(2 * time.Second)
+
+	writer := clients[0]
+	n := *fReps
+	lat := make([]int64, 0, n)
+	var errs int
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("%s%08d", watchPrefix, i)
+		t0 := time.Now()
+		if _, err := writer.Put(context.Background(), k, val); err != nil {
+			errs++
+			continue
+		}
+		select {
+		case <-last:
+			lat = append(lat, time.Since(t0).Microseconds())
+		case <-time.After(30 * time.Second):
+			fmt.Fprintf(os.Stderr, "watch-fanout: timeout at op %d\n", i)
+			errs++
+		}
+	}
+	return lat, errs, time.Since(start)
+}
+
 // ── statistics ────────────────────────────────────────────────────────────────
 
 func computeResult(latencies []int64, errors int, elapsed time.Duration) Result {
@@ -486,17 +650,30 @@ func runCompare(args []string) {
 	}
 	defer f.Close()
 
+	// run.sh samples server memory from outside the container and appends its
+	// own record per (scenario, system, workload), so a run produces two
+	// records per cell. Merge them on that key, in either arrival order, and
+	// keep first-seen order for the tables below.
 	var results []Result
+	at := map[string]int{}
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
 		var r Result
 		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
 			continue
 		}
-		results = append(results, r)
+		k := r.Scenario + "|" + r.System + "|" + r.Workload
+		i, ok := at[k]
+		if !ok {
+			at[k] = len(results)
+			results = append(results, r)
+			continue
+		}
+		merge(&results[i], r)
 	}
 
-	workloads := []string{"seq-put", "par-put", "seq-get", "par-get", "mixed", "watch"}
+	workloads := []string{"seq-put", "par-put", "seq-get", "par-get", "mixed", "watch", "list", "list-paged", "watch-fanout"}
 	scenarios := uniqueOrdered(results, func(r Result) string { return r.Scenario })
 
 	for _, sc := range scenarios {
@@ -551,6 +728,94 @@ func runCompare(args []string) {
 			}
 		}
 		fmt.Println("└" + strings.Repeat("─", len(hdr)-1))
+
+		printMemory(results, sc, systems, workloads)
+	}
+}
+
+// printMemory renders the server-side memory table for one scenario. It is
+// skipped entirely when run.sh did not sample memory, so a plain throughput
+// run looks exactly as it did before.
+//
+// The ratio column is each system's peak against the baseline's, so a figure
+// below 1.00 is the thing to aim for.
+func printMemory(results []Result, scenario string, systems, workloads []string) {
+	sampled := false
+	for _, r := range results {
+		if r.Scenario == scenario && r.PeakMemMB != 0 {
+			sampled = true
+			break
+		}
+	}
+	if !sampled {
+		return
+	}
+
+	baseline := "etcd"
+	if !slices.Contains(systems, baseline) {
+		baseline = systems[len(systems)-1]
+	}
+
+	hdr := fmt.Sprintf("│  %-12s  %-8s  %9s  %10s  %10s  %8s",
+		"workload", "system", "objects", "peak MiB", "end MiB", "vs "+baseline)
+	fmt.Printf("\n┌─ Server memory: %s %s\n", scenario, strings.Repeat("─", max(0, 56-len(scenario))))
+	fmt.Println(hdr)
+	fmt.Println("│ " + strings.Repeat("─", len(hdr)-2))
+
+	for _, wl := range workloads {
+		row := func(sys string) (Result, bool) {
+			for _, r := range results {
+				if r.Scenario == scenario && r.Workload == wl && r.System == sys && r.PeakMemMB != 0 {
+					return r, true
+				}
+			}
+			return Result{}, false
+		}
+		base, haveBase := row(baseline)
+		first := true
+		for _, sys := range systems {
+			r, ok := row(sys)
+			if !ok {
+				continue
+			}
+			wlLabel := ""
+			if first {
+				wlLabel = wl
+				first = false
+			}
+			ratio := "—"
+			if haveBase && base.PeakMemMB > 0 && sys != baseline {
+				ratio = fmt.Sprintf("%.2fx", r.PeakMemMB/base.PeakMemMB)
+			}
+			fmt.Printf("│  %-12s  %-8s  %9d  %10.1f  %10.1f  %8s\n",
+				wlLabel, sys, r.Objects, r.PeakMemMB, r.EndMemMB, ratio)
+		}
+	}
+	fmt.Println("└" + strings.Repeat("─", len(hdr)-1))
+}
+
+// merge folds a second record for the same cell into the first. The load
+// generator's record and run.sh's memory sample describe one run from two
+// sides, and each leaves the other's fields zero.
+func merge(dst *Result, src Result) {
+	if src.OpsPerSec != 0 || src.ElapsedMs != 0 {
+		peak, end := dst.PeakMemMB, dst.EndMemMB
+		objects := dst.Objects
+		*dst = src
+		dst.PeakMemMB, dst.EndMemMB = peak, end
+		if dst.Objects == 0 {
+			dst.Objects = objects
+		}
+		return
+	}
+	if src.PeakMemMB != 0 {
+		dst.PeakMemMB = src.PeakMemMB
+	}
+	if src.EndMemMB != 0 {
+		dst.EndMemMB = src.EndMemMB
+	}
+	if src.Objects != 0 && dst.Objects == 0 {
+		dst.Objects = src.Objects
 	}
 }
 
