@@ -127,6 +127,48 @@ func TestWatchReplayAcrossWindowsPicksUpLiveWrites(t *testing.T) {
 	}
 }
 
+// TestWatchDispatchAcrossWindowsDeliversBurst covers the live path's own use
+// of the window. Dispatch runs asynchronously from Apply, so a burst can leave
+// it many revisions behind; capping how much it decodes per iteration means a
+// burst larger than the window is delivered over several of them, and must
+// still arrive whole and in order.
+func TestWatchDispatchAcrossWindowsDeliversBurst(t *testing.T) {
+	withWatchReplayWindow(t, 2)
+
+	s := openMem(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Watch from HEAD, so everything below arrives through live dispatch
+	// rather than replay.
+	ch, err := s.Watch(ctx, "/reg/", 0, WatchOptions{})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	const burst = 11
+	for i := 1; i <= burst; i++ {
+		apply(t, s, createEntry(int64(i), fmt.Sprintf("/reg/k%02d", i), []byte(fmt.Sprint("v", i))))
+	}
+
+	for i := 1; i <= burst; i++ {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("watch closed after %d of %d events", i-1, burst)
+			}
+			if ev.Type == EventProgress {
+				continue
+			}
+			if ev.KV.Revision != int64(i) {
+				t.Fatalf("event %d arrived at revision %d; the burst was reordered or lost", i, ev.KV.Revision)
+			}
+		case <-ctx.Done():
+			t.Fatalf("timed out after %d of %d events", i-1, burst)
+		}
+	}
+}
+
 // TestWatchReplayWindowEndsWatchOnCompaction checks the per-window compaction
 // check. A compaction that lands past a window's start may have removed
 // records that window needed, and the watch has to end rather than deliver a
