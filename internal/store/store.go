@@ -1676,6 +1676,22 @@ const watchLiveBatchBuffer = 1024
 // to what is consumed rather than to the write rate.
 const watchProgressInterval = time.Second
 
+// watchReplayWindow bounds how many revisions a catching-up watch decodes
+// before sending what it decoded. A watch that starts at an old revision — an
+// apiserver reconnecting at the revision it last saw, after a restart or a
+// dropped connection — would otherwise hold every event since that revision,
+// values included, before the first one reaches the client. Replaying in
+// windows makes the cost the window rather than the gap, which has no bound
+// of its own: with autocompaction off the gap can be the whole history.
+//
+// A revision is still the smallest unit, so one very large transaction
+// exceeds a window on its own. That is inherent — a revision's events are
+// decoded together — and bounded by the transaction size limit.
+//
+// Declared as var (not const) so unit tests can shrink the window to exercise
+// the windowing itself rather than a gap large enough to reach it.
+var watchReplayWindow int64 = 1024
+
 type watchSubscription struct {
 	id         uint64
 	prefix     string
@@ -1862,8 +1878,7 @@ func (s *Store) watchLoop(
 			boundary = atomic.LoadInt64(&s.currentRev)
 		}
 
-		replay, ok := s.scanWatchRange(prefix, nextRev, boundary, withPrevKV)
-		if !ok {
+		if !s.replayWatchRange(ctx, prefix, nextRev, boundary, withPrevKV, ch) {
 			return
 		}
 
@@ -1876,18 +1891,7 @@ func (s *Store) watchLoop(
 		s.addWatchSubscriptionLocked(sub, handoff+1)
 		s.watchHubMu.Unlock()
 
-		gap, ok := s.scanWatchRange(prefix, boundary+1, handoff, withPrevKV)
-		if !ok {
-			return
-		}
-		// A compaction past nextRev may have deleted records the scans
-		// needed. applyCompact raises compactRev before its deletions
-		// commit, so a scan that missed any sees it here. End the watch: one
-		// started again from nextRev is refused as compacted.
-		if atomic.LoadInt64(&s.compactRev) > nextRev {
-			return
-		}
-		if !s.sendWatchEvents(ctx, ch, replay) || !s.sendWatchEvents(ctx, ch, gap) {
+		if !s.replayWatchRange(ctx, prefix, boundary+1, handoff, withPrevKV, ch) {
 			return
 		}
 		// Seal the replay the same way the dispatcher seals a live batch.
@@ -1908,6 +1912,33 @@ func (s *Store) watchLoop(
 			return
 		}
 	}
+}
+
+// replayWatchRange decodes [fromRev, toRev] in windows of watchReplayWindow
+// revisions, sending each window before decoding the next, and reports false
+// when the watch should end.
+//
+// The compaction check is per window rather than once for the whole range,
+// because each window is only answerable from the records that were present
+// when it was scanned. applyCompact raises compactRev before its deletions
+// commit, so a scan that silently missed records sees it immediately after.
+// Ending the watch there leaves the client to watch again from the last
+// revision it received — past what was compacted away, so usually without the
+// relist the all-or-nothing replay forced.
+func (s *Store) replayWatchRange(ctx context.Context, prefix string, fromRev, toRev int64, withPrevKV bool, ch chan<- Event) bool {
+	for from := fromRev; from <= toRev; from += watchReplayWindow {
+		events, ok := s.scanWatchRange(prefix, from, min(from+watchReplayWindow-1, toRev), withPrevKV)
+		if !ok {
+			return false
+		}
+		if atomic.LoadInt64(&s.compactRev) > from {
+			return false
+		}
+		if !s.sendWatchEvents(ctx, ch, events) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) scanWatchRange(prefix string, fromRev, toRev int64, withPrevKV bool) ([]Event, bool) {
