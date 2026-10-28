@@ -1893,6 +1893,20 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 			return
 		}
 		toRev := atomic.LoadInt64(&s.currentRev)
+		// Bound what one iteration decodes. Dispatch is deliberately
+		// asynchronous from Apply, so a write burst — or a round of PrevKV
+		// lookups and fan-out — lets the gap grow, and the scan holds every
+		// event in it, values included, for the whole keyspace. Capping the
+		// span costs another iteration and keeps the loop's footprint
+		// independent of how far behind it fell.
+		//
+		// A capped toRev leaves caughtUp false, which is what it means: the
+		// loop comes straight back round rather than blocking, so the marker
+		// pacing below still has a later iteration to announce the newest
+		// revision from.
+		if toRev-nextRev+1 > watchReplayWindow {
+			toRev = nextRev + watchReplayWindow - 1
+		}
 		start := time.Now()
 		events, scanned, err := s.scanLog("", nextRev, toRev, false, false)
 		if err != nil {
