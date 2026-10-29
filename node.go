@@ -427,6 +427,23 @@ func checkConditionalWrites(cfg Config, log Logger) error {
 			"two leaders apart — see the object-store requirements in the operations guide", err)
 		return nil
 	}
+	// A store that offers no conditional writes is not what this check is for.
+	// election.Lock detects that itself and uses its unconditional fallback,
+	// and refusing here would stop an embedder's custom Store from running a
+	// cluster it has been running all along. Say that the safety the lock
+	// normally has is absent, and leave the decision where it was.
+	if !support.Offered {
+		if cfg.PeerListenAddr != "" {
+			log.Warnf("t4: the object store offers no conditional writes (%s), so leader election "+
+				"falls back to an unconditional write and a read-back. That narrows the window for "+
+				"two leaders rather than closing it — see the object-store requirements in the "+
+				"operations guide", support.Detail)
+		} else {
+			log.Debugf("t4: the object store offers no conditional writes (%s); a single node does "+
+				"not need them", support.Detail)
+		}
+		return nil
+	}
 	if support.Enforced() {
 		return nil
 	}

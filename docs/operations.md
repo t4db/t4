@@ -38,9 +38,14 @@ answer:
 | The store | T4 |
 |---|---|
 | Enforces both | starts normally |
+| Offers no conditional writes at all | starts; leader election uses its unconditional fallback, and a cluster is warned that the fallback narrows the split-brain window rather than closing it |
 | Rejects `If-Match` and keeps `If-None-Match` (older radosgw) | starts a single node; refuses a cluster |
 | Accepts a precondition and ignores it | starts a single node with a warning; **refuses a cluster** |
 | Cannot be probed (store unreachable, prefix not writable) | starts, and logs what it could not determine |
+
+Only the fourth row is refused. The others T4 can already see for itself — a store with no conditional methods, or one that
+returns an error — and it has long-standing behaviour for them. A store that takes a precondition and returns success is the
+one nothing else can detect.
 
 A store that accepts `If-None-Match` or `If-Match` and ignores it is the dangerous case, because the write returns
 success and T4 reads that as having won the race. Two nodes could then serve as leader at once. **Google Cloud Storage
