@@ -433,52 +433,25 @@ func (s *GCSStore) uploadSimple(ctx context.Context, key string, r io.Reader, si
 	return obj.Generation, nil
 }
 
-// uploadResumable uploads in gcsChunkSize pieces, so a failure costs one chunk
-// rather than the whole object.
+// uploadResumable opens an upload session and streams the body into it.
 //
-// GCS needs the total length on the final chunk, which an io.Reader does not
-// offer, so this holds one chunk back: a chunk is only sent once the next read
-// has shown whether it is the last.
+// The chunking itself lives in gcs_upload.go and is handed only a way to send
+// one chunk, so it can be tested without a server; this supplies that way.
 func (s *GCSStore) uploadResumable(ctx context.Context, key string, r io.Reader) error {
 	session, err := s.startResumable(ctx, key)
 	if err != nil {
 		return err
 	}
-
-	bufA := make([]byte, gcsChunkSize)
-	bufB := make([]byte, gcsChunkSize)
-	pending, err := readChunk(r, bufA)
-	if err != nil {
-		return fmt.Errorf("object/gcs: put %q: read: %w", key, err)
+	up := &resumableUploader{
+		chunkSize: gcsChunkSize,
+		send: func(ctx context.Context, chunk []byte, offset, total int64) error {
+			return s.putChunk(ctx, session, key, chunk, offset, total)
+		},
 	}
-	var offset int64
-	for {
-		next, err := readChunk(r, bufB)
-		if err != nil {
-			return fmt.Errorf("object/gcs: put %q: read: %w", key, err)
-		}
-		if len(next) == 0 {
-			// pending is the last chunk, so the total length is known.
-			return s.putChunk(ctx, session, key, pending, offset, offset+int64(len(pending)))
-		}
-		if err := s.putChunk(ctx, session, key, pending, offset, -1); err != nil {
-			return err
-		}
-		offset += int64(len(pending))
-		pending, bufA, bufB = next, bufB, bufA
+	if err := up.upload(ctx, r); err != nil {
+		return fmt.Errorf("object/gcs: put %q: %w", key, err)
 	}
-}
-
-// readChunk fills buf as far as the reader allows, returning a short or empty
-// slice at the end of the stream.
-func readChunk(r io.Reader, buf []byte) ([]byte, error) {
-	n, err := io.ReadFull(r, buf)
-	switch {
-	case err == nil, errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return buf[:n], nil
-	default:
-		return nil, err
-	}
+	return nil
 }
 
 // startResumable opens an upload session and returns its URI.
@@ -529,17 +502,4 @@ func (s *GCSStore) putChunk(ctx context.Context, session, key string, chunk []by
 	}
 	_ = resp.Body.Close()
 	return nil
-}
-
-// contentRange formats the header a resumable chunk carries. An empty object
-// has no bytes to name, so it reports only its length.
-func contentRange(offset int64, n int, total int64) string {
-	if n == 0 {
-		return "bytes */0"
-	}
-	last := offset + int64(n) - 1
-	if total < 0 {
-		return fmt.Sprintf("bytes %d-%d/*", offset, last)
-	}
-	return fmt.Sprintf("bytes %d-%d/%d", offset, last, total)
 }
