@@ -554,7 +554,7 @@ func runWatchFanout(val string, watchers int) ([]int64, int, time.Duration) {
 	clients := make([]*clientv3.Client, 0, nClients)
 	defer func() {
 		for _, c := range clients {
-			c.Close()
+			_ = c.Close()
 		}
 	}()
 	for i := 0; i < nClients; i++ {

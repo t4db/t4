@@ -60,7 +60,7 @@ func BenchmarkCompactSupersededVersions(b *testing.B) {
 		if got := s.CompactRevision(); got != target {
 			b.Fatalf("CompactRevision = %d, want %d", got, target)
 		}
-		s.Close()
+		_ = s.Close()
 		b.StartTimer()
 	}
 	b.ReportMetric(float64(keys*versions*valSize)/(1<<20), "MiB-history")

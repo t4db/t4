@@ -266,6 +266,7 @@ metadata.
 | `t4 run` | `T4_NODE_ID` | `--node-id` |
 | `t4 run` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
 | `t4 run` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
+| `t4 run` | `T4_PEER_BUFFER_MB` | `--peer-buffer-mb` |
 | `t4 run` | `T4_PEER_LISTEN` | `--peer-listen` |
 | `t4 run` | `T4_PEER_TLS_CA` | `--peer-tls-ca` |
 | `t4 run` | `T4_PEER_TLS_CERT` | `--peer-tls-cert` |
@@ -416,6 +417,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--node-id` | — | `T4_NODE_ID` | No | stable unique node identifier (default: hostname) |
 | `t4 run` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
 | `t4 run` | `--object-store-encryption-key-file` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | No | file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
+| `t4 run` | `--peer-buffer-mb` | `0` | `T4_PEER_BUFFER_MB` | No | memory bound on the leader's follower catch-up buffer, in MiB; entries are held with their values, so the entry count alone does not bound it (0 defaults to 64, negative disables) |
 | `t4 run` | `--peer-listen` | — | `T4_PEER_LISTEN` | No | address for leader→follower WAL stream (e.g. 0.0.0.0:3380); enables multi-node mode |
 | `t4 run` | `--peer-tls-ca` | — | `T4_PEER_TLS_CA` | No | CA certificate file for peer mTLS (PEM) |
 | `t4 run` | `--peer-tls-cert` | — | `T4_PEER_TLS_CERT` | No | node certificate file for peer mTLS (PEM) |
