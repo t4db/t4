@@ -28,16 +28,19 @@ func NewLyingStore(inner object.ConditionalStore) *LyingStore {
 	return &LyingStore{ConditionalStore: inner, IgnoreIfNoneMatch: true, IgnoreIfMatch: true}
 }
 
+// The calls that forward to the embedded store keep it named, because
+// dropping it would resolve back to this method and recurse. Plain Put is not
+// overridden here, so that one is unqualified.
 func (s *LyingStore) PutIfAbsent(ctx context.Context, key string, r io.Reader) error {
 	if s.IgnoreIfNoneMatch {
-		return s.ConditionalStore.Put(ctx, key, r)
+		return s.Put(ctx, key, r)
 	}
 	return s.ConditionalStore.PutIfAbsent(ctx, key, r)
 }
 
 func (s *LyingStore) PutIfMatch(ctx context.Context, key string, r io.Reader, matchETag string) error {
 	if s.IgnoreIfMatch {
-		return s.ConditionalStore.Put(ctx, key, r)
+		return s.Put(ctx, key, r)
 	}
 	return s.ConditionalStore.PutIfMatch(ctx, key, r, matchETag)
 }
@@ -62,7 +65,7 @@ func (s *FrozenETagStore) GetETag(ctx context.Context, key string) (*object.GetW
 func (s *FrozenETagStore) PutIfMatch(ctx context.Context, key string, r io.Reader, matchETag string) error {
 	// Accepts the frozen ETag it hands out, so the probe gets past the step
 	// that checks whether If-Match is rejected outright.
-	return s.ConditionalStore.Put(ctx, key, r)
+	return s.Put(ctx, key, r)
 }
 
 // RejectingStore is an object store that refuses conditional writes with a

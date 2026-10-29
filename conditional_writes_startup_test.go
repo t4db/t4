@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -222,5 +223,58 @@ func TestSingleNodeStillStartsOnAStoreWithoutIfMatch(t *testing.T) {
 	// it: the remedy differs, and so does how worried an operator should be.
 	if !log.contains("If-Match is rejected rather than honored") {
 		t.Errorf("warning should say If-Match is rejected; lines: %v", log.lines)
+	}
+}
+
+// plainOnlyStore offers no conditional writes at all, as an embedder's custom
+// object.Store may not. tests/integration's trackingStore is one of these.
+type plainOnlyStore struct {
+	inner object.Store
+}
+
+func (p *plainOnlyStore) Put(ctx context.Context, key string, r io.Reader) error {
+	return p.inner.Put(ctx, key, r)
+}
+func (p *plainOnlyStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	return p.inner.Get(ctx, key)
+}
+func (p *plainOnlyStore) Delete(ctx context.Context, key string) error {
+	return p.inner.Delete(ctx, key)
+}
+func (p *plainOnlyStore) DeleteMany(ctx context.Context, keys []string) error {
+	return p.inner.DeleteMany(ctx, keys)
+}
+func (p *plainOnlyStore) List(ctx context.Context, prefix string) ([]string, error) {
+	return p.inner.List(ctx, prefix)
+}
+
+// A store that offers no conditional writes is the case T4 already handles:
+// election.Lock's own type assertion fails and it uses its unconditional
+// write plus read-back. Refusing it here would break clusters that have been
+// running on a custom Store all along, so this check must leave them alone.
+// It is only a store that offers the preconditions and ignores them that
+// nothing else can see.
+func TestClusterStartsOnAStoreWithNoConditionalWritesAtAll(t *testing.T) {
+	log := &captureLogger{}
+	addr := testutil.FreeAddr(t)
+	n, err := t4.Open(t4.Config{
+		NodeID:            "n1",
+		DataDir:           filepath.Join(t.TempDir(), "db"),
+		ObjectStore:       &plainOnlyStore{inner: object.NewMem()},
+		PeerListenAddr:    addr,
+		AdvertisePeerAddr: addr,
+		Logger:            log,
+	})
+	if err != nil {
+		t.Fatalf("a cluster on a store without conditional writes must still start: %v", err)
+	}
+	defer func() { _ = n.Close() }()
+	if !n.IsLeader() {
+		t.Fatal("node did not become leader")
+	}
+	// Still worth saying out loud: the fallback narrows the split-brain window
+	// rather than closing it.
+	if !log.contains("offers no conditional writes") {
+		t.Errorf("the weaker guarantee should be logged; lines: %v", log.lines)
 	}
 }

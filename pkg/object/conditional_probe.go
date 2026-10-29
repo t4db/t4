@@ -27,6 +27,13 @@ import (
 // ignores the header looks to T4 like one that granted the write. Two nodes
 // racing for the leader lock would then both be told they won it.
 type ConditionalSupport struct {
+	// Offered is false when the store does not provide conditional writes at
+	// all. That case is not this probe's concern: T4 sees it for itself, since
+	// election.Lock's own type assertion fails and it falls back to an
+	// unconditional write with a read-back, and checkpoint.putManifest takes
+	// its plain-write branch. Only a store that offers the preconditions and
+	// does not keep them is invisible without asking.
+	Offered bool
 	// IfNoneMatch is true when a PutIfAbsent to a key that already exists was
 	// refused, as the leader lock and WAL segment uploads need.
 	IfNoneMatch bool
@@ -38,8 +45,10 @@ type ConditionalSupport struct {
 	Detail string
 }
 
-// Enforced reports whether the store enforced both preconditions, which is
-// what a multi-node cluster requires.
+// Enforced reports whether both preconditions were kept, which is what a
+// multi-node cluster requires. It says nothing about a store that offers
+// none: that store reports neither as kept, so callers test Offered first and
+// treat the two cases differently.
 func (c ConditionalSupport) Enforced() bool { return c.IfNoneMatch && c.IfMatch }
 
 // conditionalProbePrefix holds the scratch object the probe writes. The key
@@ -75,11 +84,12 @@ func ProbeConditional(ctx context.Context, store Store, nodeID string) (Conditio
 	if !ok {
 		return ConditionalSupport{Detail: "the store does not offer conditional writes at all"}, nil
 	}
+	// Everything below is about a store that does offer them.
 
 	key := conditionalProbePrefix + probeName(nodeID)
 	// Start from a known-absent key, so step 1 below tests what it means to.
 	if err := store.Delete(ctx, key); err != nil {
-		return ConditionalSupport{}, fmt.Errorf("object: probe: clear %q: %w", key, err)
+		return ConditionalSupport{Offered: true}, fmt.Errorf("object: probe: clear %q: %w", key, err)
 	}
 	defer func() {
 		// Detached from ctx, because the cleanup should still run when ctx
@@ -90,13 +100,13 @@ func ProbeConditional(ctx context.Context, store Store, nodeID string) (Conditio
 		_ = store.Delete(cleanupCtx, key)
 	}()
 
-	var support ConditionalSupport
+	support := ConditionalSupport{Offered: true}
 
 	// 1. Create the key. This must succeed; a store that refuses here is
 	//    telling us nothing about preconditions, so it is an inconclusive
 	//    probe rather than a verdict.
 	if err := cs.PutIfAbsent(ctx, key, bytes.NewReader([]byte("1"))); err != nil {
-		return ConditionalSupport{}, fmt.Errorf("object: probe: create %q: %w", key, err)
+		return ConditionalSupport{Offered: true}, fmt.Errorf("object: probe: create %q: %w", key, err)
 	}
 
 	// 2. Create it again. If-None-Match: * must refuse this.
