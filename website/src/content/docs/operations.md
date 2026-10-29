@@ -55,9 +55,10 @@ one nothing else can detect.
 
 A store that accepts `If-None-Match` or `If-Match` and ignores it is the dangerous case, because the write returns
 success and T4 reads that as having won the race. Two nodes could then serve as leader at once. **Google Cloud Storage
-reached through its S3-compatible XML API does this**: both headers are accepted and neither is honored. GCS's own
-generation preconditions (`--if-generation-match`) are enforced, so the gap is in the S3 shim rather than in GCS — but
-T4 speaks S3, so a GCS S3 endpoint cannot host a T4 cluster. Verify any store you are unsure of the way T4 does:
+reached through its S3-compatible XML API does this**: both headers are accepted and neither is honored. Use
+`--gcs-bucket` instead of `--s3-endpoint https://storage.googleapis.com` — see [Google Cloud Storage](#google-cloud-storage)
+below, which speaks the GCS API, where the preconditions are enforced. Verify any other store you are unsure of the way
+T4 does:
 
 ```bash
 # The second PUT must fail with 412. If it returns an ETag, the store is unsafe
@@ -65,6 +66,33 @@ T4 speaks S3, so a GCS S3 endpoint cannot host a T4 cluster. Verify any store yo
 aws s3api put-object --bucket my-bucket --key probe --body /dev/null --if-none-match '*'
 aws s3api put-object --bucket my-bucket --key probe --body /dev/null --if-none-match '*'
 ```
+
+### Google Cloud Storage
+
+```bash
+t4 run \
+  --data-dir   /var/lib/t4 \
+  --listen     0.0.0.0:3379 \
+  --gcs-bucket my-bucket \
+  --gcs-prefix t4/
+```
+
+`--gcs-bucket` speaks the GCS API rather than the S3-compatible one, which matters: the S3 endpoint accepts the
+conditional writes leader election depends on and ignores them, while GCS's own generation preconditions are enforced.
+A cluster is therefore supported on `--gcs-bucket` and refused on `--s3-endpoint https://storage.googleapis.com`.
+
+`--gcs-bucket` and `--s3-bucket` are mutually exclusive; name one store.
+
+**Credentials** come from [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
+unless `--gcs-credentials-file` points at a service account key. On GKE that means workload identity needs no
+configuration here. This differs from `--s3-profile`, which has to be set before T4 will consult an ambient chain at
+all: on GCP the ambient chain is how a workload is given an identity in the first place.
+
+The bucket needs `storage.objects.{get,list,create,delete}` — the `roles/storage.objectAdmin` role covers it. Enable
+**object versioning** on the bucket only if you use [point-in-time restore](/backup-restore/), as with S3.
+
+`--gcs-endpoint` overrides the endpoint for an emulator. Requests to an overridden endpoint are unauthenticated unless
+`--gcs-credentials-file` is also set, since an emulator has nothing to present a token to.
 
 ### Object-store encryption at rest
 

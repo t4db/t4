@@ -11,7 +11,7 @@ import (
 
 func statusCmd() *cobra.Command {
 	var (
-		s3  *s3Flags
+		s3  *objectStoreFlags
 		enc *objectStoreEncryptionFlags
 	)
 	cmd := &cobra.Command{
@@ -50,7 +50,7 @@ This command does not require a running node — it reads directly from S3.`,
 				return fmt.Errorf("read branch entries: %w", err)
 			}
 
-			fmt.Printf("S3 status  s3://%s/%s\n\n", s3.Bucket, s3.Prefix)
+			fmt.Printf("Object store status  %s\n\n", s3.uri())
 
 			fmt.Printf("Latest checkpoint\n")
 			if manifest == nil {
@@ -77,7 +77,7 @@ This command does not require a running node — it reads directly from S3.`,
 			return nil
 		},
 	}
-	s3 = addS3Flags(cmd, true)
+	s3 = addObjectStoreFlags(cmd, true)
 	enc = addObjectStoreEncryptionFlags(cmd)
 	return cmd
 }

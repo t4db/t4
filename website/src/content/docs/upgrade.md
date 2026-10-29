@@ -21,7 +21,7 @@ These are the failure modes the binary refuses rather than silently corrupting s
 | WAL frame magic / version newer than this binary understands | Startup refuses to replay. Same remedy. |
 | Follower on an earlier release connecting to the leader of a database created with the meta keyspace | The leader refuses the stream with `wal_format_unsupported`. Upgrade the follower. |
 | WAL entry with an op code this binary does not know (local replay, S3 replay, or the leader's peer stream) | Replay or apply is refused. A follower stops replicating and logs an error instead of retrying or attempting a leader takeover; it does not apply the entry. Same remedy. |
-| Object store does not enforce the conditional PUTs leader election needs, and `--peer-listen` is set | Startup refuses with `ErrConditionalWritesIgnored`. Use a store that enforces them, or run a single node. A single node starts with a warning. |
+| Object store does not enforce the conditional PUTs leader election needs, and `--peer-listen` is set | Startup refuses with `ErrConditionalWritesIgnored`. Use a store that enforces them — on GCS that means `--gcs-bucket` rather than the S3-compatible endpoint — or run a single node. A single node starts with a warning. |
 | `manifest/latest` references a checkpoint missing referenced SSTs | Startup error. Recoverable from an earlier checkpoint via `t4 restore`. |
 | Branch registry entry points at a checkpoint older than the safe `format_version` | GC refuses to reclaim. Inspect with `t4 inspect`. |
 
@@ -59,6 +59,28 @@ The meta keyspace is enabled when the database is created, as its first WAL entr
 - **A leader of a new database refuses followers that run an earlier release.** They are turned away with
   `wal_format_unsupported` before any entry is streamed to them. Create new databases only once every node runs this
   release or later.
+
+## Moving off the GCS S3-compatible endpoint
+
+A deployment configured with `--s3-endpoint https://storage.googleapis.com` is on a store that accepts the conditional
+writes leader election depends on and ignores them. Since the release that added the startup check, a **cluster** on that
+configuration refuses to start, so it has to move; a single node starts with a warning and should still move.
+
+Switch to the GCS API, which enforces the preconditions:
+
+```bash
+# before
+--s3-endpoint https://storage.googleapis.com --s3-bucket my-bucket --s3-prefix t4/ \
+  --s3-access-key-id ... --s3-secret-access-key ...
+
+# after
+--gcs-bucket my-bucket --gcs-prefix t4/
+```
+
+The bucket and the object names do not change, so the existing data is read as it stands — no copy or re-upload. What
+changes is how T4 authenticates: Application Default Credentials instead of HMAC keys, or `--gcs-credentials-file` for a
+service account key. The HMAC keys can then be deleted. `--gcs-bucket` and `--s3-bucket` are mutually exclusive, so
+remove the `--s3-*` flags rather than leaving them alongside.
 
 ## Downgrade
 

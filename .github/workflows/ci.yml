@@ -246,6 +246,59 @@ jobs:
         if: failure()
         run: docker logs t4-s3-smoke || true
 
+  gcs-smoke:
+    name: GCS Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # fake-gcs-server was checked against the preconditions T4's leader lock
+      # depends on and enforces all of them; its known gap is conditional
+      # deletes, which T4 never issues. The suite's first assertion is
+      # object.ProbeConditional against it, so a version that stops enforcing
+      # them fails here and says so, rather than letting a split brain through.
+      - name: Start GCS emulator
+        run: |
+          docker run -d --name t4-gcs-smoke \
+            -p 4443:4443 \
+            fsouza/fake-gcs-server:1.56.1 -scheme http -backend memory
+
+          for i in {1..60}; do
+            if curl -fsS -o /dev/null http://127.0.0.1:4443/storage/v1/b; then
+              echo "emulator ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs t4-gcs-smoke
+          exit 1
+
+      - name: Run GCS store tests
+        run: go test -timeout 180s -count=1 ./pkg/object
+        env:
+          T4_GCS_ENDPOINT: http://127.0.0.1:4443
+
+      - name: Run GCS e2e
+        run: go test -timeout 360s -count=1 -run GCS ./tests/e2e
+        env:
+          T4_E2E_GCS: "1"
+          GCS_ENDPOINT: http://127.0.0.1:4443
+
+      - name: Dump GCS emulator logs
+        if: failure()
+        run: docker logs t4-gcs-smoke || true
+
   upgrade-matrix:
     name: Upgrade Matrix
     runs-on: ubuntu-latest

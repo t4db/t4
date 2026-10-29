@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,12 +30,11 @@ import (
 	t4etcd "github.com/t4db/t4/etcd"
 	"github.com/t4db/t4/etcd/auth"
 	"github.com/t4db/t4/internal/metrics"
-	"github.com/t4db/t4/pkg/object"
 )
 
 func runCmd() *cobra.Command {
 	var (
-		s3  *s3Flags
+		s3  *objectStoreFlags
 		enc *objectStoreEncryptionFlags
 
 		dataDir               string
@@ -200,29 +200,28 @@ func runCmd() *cobra.Command {
 				logrus.Info("peer mTLS enabled for node replication")
 			}
 
-			if s3.Bucket != "" {
-				obj, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
+			if s3.configured() {
+				obj, err := s3.newStore(cmd.Context(), "")
 				if err != nil {
-					return fmt.Errorf("init S3: %w", err)
+					return err
 				}
 				cfg.ObjectStore = obj
-				logrus.Infof("using S3 bucket %q prefix %q", s3.Bucket, s3.Prefix)
+				logrus.Infof("using object store %s", s3.uri())
 			} else {
-				logrus.Warn("no S3 bucket configured — durability is local-only")
+				logrus.Warn("no object store configured — durability is local-only")
 			}
 
 			if branchPrefix != "" || branchCheckpoint != "" {
 				if branchCheckpoint == "" {
 					return fmt.Errorf("--branch-checkpoint is required when --branch-prefix is set")
 				}
-				if s3.Bucket == "" {
-					return fmt.Errorf("--s3-bucket is required for a branch node")
+				if !s3.configured() {
+					return fmt.Errorf("--s3-bucket or --gcs-bucket is required for a branch node")
 				}
-				srcCfg := s3.config()
-				srcCfg.Prefix = branchPrefix
-				sourceStore, err := object.NewS3StoreFromConfig(cmd.Context(), srcCfg)
+				// The source lives in the same store under a different prefix.
+				sourceStore, err := s3.newStore(cmd.Context(), branchPrefix)
 				if err != nil {
-					return fmt.Errorf("init branch source S3: %w", err)
+					return fmt.Errorf("branch source: %w", err)
 				}
 				cfg.BranchPoint = &t4.BranchPoint{
 					SourceStore:   sourceStore,
@@ -240,7 +239,7 @@ func runCmd() *cobra.Command {
 			defer node.Close()
 			logrus.WithFields(logrus.Fields{
 				"listen_addr": listenAddr,
-				"mode":        runMode(s3.Bucket, peerListenAddr, branchCheckpoint),
+				"mode":        runMode(storeURIOrEmpty(s3), peerListenAddr, branchCheckpoint),
 				"node_id":     resolvedNodeID(nodeID),
 				"revision":    node.CurrentRevision(),
 			}).Info("t4 node opened")
@@ -325,7 +324,7 @@ func runCmd() *cobra.Command {
 		},
 	}
 
-	s3 = addS3Flags(cmd, false)
+	s3 = addObjectStoreFlags(cmd, false)
 	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&dataDir, "data-dir", "/var/lib/t4", "directory for Pebble data and local WAL segments (env: T4_DATA_DIR)")
 	cmd.Flags().StringVar(&listenAddr, "listen", "0.0.0.0:3379", "gRPC listen address (kine/etcd protocol) (env: T4_LISTEN)")
@@ -427,7 +426,7 @@ func runCmd() *cobra.Command {
 func startupLogFields(
 	dataDir string,
 	listenAddr string,
-	s3 *s3Flags,
+	s3 *objectStoreFlags,
 	readConsistency string,
 	logLevel string,
 	nodeID string,
@@ -457,14 +456,10 @@ func startupLogFields(
 		"data_dir":                      dataDir,
 		"listen_addr":                   listenAddr,
 		"log_level":                     logLevel,
-		"mode":                          runMode(s3.Bucket, peerListenAddr, branchCheckpoint),
+		"mode":                          runMode(storeURIOrEmpty(s3), peerListenAddr, branchCheckpoint),
 		"node_id":                       resolvedNodeID(nodeID),
 		"read_consistency":              readConsistency,
-		"s3_bucket":                     valueOrDisabled(s3.Bucket),
-		"s3_prefix":                     valueOrNone(s3.Prefix),
-		"s3_endpoint":                   valueOrDefault(s3.Endpoint, "aws-default"),
-		"s3_region":                     valueOrDefault(s3.Region, "aws-default"),
-		"s3_credentials":                s3CredentialsMode(s3.AccessKeyID, s3.Profile),
+		"object_store":                  valueOrDisabled(storeURIOrEmpty(s3)),
 		"wal_sync_upload":               resolvedWALSyncUpload(walSyncUpload, peerListenAddr),
 		"peer_listen_addr":              valueOrDisabled(peerListenAddr),
 		"advertise_peer_addr":           resolvedAdvertisePeerAddr(peerListenAddr, advertisePeerAddr),
@@ -482,6 +477,9 @@ func startupLogFields(
 		"auto_compact_sample_interval":  autoCompactSampleInt.String(),
 		"object_store_encryption":       enc.enabled(),
 		"gomaxprocs":                    runtime.GOMAXPROCS(0),
+	}
+	for k, v := range s3.logFields() {
+		fields[k] = v
 	}
 
 	if branchCheckpoint != "" {
@@ -502,13 +500,28 @@ func s3CredentialsMode(accessKeyID, profile string) string {
 	return "default-chain"
 }
 
-func runMode(s3Bucket, peerListenAddr, branchCheckpoint string) string {
+// storeURIOrEmpty is the store's URI, or "" when none is configured. uri()
+// always formats a scheme, so callers that need to distinguish "no store"
+// cannot test its result for emptiness.
+func storeURIOrEmpty(f *objectStoreFlags) string {
+	if !f.configured() {
+		return ""
+	}
+	return f.uri()
+}
+
+// runMode names the shape this process is running in, for the startup log.
+// storeURI is empty when no object store is configured, and otherwise carries
+// the scheme, so a single node reports which store backs it.
+func runMode(storeURI, peerListenAddr, branchCheckpoint string) string {
 	switch {
 	case branchCheckpoint != "":
 		return "branch"
 	case peerListenAddr != "":
 		return "multi-node"
-	case s3Bucket != "":
+	case strings.HasPrefix(storeURI, "gs://"):
+		return "single-node+gcs"
+	case storeURI != "":
 		return "single-node+s3"
 	default:
 		return "single-node"
