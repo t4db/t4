@@ -352,14 +352,23 @@ func TestWatchCreateResponsePrecedesReplayedEvents(t *testing.T) {
 	t.Cleanup(func() { _ = node.Close() })
 	endpoint := startEtcdServer(t, node)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Populating is setup, not what this test asserts, and 256 durable writes
+	// cost seconds on a slow filesystem — enough that sharing one short
+	// deadline with the watch below made the whole test fail on how fast the
+	// disk is rather than on the ordering it checks. Each phase gets its own
+	// budget: generous for the writes, short for the assertion, which still
+	// has to fail rather than hang if the created response never arrives.
+	putCtx, cancelPuts := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancelPuts()
 	for i := 0; i < 256; i++ {
 		key := fmt.Sprintf("/created-first/%03d", i)
-		if _, err := node.Put(ctx, key, []byte("v"), 0); err != nil {
+		if _, err := node.Put(putCtx, key, []byte("v"), 0); err != nil {
 			t.Fatalf("Put(%q): %v", key, err)
 		}
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
