@@ -100,10 +100,83 @@ The updated headline is:
 
 ---
 
+## Collection reads and memory on a CR-heavy keyspace
+
+A Kubernetes cluster holding many custom resources reads whole collections, so
+these are measured separately: 40,000 objects of 4 KiB (≈156 MiB of data),
+listed unpaginated and in 500-key pages.
+
+Run on 2026-10-29 on the host described above, T4 at `fcb731f`.
+
+### Latency
+
+| Workload           | T4 before | T4 now  | etcd    | T4 : etcd |
+|--------------------|-----------|---------|---------|-----------|
+| Unpaginated list   | 860.5 ms  | 261.5 ms | 157.3 ms | 5.49× → 1.66× |
+| One 500-key page   | 9.84 ms   | 6.40 ms | 3.70 ms | 2.64× → 1.73× |
+
+"Before" is `ee298ac`, i.e. without the log-order fetch. etcd measured
+156.2–157.3 ms across three runs, which is what makes the T4 delta readable;
+quote that control whenever these are re-run.
+
+### Memory
+
+| Metric                      | T4 before  | T4 now        | etcd          | T4 : etcd  |
+|-----------------------------|------------|---------------|---------------|------------|
+| Allocated per list          | 1726 MiB   | 454–501 MiB   | 337 MiB       | 1.35–1.49× |
+| Heap in use, idle           | 84.8 MiB   | 83.4 MiB      | 62.5–69.0 MiB | 1.25×      |
+| Obtained from the OS, idle  | 179.2 MiB  | 179.2 MiB     | 82.6–86.6 MiB | 2.12×      |
+| Container resident, idle    | 184.6 MiB  | 185 MiB       | 95.2–97.2 MiB | 1.92×      |
+
+Reproduce with `./bench/memcompare.sh 40000 4096`; the ranges come from
+repeated runs of it. etcd's allocation figure landed within 0.15% across three
+runs, which is the control to check before reading anything into a T4 delta.
+
+Reading a collection allocates **71% less** than it did, which is the same
+change that made it faster: records are read in log order through one iterator
+rather than one point lookup per key. The idle rows are unmoved by that work,
+as they should be — nothing lists anything while the server sits idle — so they
+describe what T4 costs to *hold* 40,000 objects, not to serve them.
+
+**At this object count T4 costs more memory than etcd, on every axis.** Its
+~179 MiB from the OS is close to Pebble's 64 MiB block cache plus its
+memtables (32 MiB each, up to four), which is a floor rather than a function of
+how many objects are stored. etcd's per-key `treeIndex` is only a few MB at
+40,000 keys, so etcd is cheap here and grows from there while T4 stays flat.
+Whether T4 comes out ahead on a large keyspace therefore depends on an object
+count above this one, and **that crossover has not been measured** — do not
+infer it from this row.
+
+> An earlier run reported T4 at 12–15 MiB of heap against etcd's 76 MiB, and
+> 517 MiB allocated per list against etcd's 719 MiB. Neither reproduces, and
+> some of it appears in commit messages from that work. The heap figure is not
+> consistent with Pebble's own cache sizes, so it was most likely sampled
+> before those caches filled; the etcd allocation figure is more than double
+> what two later runs measured to within 0.1%. Prefer the numbers in this
+> section.
+
+### Measuring memory at all
+
+`bench/run.sh` samples container memory once a second. That number moves with
+GC timing, the page cache and the sampling phase: asked twice for a paginated
+read whose page is smaller than the fetch window — identical work either way —
+it answered 381 MiB and 621 MiB. It is fine for spotting an order of magnitude
+and misleading for comparing two builds.
+
+Use `go_memstats_alloc_bytes_total` for that instead. It only ever grows, so it
+is independent of the collector, and `bench/memcompare.sh` reads it either side
+of a known number of reads. Single samples of peak or resident memory have
+produced two wrong conclusions in this file's history; a claim about memory
+wants a cumulative counter, repeated runs, and etcd measured the same way
+alongside as a control.
+
+---
+
 ## Interpretation guide
 
 | Use case                                  | Recommendation                                               |
 |-------------------------------------------|--------------------------------------------------------------|
+| Reading whole collections (many CRs)      | etcd is faster, by ~1.7×, and uses less memory at 40k objects |
 | Single-node write-heavy workloads         | etcd is faster in this run                                   |
 | Single-node read-heavy parallel workloads | T4 is competitive and faster on `par-get`                    |
 | Single-node with remote durability        | T4 works, but synchronous S3 upload has a visible write cost |
@@ -132,3 +205,14 @@ docker build -f bench/Dockerfile    -t t4bench .
 ```
 
 The raw results from the latest run are written to `bench/results/results.jsonl`.
+
+For the collection-read and memory figures above:
+
+```bash
+# Latency, with etcd measured alongside as a control
+BENCH_WORKLOADS="list list-paged" BENCH_TOTAL=40000 BENCH_VAL_SIZE=4096 \
+  ./bench/run.sh single
+
+# Memory, using a cumulative allocation counter rather than sampled RSS
+./bench/memcompare.sh 40000 4096
+```
