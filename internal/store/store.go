@@ -793,19 +793,29 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 	leaseCur := make(map[string]int64)
 	for iter.Last(); iter.Valid(); iter.Prev() {
 		entryRev := decodeLogKey(iter.Key())
-		r, err := unmarshalRecord(iter.Value())
+		// The loop reads a record's key and lease and nothing else, so it
+		// decodes a view into pebble's buffer rather than unmarshalling. The
+		// value in particular is never looked at, and copying every
+		// superseded version of every key in the window — which is what a
+		// first compaction of a large store walks — made the scan's garbage
+		// proportional to the history it was removing.
+		r, err := decodeRecord(iter.Value())
 		if err != nil {
 			return fmt.Errorf("store: compact decode rev=%d: %w", entryRev, err)
 		}
-		if _, ok := seen[r.key]; !ok {
-			seen[r.key] = struct{}{}
+		// Looking a []byte up in a map does not allocate; only the insert
+		// does, so a key costs a string once rather than once per version.
+		if _, ok := seen[string(r.key)]; !ok {
+			seen[string(r.key)] = struct{}{}
 			continue
 		}
 		if err := b.Delete(iter.Key(), pebble.NoSync); err != nil {
 			return fmt.Errorf("store: compact delete rev=%d: %w", entryRev, err)
 		}
-		if err := s.dropStaleLeaseIdx(b, la, leaseCur, r.key, r.lease); err != nil {
-			return err
+		if r.lease > 0 {
+			if err := s.dropStaleLeaseIdx(b, la, leaseCur, string(r.key), r.lease); err != nil {
+				return err
+			}
 		}
 	}
 	if err := iter.Error(); err != nil {
