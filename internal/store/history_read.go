@@ -37,19 +37,36 @@ func (s *Store) undoFromHist(snap pebble.Reader, prefix, fromKey string, rev int
 	return undo, nil
 }
 
+// undoAnchor reads the first change to a key after rev and reports whether the
+// key existed at rev, and whether the undo chain is intact enough to say.
+//
+// This is the one place the rules live, for both the paths that need the
+// record at rev and the paths that only need to know it was there:
+//
+//	prevRev == 0, created  → absent at rev
+//	prevRev == 0, not      → nothing anchors the chain; unwind
+//	prevRev > rev          → by construction the earliest change after rev
+//	                         anchors at or below rev, so this is corruption
+//	otherwise              → live at rev, at revision prevRev
+func undoAnchor(prevRev int64, create bool, rev int64) (existed, ok bool) {
+	if prevRev == 0 {
+		return false, create
+	}
+	if prevRev > rev {
+		return false, false
+	}
+	return true, true
+}
+
 // histStateAt returns the state at rev of the key whose first change after
 // rev is c: nil when c created it, else the record c anchors to.
 func histStateAt(snap pebble.Reader, lk []byte, c histChange, rev int64) (*KeyValue, error) {
-	if c.prevRev == 0 {
-		if !c.create {
-			return nil, errUndoChain
-		}
-		return nil, nil
-	}
-	if c.prevRev > rev {
-		// By construction the earliest change after rev anchors at or
-		// below rev; treat a violation as corruption and unwind.
+	existed, ok := undoAnchor(c.prevRev, c.create, rev)
+	if !ok {
 		return nil, errUndoChain
+	}
+	if !existed {
+		return nil, nil
 	}
 	prev, err := logEntryAt(snap, lk, c.key, c.prevRev)
 	if err != nil || prev == nil {
@@ -68,14 +85,36 @@ func (s *Store) listAtFromHist(prefix string, opts ReadOptions, rev int64) ([]*K
 	return listFromUndo(snap, prefix, opts, undo)
 }
 
+// presenceFromHist is undoFromHist for a count: which keys changed after rev,
+// and whether each was live then, without reading any of their records.
+func (s *Store) presenceFromHist(prefix, fromKey string, rev int64) (map[string]bool, error) {
+	ring := s.hist.Load()
+	if ring == nil {
+		return nil, errUndoChain
+	}
+	merged, ok := ring.changesSince(prefix, fromKey, rev)
+	if !ok {
+		return nil, errUndoChain
+	}
+	present := make(map[string]bool, len(merged))
+	for key, c := range merged {
+		existed, ok := undoAnchor(c.prevRev, c.create, rev)
+		if !ok {
+			return nil, errUndoChain
+		}
+		present[key] = existed
+	}
+	return present, nil
+}
+
 func (s *Store) countAtFromHist(prefix, fromKey string, rev int64) (int64, error) {
-	snap := s.db.NewSnapshot()
-	defer func() { _ = snap.Close() }()
-	undo, err := s.undoFromHist(snap, prefix, fromKey, rev)
+	present, err := s.presenceFromHist(prefix, fromKey, rev)
 	if err != nil {
 		return 0, err
 	}
-	return countFromUndo(snap, prefix, fromKey, undo)
+	snap := s.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+	return countFromPresence(snap, prefix, fromKey, present)
 }
 
 func (s *Store) getAtFromHist(key string, rev int64) (*KeyValue, error) {
@@ -143,15 +182,31 @@ func listFromUndo(snap pebble.Reader, prefix string, opts ReadOptions, undo map[
 	return out, nil
 }
 
-// countFromUndo counts keys live at the pinned revision from the HEAD count
-// plus the undo map: a changed key counted at HEAD is removed, a changed key
-// present at the revision is added.
-func countFromUndo(snap pebble.Reader, prefix, fromKey string, undo map[string]*KeyValue) (int64, error) {
+// countFromPresence counts keys live at the pinned revision from the HEAD
+// count plus which changed keys were there: a changed key counted at HEAD is
+// removed, a changed key present at the revision is added.
+//
+// A count only needs that one bit per changed key, and undoAnchor answers it
+// from the change alone. Building the records instead — which is what this
+// took before, through histStateAt or undoAfter — read one log entry per
+// changed key and copied its whole value only to test the result against nil.
+// For a txn-written record that lookup also missed logKey(rev) and fell back
+// to scanning every sub-op at that revision, so the cost per changed key grew
+// with the size of the transaction that wrote it. A pinned CountOnly over 5000
+// keys with 500 changed since the pin took 11.9ms against 0.26ms at HEAD.
+//
+// The bit this gives up with the records: a prevRev the log has no entry for
+// used to surface as errUndoChain and send the caller down the slower path,
+// and now goes unnoticed, leaving a count one out. Compaction keeps the
+// anchored version (see undoAfter), so that state is corruption rather than
+// something a healthy store reaches, and every path that reads values still
+// checks it.
+func countFromPresence(snap pebble.Reader, prefix, fromKey string, present map[string]bool) (int64, error) {
 	n, err := countCurrentFrom(snap, prefix, fromKey)
 	if err != nil {
 		return 0, err
 	}
-	for key, kv := range undo {
+	for key, existed := range present {
 		cur, err := idxRevFrom(snap, key)
 		if err != nil {
 			return 0, err
@@ -159,7 +214,7 @@ func countFromUndo(snap pebble.Reader, prefix, fromKey string, undo map[string]*
 		if cur != 0 {
 			n--
 		}
-		if kv != nil {
+		if existed {
 			n++
 		}
 	}

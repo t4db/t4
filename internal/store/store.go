@@ -1327,21 +1327,73 @@ func (s *Store) nearHead(rev int64) bool {
 // its newest one at or before the compaction revision, and rev is at or
 // above it.
 func undoAfter(snap pebble.Reader, prefix, fromKey string, rev int64, match func(string) bool) (map[string]*KeyValue, error) {
+	undo := make(map[string]*KeyValue)
+	lk := make([]byte, logKeyScratchSize)
+	err := scanChangesAfter(snap, prefix, fromKey, rev, match, func(key string, prevRev int64, create bool) error {
+		existed, ok := undoAnchor(prevRev, create, rev)
+		if !ok {
+			return errUndoChain
+		}
+		if !existed {
+			undo[key] = nil
+			return nil
+		}
+		prev, err := logEntryAt(snap, lk, key, prevRev)
+		if err != nil || prev == nil {
+			return errUndoChain
+		}
+		undo[key] = prev
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return undo, nil
+}
+
+// presenceAfter is undoAfter for a count: which keys changed after rev, and
+// whether each was live then, without reading any of their records. See
+// countFromPresence for why a count needs no more than that.
+func presenceAfter(snap pebble.Reader, prefix, fromKey string, rev int64, match func(string) bool) (map[string]bool, error) {
+	present := make(map[string]bool)
+	err := scanChangesAfter(snap, prefix, fromKey, rev, match, func(key string, prevRev int64, create bool) error {
+		existed, ok := undoAnchor(prevRev, create, rev)
+		if !ok {
+			return errUndoChain
+		}
+		present[key] = existed
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return present, nil
+}
+
+// scanChangesAfter visits the first change after rev to each key matching
+// prefix, fromKey and match, which is the change that records where the key
+// stood at rev.
+func scanChangesAfter(
+	snap pebble.Reader,
+	prefix, fromKey string,
+	rev int64,
+	match func(string) bool,
+	visit func(key string, prevRev int64, create bool) error,
+) error {
 	iter, err := snap.NewIter(&pebble.IterOptions{LowerBound: logKey(rev + 1), UpperBound: logUpper})
 	if err != nil {
-		return nil, fmt.Errorf("store: undo scan iter: %w", err)
+		return fmt.Errorf("store: undo scan iter: %w", err)
 	}
 	defer func() { _ = iter.Close() }()
 
-	undo := make(map[string]*KeyValue)
-	lk := make([]byte, 9)
+	seen := make(map[string]struct{})
 	for iter.First(); iter.Valid(); iter.Next() {
 		r, err := decodeRecord(iter.Value())
 		if err != nil {
-			return nil, err
+			return err
 		}
 		// Filter on the aliased key bytes; the comparisons don't allocate.
-		if _, seen := undo[string(r.key)]; seen || len(r.key) < len(prefix) ||
+		if _, ok := seen[string(r.key)]; ok || len(r.key) < len(prefix) ||
 			string(r.key[:len(prefix)]) != prefix || string(r.key) < fromKey {
 			continue
 		}
@@ -1349,23 +1401,12 @@ func undoAfter(snap pebble.Reader, prefix, fromKey string, rev int64, match func
 		if match != nil && !match(key) {
 			continue
 		}
-		if r.prevRevision == 0 {
-			if !r.create {
-				return nil, errUndoChain
-			}
-			undo[key] = nil
-			continue
+		seen[key] = struct{}{}
+		if err := visit(key, r.prevRevision, r.create); err != nil {
+			return err
 		}
-		if r.prevRevision > rev {
-			return nil, errUndoChain
-		}
-		prev, err := logEntryAt(snap, lk, key, r.prevRevision)
-		if err != nil || prev == nil {
-			return nil, errUndoChain
-		}
-		undo[key] = prev
 	}
-	return undo, iter.Error()
+	return iter.Error()
 }
 
 func (s *Store) getAtFromHead(key string, rev int64) (*KeyValue, error) {
@@ -1410,11 +1451,11 @@ func (s *Store) countAtFromHead(prefix, fromKey string, rev int64) (int64, error
 	snap := s.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	undo, err := undoAfter(snap, prefix, fromKey, rev, nil)
+	present, err := presenceAfter(snap, prefix, fromKey, rev, nil)
 	if err != nil {
 		return 0, err
 	}
-	return countFromUndo(snap, prefix, fromKey, undo)
+	return countFromPresence(snap, prefix, fromKey, present)
 }
 
 func (s *Store) getAtRevision(key string, targetRev int64) (*KeyValue, error) {
