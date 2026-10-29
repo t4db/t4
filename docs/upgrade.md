@@ -16,6 +16,7 @@ These are the failure modes the binary refuses rather than silently corrupting s
 |---|---|
 | Checkpoint `format_version` newer than this binary understands | Startup refuses to restore. Operator must roll the binary forward. |
 | WAL frame magic / version newer than this binary understands | Startup refuses to replay. Same remedy. |
+| Object store does not enforce the conditional PUTs leader election needs, and `--peer-listen` is set | Startup refuses with `ErrConditionalWritesIgnored`. Use a store that enforces them, or run a single node. A single node starts with a warning. |
 | `manifest/latest` references a checkpoint missing referenced SSTs | Startup error. Recoverable from an earlier checkpoint via `t4 restore`. |
 | Branch registry entry points at a checkpoint older than the safe `format_version` | GC refuses to reclaim. Inspect with `t4 inspect`. |
 

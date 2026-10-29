@@ -336,6 +336,74 @@ func applyObjectStoreEncryption(cfg *Config) error {
 // waits for the object store at startup before starting without it.
 const startupObjectStoreProbeTimeout = 15 * time.Second
 
+// conditionalProbeTimeout bounds the conditional-write probe. It is a handful
+// of small round trips, and a store slow enough to exceed this leaves the
+// question unanswered rather than answered badly.
+const conditionalProbeTimeout = 30 * time.Second
+
+// ErrConditionalWritesIgnored is returned by Open when the object store does
+// not enforce the conditional writes a cluster's leader election depends on.
+// It is returned only for a multi-node configuration, and only when the store
+// was observed to ignore or reject a precondition, never when the probe could
+// not reach a conclusion.
+var ErrConditionalWritesIgnored = errors.New("t4: the object store does not enforce conditional writes")
+
+// checkConditionalWrites refuses a cluster whose object store would not keep
+// two leaders apart.
+//
+// A single node is left running with a warning. It is the only writer of its
+// own lock and manifest, so nothing races it for them, and refusing to start
+// would take down a working deployment over a guarantee it is not relying on.
+// What it does lose is the promise that a WAL segment already in the store is
+// never overwritten, which is why this is loud rather than silent.
+func checkConditionalWrites(cfg Config, log Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), conditionalProbeTimeout)
+	defer cancel()
+
+	support, err := object.ProbeConditional(ctx, cfg.ObjectStore, cfg.NodeID)
+	if err != nil {
+		// Unknown, not unsafe: a probe that could not run says nothing about
+		// the store, and failing startup on it would make an object-store
+		// hiccup an outage.
+		log.Warnf("t4: could not check whether the object store enforces conditional writes (%v); "+
+			"continuing. A store that accepts If-None-Match or If-Match and ignores them cannot keep "+
+			"two leaders apart — see the object-store requirements in the operations guide", err)
+		return nil
+	}
+	// A store that offers no conditional writes is not what this check is for.
+	// election.Lock detects that itself and uses its unconditional fallback,
+	// and refusing here would stop an embedder's custom Store from running a
+	// cluster it has been running all along. Say that the safety the lock
+	// normally has is absent, and leave the decision where it was.
+	if !support.Offered {
+		if cfg.PeerListenAddr != "" {
+			log.Warnf("t4: the object store offers no conditional writes (%s), so leader election "+
+				"falls back to an unconditional write and a read-back. That narrows the window for "+
+				"two leaders rather than closing it — see the object-store requirements in the "+
+				"operations guide", support.Detail)
+		} else {
+			log.Debugf("t4: the object store offers no conditional writes (%s); a single node does "+
+				"not need them", support.Detail)
+		}
+		return nil
+	}
+	if support.Enforced() {
+		return nil
+	}
+
+	if cfg.PeerListenAddr != "" {
+		return fmt.Errorf("%w: %s. Leader election cannot be made safe on this store: T4 reads the "+
+			"lock and writes it back conditionally, so a store that does not refuse the write reports "+
+			"a race as a win and two nodes can serve as leader at once. Use a store that enforces "+
+			"conditional PUTs, or run a single node (without --peer-listen)",
+			ErrConditionalWritesIgnored, support.Detail)
+	}
+	log.Warnf("t4: the object store does not enforce conditional writes: %s. This single node is the "+
+		"only writer of its lock and manifest, so it starts anyway, but a WAL segment already in the "+
+		"store may be overwritten, and this store cannot host a multi-node cluster", support.Detail)
+	return nil
+}
+
 // Open creates and starts a Node.
 func Open(cfg Config) (*Node, error) {
 	cfg.setDefaults()
@@ -393,6 +461,19 @@ func Open(cfg Config) (*Node, error) {
 				log.Errorf("t4: object store unreachable at startup (%v); starting from local data only. "+
 					"Entries the object store holds beyond local data, if any, are not replayed", perr)
 			}
+		}
+	}
+
+	// The leader lock's atomicity rests entirely on the object store enforcing
+	// the preconditions T4 sends: election.Lock reads the lock and writes it
+	// back with If-None-Match: * or If-Match: <etag>, and treats a write that
+	// was not refused as having won the election. Whether a store honors those
+	// headers is not something its Go type can answer — an S3 client satisfies
+	// object.ConditionalStore whatever the server behind it does — so ask the
+	// store before trusting it with the election.
+	if cfg.ObjectStore != nil && !objectStoreDown {
+		if err := checkConditionalWrites(cfg, log); err != nil {
+			return nil, err
 		}
 	}
 
