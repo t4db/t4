@@ -2,10 +2,17 @@ package object_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -316,8 +323,7 @@ func TestGCSResumableSendsExactContentRanges(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			object.SetGCSChunkSizeForTest(t, 4)
-			var f *fakeGCS
-			f = newFakeGCS(t, nil)
+			f := newFakeGCS(t, nil)
 			f.handler = func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodPost {
 					w.Header().Set("Location", f.server.URL+"/upload-session")
@@ -366,8 +372,7 @@ func TestGCSResumableSendsExactContentRanges(t *testing.T) {
 func TestGCSPicksTheUploadShapeBySize(t *testing.T) {
 	t.Run("at or above the chunk size is resumable", func(t *testing.T) {
 		object.SetGCSChunkSizeForTest(t, 4)
-		var f *fakeGCS
-		f = newFakeGCS(t, nil)
+		f := newFakeGCS(t, nil)
 		f.handler = func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost {
 				w.Header().Set("Location", f.server.URL+"/upload-session")
@@ -406,4 +411,91 @@ func TestGCSPicksTheUploadShapeBySize(t *testing.T) {
 			t.Errorf("uploadType=%v, want [media] for a small object", u)
 		}
 	})
+}
+
+// A credentials file is loaded as a service account and nothing else, which is
+// what --gcs-credentials-file documents. The unconstrained loader is deprecated
+// for exactly this reason: it will accept whatever type the file claims to be,
+// including an external-account configuration that names a URL to fetch a token
+// from.
+func TestGCSCredentialsFileMustBeAServiceAccount(t *testing.T) {
+	write := func(t *testing.T, contents string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "creds.json")
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write credentials: %v", err)
+		}
+		return path
+	}
+
+	t.Run("a service account key is accepted", func(t *testing.T) {
+		_, err := object.NewGCSStoreFromConfig(context.Background(), object.GCSConfig{
+			Bucket:          "b",
+			CredentialsFile: write(t, serviceAccountJSON(t)),
+		})
+		if err != nil {
+			t.Fatalf("a service account key should load: %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		json string
+	}{
+		{"an authorized user", `{"type":"authorized_user","client_id":"x","client_secret":"y","refresh_token":"z"}`},
+		{"an external account", `{"type":"external_account","audience":"//iam.googleapis.com/x","subject_token_type":"urn:ietf:params:oauth:token-type:jwt","token_url":"https://sts.googleapis.com/v1/token","credential_source":{"url":"http://169.254.169.254/token"}}`},
+		{"no type at all", `{"client_email":"a@b.com"}`},
+	} {
+		t.Run(tc.name+" is refused", func(t *testing.T) {
+			_, err := object.NewGCSStoreFromConfig(context.Background(), object.GCSConfig{
+				Bucket:          "b",
+				CredentialsFile: write(t, tc.json),
+			})
+			if err == nil {
+				t.Fatalf("%s must not be loaded from --gcs-credentials-file", tc.name)
+			}
+			if !strings.Contains(err.Error(), "service account") {
+				t.Errorf("err=%v, should say a service account key was expected", err)
+			}
+		})
+	}
+
+	t.Run("a missing file is reported as such", func(t *testing.T) {
+		_, err := object.NewGCSStoreFromConfig(context.Background(), object.GCSConfig{
+			Bucket:          "b",
+			CredentialsFile: filepath.Join(t.TempDir(), "absent.json"),
+		})
+		if err == nil {
+			t.Fatal("want an error for a missing credentials file")
+		}
+		if !strings.Contains(err.Error(), "read credentials file") {
+			t.Errorf("err=%v, should say the file could not be read", err)
+		}
+	})
+}
+
+// serviceAccountJSON builds a syntactically valid service account key, with a
+// real RSA key so the loader's PEM parsing is satisfied. Nothing signs with it.
+func serviceAccountJSON(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	doc := map[string]string{
+		"type":         "service_account",
+		"project_id":   "t4-test",
+		"private_key":  string(pemBytes),
+		"client_email": "t4@t4-test.iam.gserviceaccount.com",
+		"token_uri":    "https://oauth2.googleapis.com/token",
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal credentials: %v", err)
+	}
+	return string(encoded)
 }

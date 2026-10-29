@@ -146,9 +146,15 @@ func gcsCredentials(ctx context.Context, cfg GCSConfig) (oauth2.TokenSource, err
 		if err != nil {
 			return nil, fmt.Errorf("object/gcs: read credentials file: %w", err)
 		}
-		creds, err := google.CredentialsFromJSON(ctx, data, gcsScope)
+		// Constrained to a service account, which is what the flag documents.
+		// The unconstrained CredentialsFromJSON is deprecated precisely
+		// because it will load whatever type the file claims to be —
+		// an external-account configuration, for instance, which names a URL
+		// to fetch a token from. Naming the type refuses anything else
+		// outright rather than trusting the file to be what it should.
+		creds, err := google.CredentialsFromJSONWithType(ctx, data, google.ServiceAccount, gcsScope)
 		if err != nil {
-			return nil, fmt.Errorf("object/gcs: parse credentials file: %w", err)
+			return nil, fmt.Errorf("object/gcs: parse credentials file (expected a service account key): %w", err)
 		}
 		return creds.TokenSource, nil
 	}
