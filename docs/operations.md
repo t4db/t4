@@ -31,6 +31,30 @@ segment already in the store is never overwritten. Multi-node clusters also requ
 for `manifest/latest`. A single node is the only writer of its manifest, so it does not use `If-Match` and runs on
 stores without it, such as older radosgw releases.
 
+**Supporting the headers is not the same as enforcing them.** T4 checks at startup, with a short write test against a
+scratch object under `.t4-conditional-probe/`, because nothing about a store's endpoint or client type predicts the
+answer:
+
+| The store | T4 |
+|---|---|
+| Enforces both | starts normally |
+| Rejects `If-Match` and keeps `If-None-Match` (older radosgw) | starts a single node; refuses a cluster |
+| Accepts a precondition and ignores it | starts a single node with a warning; **refuses a cluster** |
+| Cannot be probed (store unreachable, prefix not writable) | starts, and logs what it could not determine |
+
+A store that accepts `If-None-Match` or `If-Match` and ignores it is the dangerous case, because the write returns
+success and T4 reads that as having won the race. Two nodes could then serve as leader at once. **Google Cloud Storage
+reached through its S3-compatible XML API does this**: both headers are accepted and neither is honored. GCS's own
+generation preconditions (`--if-generation-match`) are enforced, so the gap is in the S3 shim rather than in GCS — but
+T4 speaks S3, so a GCS S3 endpoint cannot host a T4 cluster. Verify any store you are unsure of the way T4 does:
+
+```bash
+# The second PUT must fail with 412. If it returns an ETag, the store is unsafe
+# for a multi-node cluster.
+aws s3api put-object --bucket my-bucket --key probe --body /dev/null --if-none-match '*'
+aws s3api put-object --bucket my-bucket --key probe --body /dev/null --if-none-match '*'
+```
+
 ### Object-store encryption at rest
 
 Enable client-side encryption for all T4 object-store data with a 32-byte AES-256 key:

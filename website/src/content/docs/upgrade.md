@@ -21,6 +21,7 @@ These are the failure modes the binary refuses rather than silently corrupting s
 | WAL frame magic / version newer than this binary understands | Startup refuses to replay. Same remedy. |
 | Follower on an earlier release connecting to the leader of a database created with the meta keyspace | The leader refuses the stream with `wal_format_unsupported`. Upgrade the follower. |
 | WAL entry with an op code this binary does not know (local replay, S3 replay, or the leader's peer stream) | Replay or apply is refused. A follower stops replicating and logs an error instead of retrying or attempting a leader takeover; it does not apply the entry. Same remedy. |
+| Object store does not enforce the conditional PUTs leader election needs, and `--peer-listen` is set | Startup refuses with `ErrConditionalWritesIgnored`. Use a store that enforces them, or run a single node. A single node starts with a warning. |
 | `manifest/latest` references a checkpoint missing referenced SSTs | Startup error. Recoverable from an earlier checkpoint via `t4 restore`. |
 | Branch registry entry points at a checkpoint older than the safe `format_version` | GC refuses to reclaim. Inspect with `t4 inspect`. |
 

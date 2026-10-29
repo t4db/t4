@@ -10,7 +10,7 @@ change between minor releases.
 The exported `github.com/t4db/t4` package API is stable across v1.x, including:
 
 - `Open`, `Node`, `Config`, `KeyValue`, `Event`, watch options, transaction types, restore and branch types.
-- Public errors: `ErrKeyExists`, `ErrNotLeader`, `ErrClosed`, and `ErrCompacted`.
+- Public errors: `ErrKeyExists`, `ErrNotLeader`, `ErrClosed`, `ErrCompacted`, and `ErrConditionalWritesIgnored`.
 - Public enum/string constants for read consistency, follower wait mode, transaction conditions, transaction operations,
   and event types.
 
