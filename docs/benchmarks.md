@@ -140,12 +140,54 @@ describe what T4 costs to *hold* 40,000 objects, not to serve them.
 
 **At this object count T4 costs more memory than etcd, on every axis.** Its
 ~179 MiB from the OS is close to Pebble's 64 MiB block cache plus its
-memtables (32 MiB each, up to four), which is a floor rather than a function of
-how many objects are stored. etcd's per-key `treeIndex` is only a few MB at
-40,000 keys, so etcd is cheap here and grows from there while T4 stays flat.
-Whether T4 comes out ahead on a large keyspace therefore depends on an object
-count above this one, and **that crossover has not been measured** — do not
-infer it from this row.
+memtables (32 MiB each, up to four): a floor, rather than a function of how
+many objects are stored. etcd's per-key `treeIndex` is only a few MB at 40,000
+keys, so etcd is cheap here and grows from there while T4 stays flat.
+
+Which means 40,000 objects is the wrong place to ask the question. See the
+sweep below: the two cross at roughly 290,000 objects, and this row is on the
+side of that where etcd wins.
+
+### Where the two cross
+
+Idle memory against object count, 256-byte values, from
+`./bench/indexsweep.sh`:
+
+| Objects   | T4 heap | T4 sys | T4 container | etcd heap | etcd sys | etcd container |
+|-----------|---------|--------|--------------|-----------|----------|----------------|
+| 100,000   | 103.3   | 151.7  | 151.7        | 46.7      | 70.7     | 75.5           |
+| 300,000   | 133.8   | 180.0  | 173.4        | 125.2     | 161.4    | 170.2          |
+| 600,000   | 124.5   | 184.0  | 180.4        | 208.3     | 289.1    | 311.6          |
+| 1,000,000 | 135.0   | 184.0  | 182.9        | 343.3     | 486.3    | 508.2          |
+
+All MiB. Values are small on purpose: both stores' per-key costs are
+independent of value size, while the data is not, and at 4 KiB a million
+objects would not fit in the containers' 4 GiB. Take the slope from here and
+the floor from the table above.
+
+T4 is flat — 151.7 to 182.9 MiB across nine times the objects — and plateaus
+near 184 MiB as Pebble's cache and memtables fill. etcd rises by about **480
+bytes per key**. Fitting etcd as `50 + 0.000458 × keys` MiB against T4's flat
+184 puts the crossover at **~290,000 objects**, which is where the 300,000 row
+has them level.
+
+| Cluster size        | Cheaper store                    |
+|---------------------|----------------------------------|
+| Under ~290k objects | etcd, by up to 2× at 100k        |
+| Around ~290k        | no meaningful difference         |
+| Over ~290k          | T4, by 1.7× at 600k and 2.8× at 1M |
+
+This is the structural difference doing what it should: T4 keeps no permanent
+per-key index, so a keyspace it can serve from a bounded cache costs bounded
+memory, while etcd's in-memory index grows with every key. It also means a
+memory comparison at a single object count is close to meaningless — this
+file has twice reported a winner from one point and had to take it back.
+
+Lowering T4's floor moves the crossover down, and the floor is Pebble's block
+cache plus its memtables. `Config.PebbleOptions` can already change both, but
+nothing on the `t4 run` command line reaches it, so a deployment cannot. On
+the fit above, a 100 MiB floor would cross at ~110k objects and an 80 MiB one
+at ~65k.
 
 > An earlier run reported T4 at 12–15 MiB of heap against etcd's 76 MiB, and
 > 517 MiB allocated per list against etcd's 719 MiB. Neither reproduces, and
@@ -176,7 +218,9 @@ alongside as a control.
 
 | Use case                                  | Recommendation                                               |
 |-------------------------------------------|--------------------------------------------------------------|
-| Reading whole collections (many CRs)      | etcd is faster, by ~1.7×, and uses less memory at 40k objects |
+| Reading whole collections (many CRs)      | etcd is faster by ~1.7×; on memory it depends on object count |
+| Under ~290k objects                       | etcd uses less memory, by up to 2× at 100k                   |
+| Over ~290k objects                        | T4 uses less memory, by 1.7× at 600k and 2.8× at 1M          |
 | Single-node write-heavy workloads         | etcd is faster in this run                                   |
 | Single-node read-heavy parallel workloads | T4 is competitive and faster on `par-get`                    |
 | Single-node with remote durability        | T4 works, but synchronous S3 upload has a visible write cost |
@@ -213,6 +257,9 @@ For the collection-read and memory figures above:
 BENCH_WORKLOADS="list list-paged" BENCH_TOTAL=40000 BENCH_VAL_SIZE=4096 \
   ./bench/run.sh single
 
-# Memory, using a cumulative allocation counter rather than sampled RSS
+# Memory floor at a realistic value size
 ./bench/memcompare.sh 40000 4096
+
+# How that scales with object count, which is what decides the comparison
+./bench/indexsweep.sh 256 100000 300000 600000 1000000
 ```
