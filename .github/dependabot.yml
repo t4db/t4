@@ -5,6 +5,9 @@ updates:
     directories:
       - "/"
       - "/tests/apiserver/testserver"
+      # Replaces github.com/t4db/t4 with ../.., so a root bump leaves its
+      # go.mod stale unless it is updated in the same pass.
+      - "/tests/etcddiff"
     schedule:
       interval: "weekly"
       day: "monday"

@@ -34,6 +34,43 @@ jobs:
       - name: Check generated docs are up to date
         run: git diff --exit-code -- docs/configuration.md website/src/content/docs/configuration.md
 
+  modules-tidy:
+    name: Check Modules Tidy
+    runs-on: ubuntu-latest
+
+    # The repository holds four modules, and tests/etcddiff replaces
+    # github.com/t4db/t4 with ../.., so the root module's requirement list is
+    # part of its build list: bumping a root dependency leaves its go.mod and
+    # go.sum stale. `go test` then refuses to run at all, which surfaces as a
+    # failure in whichever job happens to build that module rather than as the
+    # missing tidy it is. Check every module here instead.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Tidy every module
+        run: |
+          set -euo pipefail
+          # Fed by process substitution rather than a pipe, so the loop body
+          # runs in this shell and a failing tidy fails the step.
+          while IFS= read -r -d '' mod; do
+            dir="$(dirname "$mod")"
+            echo "::group::go mod tidy $dir"
+            (cd "$dir" && go mod tidy)
+            echo "::endgroup::"
+          done < <(find . -name go.mod -not -path '*/node_modules/*' -print0)
+
+      - name: Check every module is tidy
+        run: |
+          if ! git diff --exit-code -- '*go.mod' '*go.sum'; then
+            echo "::error::a go.mod or go.sum is not tidy; run 'go mod tidy' in the module shown above"
+            exit 1
+          fi
+
   test-unit:
     name: Test Unit (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
