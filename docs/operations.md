@@ -1199,39 +1199,72 @@ Use `t4 status` to check current checkpoint and WAL segment counts before and af
 
 ## Upgrades and compatibility
 
+For the operator procedure, see [Upgrade and Downgrade](upgrade.md). This section covers the on-disk format versions
+those procedures turn on.
+
 ### WAL format versioning
 
-Each WAL segment file begins with a 4-byte magic header `"T4\x01\n"`. The third byte (`\x01`) is the **WAL format
-version** (currently 1). Readers verify the full magic string on open; a format change bumps this byte, causing old
-readers to reject new segments with a clear error rather than silently misinterpreting them.
+Each WAL segment file begins with a 4-byte magic header whose third byte is the **WAL format version**. Readers verify
+the full magic string on open, so a segment in a format the binary does not know is rejected with a clear error rather
+than silently misinterpreted.
 
-**Current: WAL format version 1.** Entry wire format: CRC32C-framed records with big-endian fixed-width fields (see
-`internal/wal/entry.go`).
+| Format | Magic        | Change                                                                                     |
+|-------:|--------------|--------------------------------------------------------------------------------------------|
+|    `1` | `"T4\x01\n"` | Original format: CRC32C-framed entries with big-endian fixed-width fields.                 |
+|    `2` | `"T4\x02\n"` | Entries carry a WAL sequence ID separate from the revision, plus an etcd-style version.    |
+|    `3` | `"T4\x03\n"` | Same entry layout as `2`; the segment may contain meta-keyspace ops, alone or in a txn.    |
+
+**Current: WAL format version 3.** Writers open every segment at format 2 and raise the header to 3 in place, just
+before appending the first entry that needs it — a format-3 payload is byte-identical to format 2, so the version is
+purely a fence for readers. A segment that never carries a meta op stays at format 2 and remains readable by earlier
+releases. This binary reads formats 1 through 3. See `internal/wal/segment.go` and `internal/wal/entry.go`.
 
 ### Checkpoint format versioning
 
-Checkpoint manifests and index files are JSON. Both include a `format_version` field (integer, omitempty). The current
-version is **1**. Older nodes that do not know this field treat it as version 0 (the original format) — identical to
-version 1.
+Checkpoint manifests and index files are JSON. Both carry a `format_version` field (integer, `omitempty`); older nodes
+that do not know the field treat it as version 0, which is identical to version 1.
 
-When a node reads a manifest or index with `format_version` higher than it knows, it rejects the checkpoint with a clear
-upgrade-required error. A future incompatible change will increment `format_version` and require the old nodes to be
-upgraded before they can read new checkpoints.
+| Format | Written when                                                                                                |
+|-------:|-------------------------------------------------------------------------------------------------------------|
+|    `1` | The Pebble state holds no meta keyspace.                                                                     |
+|    `2` | The meta keyspace is non-empty. A binary predating it would restore without that state, so it must refuse.    |
+
+**Current: checkpoint format version 2.** The writer picks the *lowest* format that can represent the checkpoint
+(`Node.checkpointFormat` in `leader.go`), so a database without the meta keyspace keeps writing `format_version=1` and
+stays readable by earlier releases. A node that reads a manifest or index with a `format_version` above what it knows
+refuses the checkpoint with an upgrade-required error instead of restoring partial state.
 
 **Compatibility rule:** adding new JSON fields with `omitempty` is always backward-compatible. Only structural changes
 that alter how existing fields are interpreted require a version bump.
 
+### Which formats a database uses
+
+Both fences above are reached only through the meta keyspace, and that is settled once, when the database is created
+(`initMetaAtGenesis` in `meta.go`). Opening an existing database never enables it.
+
+| Database created by | Lease and auth state | WAL segments | Checkpoints | Downgradeable |
+|---|---|---|---|---|
+| An earlier release | revisioned keys | format 2 | `format_version=1` | yes |
+| This release | meta keyspace | format 3 | `format_version=2` | no |
+
+A leader of a database with the meta keyspace also refuses followers running an earlier release, with
+`wal_format_unsupported`, before streaming any entry to them. Create a new database only once every node runs this
+release or later.
+
 ### Rolling upgrade
 
-A rolling upgrade replaces nodes one at a time without cluster downtime.
+A rolling upgrade replaces nodes one at a time without cluster downtime. The full procedure, including which node to
+take first and how to hand over leadership, is in
+[Upgrade and Downgrade](upgrade.md#rolling-upgrade-cluster). What matters for the formats:
 
 ```
 cluster state: [old, old, old]
 
 1. Add a new node (same S3 prefix, new binary):
    cluster: [old, old, old, new]
-   — new node reads old checkpoints (format_version absent → treated as v1 ✓)
-   — new node writes format_version=1 (old nodes ignore the field ✓)
+   — the new node reads the old checkpoints (format_version absent → treated as 1 ✓)
+   — the new node keeps writing format_version=1, because an existing database has
+     no meta keyspace, so the old nodes keep reading its checkpoints ✓
 
 2. Transfer leadership to the new node (close one old leader or wait for natural failover).
    cluster: [old, old, new(leader), new]
@@ -1255,21 +1288,35 @@ kill -TERM <pid-B>
 kill -TERM <pid-C>
 ```
 
-After the last old node is stopped, all writes go through the new binary and all new checkpoints carry
-`format_version=1`.
+Upgrading an existing cluster this way moves neither format: the database was created by an earlier release, so after
+every node is new it still writes format-2 segments and `format_version=1` checkpoints. Only a database created *after*
+the upgrade uses formats 3 and 2.
 
 ### Downgrade path
 
-A downgrade is safe as long as no checkpoint with `format_version > 1` has been written by the new binary.
+A downgrade is safe while the new binary has written no WAL segment and no checkpoint in a format the old binary does
+not understand. For a database created by an earlier release that holds automatically, since its formats do not move.
+For one created by the new release it is not possible — the old binary refuses both its segments and its checkpoints.
+
+Neither `t4 restore list` nor `t4 inspect meta` reports a format version, so check the bytes directly. The checkpoint
+format is in the manifest:
 
 ```bash
-# Replace new nodes with old binary, one at a time — same procedure as upgrade.
-# Verify no format_version > 1 checkpoint exists first:
-t4 restore list --s3-bucket my-bucket --s3-prefix t4/
+# Absent or 1 → downgradeable. 2 → the database has the meta keyspace.
+aws s3 cp s3://my-bucket/t4/manifest/latest - | jq '.format_version // 1'
 ```
 
-If a new format version was introduced (e.g., format_version=2), downgrade to the old binary requires restoring from the
-last format_version=1 checkpoint instead of the latest one.
+The WAL format is the third byte of each segment header:
+
+```bash
+for f in /var/lib/t4/wal/*.wal; do
+  printf '%s format %d\n' "$(basename "$f")" \
+    "$(dd if="$f" bs=1 skip=2 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')"
+done
+```
+
+[Upgrade and Downgrade](upgrade.md#downgrade) carries the full pre-downgrade checklist, including the branch registry
+entries that pin an ancestor checkpoint's format.
 
 ---
 

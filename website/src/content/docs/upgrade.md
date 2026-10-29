@@ -65,11 +65,20 @@ A downgrade to an older v1.x release is **best-effort**, not guaranteed. The new
 
 Check these before downgrading:
 
-1. Has the cluster written a new checkpoint since the upgrade?
+1. Is the latest checkpoint in a format the older binary understands? Neither `t4 restore list` nor `t4 inspect meta`
+   reports a format version, so read it from the manifest:
    ```bash
-   t4 inspect meta --data-dir /var/lib/t4
+   # Absent or 1 → the older binary can restore it. 2 → it will refuse.
+   aws s3 cp s3://your-bucket/your-prefix/manifest/latest - | jq '.format_version // 1'
    ```
-   If the most recent checkpoint was produced by the newer binary, the older binary may refuse to start (see [fail-closed table](#what-fails-closed) above).
+   Check the local WAL segments the same way — the third byte of each header is the format version:
+   ```bash
+   for f in /var/lib/t4/wal/*.wal; do
+     printf '%s format %d\n' "$(basename "$f")" \
+       "$(dd if="$f" bs=1 skip=2 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')"
+   done
+   ```
+   If either is above what the older binary knows, it refuses to start (see [fail-closed table](#what-fails-closed) above).
 2. Are any branch registry entries (`branches/<id>` in S3) newer than the older binary's safe `format_version`? List them:
    ```bash
    aws s3 ls s3://your-bucket/your-prefix/branches/

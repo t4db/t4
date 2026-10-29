@@ -33,8 +33,8 @@ every internal implementation detail:
 
 ## Configuration
 
-Existing `Config` fields and CLI flags are stable across v1.x. New fields and flags may be added with defaults that
-preserve existing behavior.
+Existing `Config` fields and CLI flags are stable across v1.x. New fields and flags may be added, and their defaults
+preserve existing behavior unless the deviation is called out below.
 
 Default values are part of the v1 contract unless explicitly documented as tuning guidance:
 
@@ -57,7 +57,15 @@ Default values are part of the v1 contract unless explicitly documented as tunin
 | `FollowerMaxRetries`  | 5                                              |
 | `FollowerWaitMode`    | `quorum`                                       |
 | `PeerBufferSize`      | 10,000                                         |
+| `PeerBufferBytes`     | 64 MiB (see note below)                        |
 | `WatchSendTimeout`    | 30 s                                           |
+
+`PeerBufferBytes` is a bound that did not exist before it was added, so its default does not reproduce the earlier
+behavior. The leader's follower catch-up buffer was previously bounded by `PeerBufferSize` alone, and entries are
+retained with their values: 10,000 entries is tens of megabytes of small objects and gigabytes of large ones. The
+default now caps that buffer at 64 MiB, whichever bound is reached first. A cluster holding large values therefore
+keeps a shorter catch-up window than it used to, and a follower that falls outside it resyncs from the object store
+instead of replaying from the leader's memory. Set it negative to restore the count-only bound.
 
 `LeaderWatchInterval` changed meaning together with its default: it used to be how often the leader re-read the
 lock (default 5 min) and is now the leader's lock renewal interval while it hears all followers (default 20 s, minimum
