@@ -12,7 +12,7 @@ import (
 
 func gcCmd() *cobra.Command {
 	var (
-		s3   *s3Flags
+		s3   *objectStoreFlags
 		enc  *objectStoreEncryptionFlags
 		keep int
 	)
@@ -75,7 +75,7 @@ Run this periodically (e.g. once a day) to reclaim S3 storage.`,
 			return nil
 		},
 	}
-	s3 = addS3Flags(cmd, true)
+	s3 = addObjectStoreFlags(cmd, true)
 	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().IntVar(&keep, "keep", 3, "number of most-recent checkpoints to retain")
 	return cmd

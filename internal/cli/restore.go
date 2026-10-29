@@ -23,7 +23,7 @@ func restoreCmd() *cobra.Command {
 
 func restoreListCmd() *cobra.Command {
 	var (
-		s3  *s3Flags
+		s3  *objectStoreFlags
 		enc *objectStoreEncryptionFlags
 	)
 	cmd := &cobra.Command{
@@ -62,14 +62,14 @@ func restoreListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	s3 = addS3Flags(cmd, true)
+	s3 = addObjectStoreFlags(cmd, true)
 	enc = addObjectStoreEncryptionFlags(cmd)
 	return cmd
 }
 
 func restoreCheckpointCmd() *cobra.Command {
 	var (
-		s3            *s3Flags
+		s3            *objectStoreFlags
 		enc           *objectStoreEncryptionFlags
 		checkpointKey string
 		dataDir       string
@@ -111,7 +111,7 @@ replaying newer WAL from S3, omit --s3-bucket entirely.`,
 					return fmt.Errorf("read manifest: %w", err)
 				}
 				if manifest == nil {
-					return fmt.Errorf("no checkpoints found in s3://%s/%s", s3.Bucket, s3.Prefix)
+					return fmt.Errorf("no checkpoints found in %s", s3.uri())
 				}
 				key = manifest.CheckpointKey
 				logrus.Infof("using latest checkpoint: %s (rev=%d)", key, manifest.Revision)
@@ -134,7 +134,7 @@ replaying newer WAL from S3, omit --s3-bucket entirely.`,
 			return nil
 		},
 	}
-	s3 = addS3Flags(cmd, true)
+	s3 = addObjectStoreFlags(cmd, true)
 	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&checkpointKey, "checkpoint", "", "checkpoint key to restore (default: latest; use 't4 restore list' to find keys)")
 	cmd.Flags().StringVar(&dataDir, "data-dir", "", "local directory to restore into (required; must not already contain a Pebble database) (env: T4_DATA_DIR)")

@@ -25,6 +25,10 @@ existing exported API without a major version bump.
 Expert hooks are stable enough to compile across v1.x, but their behavior follows the documented contract rather than
 every internal implementation detail:
 
+- `GCSStore`, `GCSConfig` and `NewGCSStoreFromConfig` are the Google Cloud Storage backend, alongside `S3Store`. Its
+  credentials come from Application Default Credentials unless `CredentialsFile` is set, which differs from the S3 path:
+  that one consults no ambient chain unless `Profile` selects one. The difference is deliberate — on GCP the ambient
+  chain is how a workload is given an identity — and is part of the contract for each backend rather than a shared rule.
 - `PebbleOptions` customizes Pebble and may affect performance, durability, and compatibility with future Pebble
   versions.
 - `WAL`/`WALWriter` is intended for constrained runtimes and tests. Custom implementations must preserve T4's

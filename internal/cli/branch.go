@@ -22,7 +22,7 @@ func branchCmd() *cobra.Command {
 
 func branchForkCmd() *cobra.Command {
 	var (
-		src           *s3Flags
+		src           *objectStoreFlags
 		enc           *objectStoreEncryptionFlags
 		branchID      string
 		checkpointKey string
@@ -57,7 +57,7 @@ Use --checkpoint to fork from a specific older revision instead.`,
 			return nil
 		},
 	}
-	src = addS3Flags(cmd, true)
+	src = addObjectStoreFlags(cmd, true)
 	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required) (env: T4_BRANCH_ID)")
 	cmd.Flags().StringVar(&checkpointKey, "checkpoint", "", "fork from this specific checkpoint key instead of the latest revision")
@@ -70,7 +70,7 @@ Use --checkpoint to fork from a specific older revision instead.`,
 
 func branchUnforkCmd() *cobra.Command {
 	var (
-		src      *s3Flags
+		src      *objectStoreFlags
 		enc      *objectStoreEncryptionFlags
 		branchID string
 	)
@@ -85,7 +85,7 @@ func branchUnforkCmd() *cobra.Command {
 			return t4.Unfork(cmd.Context(), sourceStore, branchID)
 		},
 	}
-	src = addS3Flags(cmd, true)
+	src = addObjectStoreFlags(cmd, true)
 	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required) (env: T4_BRANCH_ID)")
 	cmd.MarkFlagRequired("branch-id")
