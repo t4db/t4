@@ -8,6 +8,9 @@ WORKLOAD   := register
 # 'partition-halves' and 'partition-s3' test leader election under network
 # partitions: the S3 lock plus the leader lease must prevent split brain.
 NEMESIS    := kill
+# Object store under test: s3 (RustFS) or gcs (fake-gcs-server). Only the
+# leader lock differs between them; see the store descriptor in db.clj.
+STORE      := s3
 
 # ── keys ─────────────────────────────────────────────────────────────────────
 # Generate an ed25519 key pair for Jepsen SSH access.
@@ -25,12 +28,14 @@ node/authorized_keys control/id_ed25519:
 build: keys
 	docker compose build
 
+# Brings up only the object store under test, so a gcs run does not start
+# RustFS and vice versa.
 up: build
-	docker compose up -d s3 s3-init n1 n2 n3 n4 n5
+	docker compose up -d $(STORE) $(STORE)-init n1 n2 n3 n4 n5
 
 # ── run a test ────────────────────────────────────────────────────────────────
 run: up
-	docker compose run --rm control \
+	docker compose run --rm -e T4_JEPSEN_STORE=$(STORE) control \
 	  lein run -- test \
 	    --nodes  $(NODES) \
 	    --username root \

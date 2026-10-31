@@ -70,6 +70,36 @@ services:
         echo create bucket: $$code && [ $$code = 200 ] || [ $$code = 409 ]
       "
 
+  # ── GCS (object store, outside partition boundary) ─────────────────────────
+  # fake-gcs-server speaks the GCS JSON API, where generation preconditions
+  # are enforced — unlike GCS's own S3-compatible endpoint, which accepts
+  # If-Match and ignores it. Pinned: this version was checked to enforce every
+  # precondition the leader lock depends on, including under contention.
+  #
+  # Only started when T4_JEPSEN_STORE=gcs; see the Makefile's up target.
+  gcs:
+    image: fsouza/fake-gcs-server:1.56.1
+    hostname: gcs
+    networks: [jepsen]
+    command: ["-scheme", "http", "-backend", "memory", "-port", "4443"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4443/storage/v1/b"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Creates the 'jepsen' bucket on first boot.
+  gcs-init:
+    image: curlimages/curl:8.11.1
+    networks: [jepsen]
+    depends_on:
+      gcs: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+        code=$$(curl -s -o /dev/null -w %{http_code} -X POST -H 'Content-Type: application/json' -d '{\"name\":\"jepsen\"}' http://gcs:4443/storage/v1/b) &&
+        echo create bucket: $$code && { [ $$code = 200 ] || [ $$code = 409 ]; }
+      "
+
 networks:
   jepsen:
     driver: bridge
