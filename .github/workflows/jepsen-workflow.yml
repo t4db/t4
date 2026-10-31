@@ -13,10 +13,15 @@ on:
         type: string
         required: false
         default: '["register", "multi-register", "append", "wr", "watch", "set"]'
+      store:
+        description: 'Object store to run against: s3 (RustFS) or gcs (fake-gcs-server).'
+        type: string
+        required: false
+        default: 's3'
 
 jobs:
   jepsen:
-    name: Jepsen (${{ matrix.workload }} / ${{ matrix.nemesis }})
+    name: "Jepsen (${{ inputs.store }}: ${{ matrix.workload }} / ${{ matrix.nemesis }})"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -36,16 +41,21 @@ jobs:
         env:
           DOCKER_BUILDKIT: "1"
 
+      # Only the store under test is started, so a gcs run does not also
+      # bring up RustFS.
       - name: Start infrastructure
         run: |
           docker compose -f jepsen/docker-compose.yml up -d \
-            s3 s3-init n1 n2 n3 n4 n5
+            "$STORE" "$STORE-init" n1 n2 n3 n4 n5
           docker compose -f jepsen/docker-compose.yml \
-            wait s3-init || true
+            wait "$STORE-init" || true
+        env:
+          STORE: ${{ inputs.store }}
 
-      - name: Run Jepsen (${{ matrix.workload }} / ${{ matrix.nemesis }}, 60 s)
+      - name: "Run Jepsen (${{ inputs.store }}: ${{ matrix.workload }} / ${{ matrix.nemesis }}, 60 s)"
         run: |
-          docker compose -f jepsen/docker-compose.yml run --rm control \
+          docker compose -f jepsen/docker-compose.yml run --rm \
+            -e T4_JEPSEN_STORE=${{ inputs.store }} control \
             lein run -- test \
               --nodes        n1,n2,n3,n4,n5 \
               --username     root \
@@ -59,7 +69,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: jepsen-store-${{ matrix.workload }}-${{ matrix.nemesis }}-${{ github.sha }}
+          name: jepsen-store-${{ inputs.store }}-${{ matrix.workload }}-${{ matrix.nemesis }}-${{ github.sha }}
           path: jepsen/store/
           retention-days: 30
 

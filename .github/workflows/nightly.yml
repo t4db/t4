@@ -14,6 +14,21 @@ jobs:
     with:
       nemeses: '["partition-halves", "kill", "partition-s3"]'
 
+  # The same suite against GCS, deliberately narrow.
+  #
+  # Consensus, replication and fencing reach the object store through t4's
+  # object.Store interface, so a linearizability violation would show up on
+  # either backend and the full matrix would mostly re-run backend-agnostic
+  # checks. What is specific to GCS is how its errors behave when a node
+  # cannot reach it, so this runs the nemesis that cuts a node off from the
+  # store, against the two workloads that write most.
+  jepsen-gcs:
+    uses: ./.github/workflows/jepsen-workflow.yml
+    with:
+      store: gcs
+      nemeses: '["partition-s3"]'
+      workloads: '["register", "append"]'
+
   stress:
     name: Stress (30m)
     runs-on: ubuntu-latest
