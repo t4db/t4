@@ -43,8 +43,11 @@
                  (gen/sleep 15)
                  {:type :info :f :stop}])}
 
-   ;; Partition a random node away from the S3 server using iptables.
-   ;; Tests S3-write failure handling; requires NET_ADMIN cap on node containers.
+   ;; Partition a random node away from the object store using iptables, so
+   ;; its writes to the store fail while its peers' succeed. Which store that
+   ;; is comes from db/store, so the same nemesis covers S3 and GCS; the host
+   ;; and port are not interchangeable between them. Requires NET_ADMIN on the
+   ;; node containers.
    :partition-s3
    {:nemesis  (let [isolated (atom nil)]
                 (reify nemesis/Nemesis
@@ -54,23 +57,23 @@
                       :isolate-s3
                       (let [node (rand-nth (:nodes test))]
                         (reset! isolated node)
-                        (info "isolating" node "from s3")
+                        (info "isolating" node "from" (:name db/store))
                         (c/on-nodes test [node]
                           (fn [_ _]
                             (c/su (c/exec :iptables :-A :OUTPUT
-                                          :-d "s3" :-p "tcp"
-                                          :--dport "9000" :-j "DROP"))))
+                                          :-d (:host db/store) :-p "tcp"
+                                          :--dport (str (:port db/store)) :-j "DROP"))))
                         (assoc op :type :info :value node))
 
                       :heal-s3
                       (if-let [node @isolated]
                         (do (reset! isolated nil)
-                            (info "healing" node "→ s3")
+                            (info "healing" node "→" (:name db/store))
                             (c/on-nodes test [node]
                               (fn [_ _]
                                 (c/su (c/exec :iptables :-D :OUTPUT
-                                              :-d "s3" :-p "tcp"
-                                              :--dport "9000" :-j "DROP"))))
+                                              :-d (:host db/store) :-p "tcp"
+                                              :--dport (str (:port db/store)) :-j "DROP"))))
                             (assoc op :type :info :value node))
                         (assoc op :type :info :value nil))))
                   (teardown! [this test]
@@ -78,8 +81,8 @@
                       (c/on-nodes test [node]
                         (fn [_ _]
                           (try (c/su (c/exec :iptables :-D :OUTPUT
-                                             :-d "s3" :-p "tcp"
-                                             :--dport "9000" :-j "DROP"))
+                                             :-d (:host db/store) :-p "tcp"
+                                             :--dport (str (:port db/store)) :-j "DROP"))
                                (catch Exception _)))))
                     this)))
     :gen      (gen/cycle
