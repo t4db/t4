@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/t4db/t4/pkg/object"
@@ -276,4 +278,93 @@ func firstDiff(got, want []byte) string {
 		return fmt.Sprintf(", truncated at byte %d", len(got))
 	}
 	return ""
+}
+
+// Exactly one writer may win a contested conditional write. This is the
+// invariant the leader lock rests on: election.Lock reads the lock and writes
+// it back conditionally, and treats a write that was not refused as having won.
+// If the store admits two writers, two nodes serve as leader at once.
+//
+// The probe checks the preconditions one call at a time, which a store can
+// satisfy while still racing internally. These put real concurrency on it.
+func TestGCSContestedWritesHaveExactlyOneWinner(t *testing.T) {
+	const (
+		racers = 16
+		rounds = 25
+	)
+
+	t.Run("create-if-absent", func(t *testing.T) {
+		store := newGCSBucket(t, "contested-create")
+		for round := 0; round < rounds; round++ {
+			key := fmt.Sprintf("lock-%d", round)
+			won, refused, failed := raceWriters(racers, func(i int) error {
+				return store.PutIfAbsent(context.Background(), key, strings.NewReader(strconv.Itoa(i)))
+			})
+			if won != 1 {
+				t.Fatalf("round %d: %d writers won a contested create, want exactly 1 (%d refused, %d errored)",
+					round, won, refused, len(failed))
+			}
+			for _, err := range failed {
+				t.Errorf("round %d: unexpected error: %v", round, err)
+			}
+		}
+	})
+
+	t.Run("compare-and-swap on the same generation", func(t *testing.T) {
+		store := newGCSBucket(t, "contested-cas")
+		ctx := context.Background()
+		for round := 0; round < rounds; round++ {
+			key := fmt.Sprintf("lock-%d", round)
+			if err := store.Put(ctx, key, strings.NewReader("seed")); err != nil {
+				t.Fatalf("round %d: seed: %v", round, err)
+			}
+			seen, err := store.GetETag(ctx, key)
+			if err != nil {
+				t.Fatalf("round %d: read generation: %v", round, err)
+			}
+			_ = seen.Body.Close()
+
+			// Every writer presents the generation it read, as two nodes racing
+			// to renew the same lock would.
+			won, refused, failed := raceWriters(racers, func(i int) error {
+				return store.PutIfMatch(ctx, key, strings.NewReader(strconv.Itoa(i)), seen.ETag)
+			})
+			if won != 1 {
+				t.Fatalf("round %d: %d writers won a contested compare-and-swap on one generation, want exactly 1 (%d refused, %d errored)",
+					round, won, refused, len(failed))
+			}
+			for _, err := range failed {
+				t.Errorf("round %d: unexpected error: %v", round, err)
+			}
+		}
+	})
+}
+
+// raceWriters runs write n times at once and classifies the outcomes: how many
+// were allowed, how many were refused by the precondition, and any error that
+// was neither.
+func raceWriters(n int, write func(i int) error) (won, refused int, failed []error) {
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+	)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			err := write(i)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				won++
+			case errors.Is(err, object.ErrPreconditionFailed):
+				refused++
+			default:
+				failed = append(failed, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	return won, refused, failed
 }
