@@ -19,4 +19,13 @@ jobs:
     # multi-key Txn serializability, the broadest single check.
     with:
       nemeses: '["partition-halves"]'
+
+  # The same smoke against GCS. A change that breaks one backend should fail on
+  # the pull request that made it, not overnight. These run beside the S3 jobs
+  # rather than after them, so the wall clock barely moves.
+  jepsen-gcs:
+    uses: ./.github/workflows/jepsen-workflow.yml
+    with:
+      store: gcs
+      nemeses: '["partition-halves"]'
       workloads: '["register", "multi-register", "append"]'
