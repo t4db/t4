@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       sudo \
       awscli \
+      jq \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/run/sshd
 
