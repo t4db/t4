@@ -2,11 +2,13 @@ package store
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1598,18 +1600,20 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 	}
 	defer func() { _ = iter.Close() }()
 
-	var out []*KeyValue
 	slab := newKVSlab(limit)
 	// The index yields keys in key order, but the log is keyed by revision, so
 	// reading each record as the scan reaches it means a random seek per key.
 	// Collect what has to be read and fetch it in log order afterwards; see
 	// fetchLogRecords.
-	var todo []logTarget
-	if limit > 0 {
-		todo = make([]logTarget, 0, limit)
-	}
+	//
+	// One slice holds every entry the scan yields, whether or not it needs a
+	// record. Growing a second slice beside it was the largest single cost of
+	// an unpaginated list: two geometric growth chains, 48 bytes of element
+	// between them, against this one's 40. The result and the fetch set are
+	// both taken from it once the scan is done.
+	ents := make([]logTarget, 0, listScanCap(limit))
 	for iter.First(); iter.Valid(); iter.Next() {
-		if limit > 0 && int64(len(out)) >= limit {
+		if limit > 0 && int64(len(ents)) >= limit {
 			break
 		}
 		k := string(iter.Key()[1:]) // strip 'i' prefix
@@ -1618,17 +1622,35 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 		if keysOnly && ie.v2 {
 			// Served from the index; no log record to read.
 			idxToKeysOnlyKVInto(kv, k, ie)
-			out = append(out, kv)
-			continue
+		} else {
+			// Hold the key on the KeyValue rather than on the target, so the
+			// target costs no second string header per entry.
+			kv.Key = k
 		}
-		// Hold the key on the KeyValue rather than on the target, so the
-		// target costs no second string header per entry.
-		kv.Key = k
-		todo = append(todo, logTarget{dst: kv, ie: ie})
-		out = append(out, kv)
+		ents = append(ents, logTarget{dst: kv, ie: ie})
 	}
 	if err := iter.Error(); err != nil {
 		return nil, err
+	}
+
+	// The result is in key order and its size is now known, so it costs one
+	// sized allocation. It has to be taken before the fetch set, which
+	// fetchLogRecords reorders by revision.
+	out := make([]*KeyValue, len(ents))
+	for i, e := range ents {
+		out[i] = e.dst
+	}
+	// Only a keysOnly listing leaves entries needing no record, so only it has
+	// a fetch set narrower than the scan; compact in place rather than build a
+	// second slice.
+	todo := ents
+	if keysOnly {
+		todo = ents[:0]
+		for _, e := range ents {
+			if !e.ie.v2 {
+				todo = append(todo, e)
+			}
+		}
 	}
 	if err := fetchLogRecords(db, todo, keysOnly); err != nil {
 		return nil, err
@@ -1636,10 +1658,25 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 	return out, nil
 }
 
-// logTarget is one record fetchLogRecords has to read, and the KeyValue to
-// read it into. dst.Key is already set, which is both the key to look for and
-// where the result belongs: filling dst in place keeps the caller's ordering
-// whatever order the records are read in.
+// listScanCap is the capacity a listing's entry slice starts at.
+//
+// A paginated list knows how many entries it can yield, but the limit comes
+// from the caller, so a wild one must not size an allocation: an etcd client
+// is free to ask for a limit of 1<<40 over a range holding ten keys. Cap the
+// head start and let append grow from there.
+func listScanCap(limit int64) int {
+	if limit > 0 {
+		return int(min(limit, kvSlabMax))
+	}
+	return kvSlabMin
+}
+
+// logTarget is one entry a listing scan yielded: the KeyValue it belongs to
+// and the index entry pointing at its record. For the entries fetchLogRecords
+// is given it is the record to read and where to put it; dst.Key is already
+// set, which is both the key to look for and where the result belongs, so
+// filling dst in place keeps the caller's ordering whatever order the records
+// are read in.
 type logTarget struct {
 	dst *KeyValue
 	ie  idxEntry
@@ -1672,11 +1709,11 @@ func fetchLogRecords(db pebble.Reader, todo []logTarget, keysOnly bool) error {
 		return nil
 	}
 	lk := make([]byte, logKeyScratchSize)
-	sort.Slice(todo, func(a, b int) bool {
-		if todo[a].ie.rev != todo[b].ie.rev {
-			return todo[a].ie.rev < todo[b].ie.rev
+	slices.SortFunc(todo, func(a, b logTarget) int {
+		if a.ie.rev != b.ie.rev {
+			return cmp.Compare(a.ie.rev, b.ie.rev)
 		}
-		return todo[a].ie.sub < todo[b].ie.sub
+		return cmp.Compare(a.ie.sub, b.ie.sub)
 	})
 
 	// The upper bound is the first key of the next revision, which sorts above
