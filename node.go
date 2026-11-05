@@ -207,7 +207,6 @@ type Node struct {
 	log  Logger
 	cp   *checkpoint.Manager
 	term uint64
-	role atomic.Int32 // stores nodeRole values; use loadRole/storeRole
 
 	db  atomic.Pointer[istore.Store]
 	wal WALWriter // non-nil on leader/single; non-nil on follower (local WAL, no uploader)
@@ -257,8 +256,6 @@ type Node struct {
 	// and batches resolve in that order, so every token up to it is resolved.
 	// Guarded by mu.
 	resolvedMetaToken uint64
-	// metaModeCache caches the meta keyspace mode once known (see metaMode).
-	metaModeCache atomic.Int32
 	// metaGenesisDone is closed once Open has fixed the meta mode of a new
 	// database (see initMetaAtGenesis). Until then a leader holds back the
 	// sequence followers ask for to learn the mode.
@@ -320,7 +317,6 @@ type Node struct {
 	pebbleOpts             []istore.PebbleOption // options every Pebble this node opens uses
 	lastRevisionSampleUnix int64                 // unix nano timestamp of newest local revision/time sample
 	tracer                 trace.Tracer
-	tracing                bool // Config.TracerProvider was set
 
 	// bgCtx is cancelled by cancelBg — either on Close() or when a lock renewal
 	// detects that this node has been superseded as leader. When cancelled with
@@ -332,14 +328,24 @@ type Node struct {
 	// stopped is closed once the node stops serving, by Close or on its own
 	// (see Done). stopErr says why it stopped on its own; it is written
 	// before stopped is closed and never after.
-	stopped  chan struct{}
-	stopOnce sync.Once
-	stopErr  error
+	stopped chan struct{}
+	stopErr error
 
-	closeOnce sync.Once
-	closed    atomic.Bool
-	bgWg      sync.WaitGroup // tracks long-running background goroutines (followLoop, checkpointLoop)
-	readMu    sync.RWMutex   // held RLock by in-flight reads; Lock taken by Close to drain them
+	bgWg   sync.WaitGroup // tracks long-running background goroutines (followLoop, checkpointLoop)
+	readMu sync.RWMutex   // held RLock by in-flight reads; Lock taken by Close to drain them
+
+	// The fields below are narrower than a pointer, and they are grouped here
+	// for that reason alone rather than by what they do. Scattered among the
+	// pointer-width fields they cost 19 bytes of interior padding, which puts
+	// Node at 1040 bytes and so in the 1152-byte size class; together they
+	// cost 3 and Node fits 1024 exactly. None of them is 64 bits wide, so none
+	// needs the alignment a 64-bit atomic would.
+	role          atomic.Int32 // stores nodeRole values; use loadRole/storeRole
+	metaModeCache atomic.Int32 // caches the meta keyspace mode once known (see metaMode)
+	closed        atomic.Bool
+	tracing       bool      // Config.TracerProvider was set
+	stopOnce      sync.Once // guards the close of stopped
+	closeOnce     sync.Once // guards Close
 }
 
 func (n *Node) loadRole() nodeRole   { return nodeRole(n.role.Load()) }

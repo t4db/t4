@@ -64,10 +64,16 @@ type Store struct {
 	streamPos Position
 
 	// mu protects notify and watch prefix accounting.
-	mu        sync.RWMutex
-	notify    chan struct{} // closed and replaced on each revision advance
-	closed    chan struct{} // closed once when Store.Close is called
-	closeOnce sync.Once
+	mu     sync.RWMutex
+	notify chan struct{} // closed and replaced on each revision advance
+	closed chan struct{} // closed once when Store.Close is called
+	// closeOnce guards the close of closed; dispatchOnce starts the dispatch
+	// loop. They sit together because both are sync.Once: 12 bytes apiece, so
+	// a lone one is followed by 4 bytes of padding and a pair by none, which
+	// is what keeps Store at 240 bytes rather than 248 and out of the
+	// 256-byte size class.
+	closeOnce    sync.Once
+	dispatchOnce sync.Once
 
 	// watchMu serializes watch registration against Close. sync.WaitGroup
 	// requires Add not to race with Wait when the counter can be zero.
@@ -79,11 +85,10 @@ type Store struct {
 	// watchHubMu protects the live-watch registry. Live revisions are decoded
 	// once after Apply and fanned out in memory instead of making every watch
 	// rescan the Pebble revision log.
-	watchHubMu   sync.Mutex
-	watchers     map[uint64]*watchSubscription
-	nextWatchID  uint64
-	dispatchOnce sync.Once
-	dispatchWg   sync.WaitGroup
+	watchHubMu  sync.Mutex
+	watchers    map[uint64]*watchSubscription
+	nextWatchID uint64
+	dispatchWg  sync.WaitGroup
 	// watcherWake is closed and replaced when a watch registers. The dispatch
 	// loop waits on it while the hub is empty so it goes fully idle instead of
 	// scanning every commit for no subscriber.
