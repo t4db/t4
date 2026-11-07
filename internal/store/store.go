@@ -1486,7 +1486,12 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 	// fetchLogRecords.
 	var todo []logTarget
 	if limit > 0 {
-		todo = make([]logTarget, 0, limit)
+		// A limit is an upper bound chosen by the caller, and the caller may be
+		// a client asking for 1<<30 over a range holding ten keys. Give this
+		// the same head start the slab beside it uses and let append grow from
+		// there, so the request pays for what the scan finds rather than for
+		// what it asked about.
+		todo = make([]logTarget, 0, int(min(limit, kvSlabMax)))
 	}
 	for iter.First(); iter.Valid(); iter.Next() {
 		if limit > 0 && int64(len(out)) >= limit {
