@@ -325,13 +325,13 @@ func runCmd() *cobra.Command {
 			var httpSrv *http.Server
 			if enableGRPCGateway {
 				loopback := gateway.NewLoopback()
-				defer loopback.Close()
+				defer func() { _ = loopback.Close() }()
 
 				conn, err := loopback.ClientConn()
 				if err != nil {
 					return fmt.Errorf("gateway loopback: %w", err)
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 
 				handler, err := gateway.New(cmd.Context(), conn, gateway.Config{
 					CORSOrigins:   splitCommaList(gatewayCORSOrigins),

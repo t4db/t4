@@ -99,7 +99,7 @@ t4 run --listen 0.0.0.0:3379 --client-tls-cert server.crt --client-tls-key serve
 # etcd JSON/HTTP gateway listening gateway_addr=0.0.0.0:3378 derived=true
 ```
 
-`--listen` then serves gRPC exactly as it does with no gateway at all, and the gateway answers JSON and websockets on its own address under the same certificate. **Expose that second port** — in a Kubernetes Service, a firewall rule or a load balancer — or JSON clients cannot reach it.
+`--listen` then serves gRPC exactly as it does with no gateway at all, and the gateway answers JSON and websockets on its own address under the same certificate. **Expose that second port** — in a Kubernetes Service, a firewall rule or a load balancer — or JSON clients cannot reach it. On Kubernetes the Helm chart publishes it as a Service port named `gateway` as soon as TLS is on; a raw manifest needs it added by hand. See [Kubernetes deployment](/deployment/kubernetes/#jsonhttp-gateway).
 
 Name the address yourself to put it somewhere else:
 

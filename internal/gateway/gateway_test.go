@@ -76,7 +76,7 @@ func post(tb testing.TB, base, path, body string, hdr map[string]string) (int, s
 	if err != nil {
 		tb.Fatalf("post %s: %v", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err = readAll(resp.Body)
 	if err != nil {
 		tb.Fatalf("read body: %v", err)
@@ -172,7 +172,7 @@ func TestCORS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("options: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
 			t.Errorf("no origin is configured, so none should be allowed; got %q", got)
 		}
@@ -186,7 +186,7 @@ func TestCORS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("options: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("preflight status %d", resp.StatusCode)
 		}
@@ -203,7 +203,7 @@ func TestCORS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("options: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
 			t.Errorf("Allow-Origin = %q, want none", got)
 		}
@@ -223,7 +223,7 @@ func TestHostWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusMisdirectedRequest {
 		t.Fatalf("status %d, want %d for an unlisted Host", resp.StatusCode, http.StatusMisdirectedRequest)
 	}
@@ -237,7 +237,7 @@ func TestHostWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("status %d for a listed Host", resp2.StatusCode)
 	}
@@ -258,7 +258,7 @@ func TestWebsocketOriginRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status %d, want %d for a disallowed websocket origin", resp.StatusCode, http.StatusForbidden)
 	}

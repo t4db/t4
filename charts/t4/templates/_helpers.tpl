@@ -207,3 +207,28 @@ endpoint. tls.clientFacing and tls.client are deprecated aliases.
 {{- $client := get .Values.tls "client" | default dict -}}
 {{- or .Values.tls.clientCertAuth (get $clientFacing "clientCertAuth") (get $client "clientCertAuth") }}
 {{- end }}
+
+{{/*
+The port the JSON/HTTP gateway listens on, or empty when it has no port of its
+own.
+
+The gateway shares the client port while that port is plaintext, because the
+two protocols can be told apart from the first bytes of a connection. Under
+client-facing TLS they cannot, so t4 gives the gateway the port below --listen
+rather than make every gRPC request pay for the gateway's presence; that port
+then has to be published for JSON clients to reach it. Empty means "no separate
+port", so callers can use `with` to decide whether to emit one at all.
+
+The TLS condition mirrors the one the StatefulSet uses to pass
+--client-tls-cert: with proxy.enabled the proxy terminates TLS and t4 itself
+stays plaintext, so the gateway keeps sharing the port.
+*/}}
+{{- define "t4.gatewayPort" -}}
+{{- if .Values.config.enableGrpcGateway -}}
+{{- if .Values.config.gatewayAddr -}}
+{{- (split ":" .Values.config.gatewayAddr)._1 -}}
+{{- else if and (eq (include "t4.clientFacingTLSEnabled" .) "true") (not .Values.proxy.enabled) -}}
+{{- sub (int (split ":" .Values.config.listenAddr)._1) 1 -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

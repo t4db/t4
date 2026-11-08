@@ -33,7 +33,7 @@ func TestWatchOverWebsocket(t *testing.T) {
 		}
 		t.Fatalf("websocket dial: %v (%s)", err, status)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	if err := ws.WriteMessage(websocket.TextMessage,
 		[]byte(`{"create_request":{"key":"`+b64("/watched")+`"}}`)); err != nil {
@@ -106,7 +106,7 @@ func TestWatchRejectsGRPCWeb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// The marshaler accepts any content type, so without an explicit guard
 	// this is a 200 carrying an empty stream — a watch that looks established

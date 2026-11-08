@@ -83,7 +83,7 @@ func postJSON(tb testing.TB, client *http.Client, url, body string) (int, string
 	if err != nil {
 		tb.Fatalf("post %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		tb.Fatalf("read body: %v", err)
@@ -274,7 +274,7 @@ func TestSeparatePortLeavesGRPCAlone(t *testing.T) {
 	resp, err := http.Post("http://"+grpcLis.Addr().String()+"/v3/kv/range",
 		"application/json", strings.NewReader(`{"key":"`+gwEnc("/split/key")+`"}`))
 	if err == nil {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode == http.StatusOK {
 			t.Error("the gRPC port served a JSON request")
 		}

@@ -85,6 +85,16 @@ spec:
                 {{- with .Values.config.autoCompactSampleInterval }}
                 --auto-compact-sample-interval={{ . | quote }} \
                 {{- end }}
+                --enable-grpc-gateway={{ .Values.config.enableGrpcGateway }} \
+                {{- if .Values.config.enableGrpcGateway }}
+                {{- with .Values.config.gatewayAddr }}
+                --gateway-addr={{ . | quote }} \
+                {{- end }}
+                {{- with .Values.config.gatewayCorsOrigins }}
+                --gateway-cors-origins={{ . | quote }} \
+                {{- end }}
+                --gateway-host-whitelist={{ .Values.config.gatewayHostWhitelist | quote }} \
+                {{- end }}
                 --grpc-keepalive-min-time={{ .Values.config.grpcKeepaliveMinTime | quote }} \
                 --grpc-keepalive-interval={{ .Values.config.grpcKeepaliveInterval | quote }} \
                 --grpc-keepalive-timeout={{ .Values.config.grpcKeepaliveTimeout | quote }} \
@@ -180,6 +190,11 @@ spec:
             - name: metrics
               containerPort: {{ (split ":" .Values.config.metricsAddr)._1 | default 9090 }}
               protocol: TCP
+            {{- with include "t4.gatewayPort" . }}
+            - name: gateway
+              containerPort: {{ . }}
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
