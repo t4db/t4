@@ -8,7 +8,7 @@ T4 has three independently configurable TLS surfaces:
 
 | Surface | Flag prefix | What it protects |
 |---|---|---|
-| **Client TLS** | `--client-tls-*` | etcd gRPC port (3379) — traffic between your application and T4 |
+| **Client TLS** | `--client-tls-*` | etcd client port (3379) and the JSON/HTTP gateway's port — traffic between your application and T4 |
 | **Peer mTLS** | `--peer-tls-*` | WAL replication port (3380) — traffic between T4 nodes |
 | **S3 HTTPS** | `--s3-endpoint https://… --s3-ca-bundle …` | Object-store traffic between T4 and S3-compatible storage |
 
@@ -365,6 +365,40 @@ Bearer tokens expire after `--token-ttl` seconds (default 300). The etcd Go clie
 ```bash
 t4 run ... --auth-enabled --token-ttl 3600
 ```
+
+---
+
+## JSON/HTTP gateway exposure
+
+The etcd v3 JSON/HTTP API is served alongside gRPC and is **on by default** (`--enable-grpc-gateway`). What it exposes
+is worth being precise about.
+
+It exposes everything the gRPC surface exposes and nothing beyond it. The gateway is etcd's own generated handlers in
+front of the same server, and a JSON request crosses the same interceptor chain: `--auth-enabled`, tokens and RBAC
+apply identically, and an unauthenticated JSON call is refused exactly as an unauthenticated gRPC call is.
+Authenticate with `POST /v3/auth/authenticate` and send the token in the `Authorization` header. As on gRPC, a client
+certificate is not an identity — mTLS decides who may connect, tokens decide who may act.
+
+Client TLS covers the gateway under the same certificate and the same `--client-tls-*` flags, on whichever port it
+occupies. With TLS configured that is the port below `--listen` by default, so it is a second port to account for in
+firewall rules and Service definitions.
+
+Two settings gate browsers specifically, and both are closed on arrival:
+
+- `--gateway-cors-origins` is **empty by default** — no CORS headers, so a cross-origin call from a page fails its
+  preflight. etcd defaults this to `*`; T4 does not, because an open default would let any page a user happens to visit
+  call any T4 their browser can route to. Set it to the origins you serve a console from rather than to `*`.
+- `--gateway-host-whitelist` defaults to `*` and lists the `Host` values accepted over plaintext. Narrowing it guards
+  against DNS rebinding ([CVE-2018-5702](https://nvd.nist.gov/vuln/detail/CVE-2018-5702)), where a name an attacker
+  controls is made to resolve to a T4 the browser can reach but the attacker cannot. Requests over TLS skip the check,
+  since the certificate already settles which server was reached.
+
+A websocket handshake carries no CORS preflight, so the origin list is applied to the handshake's `Origin` directly: a
+browser from an origin not on the list is refused with `403`, while clients that send no `Origin` — `curl`, servers,
+Kubernetes — are unaffected.
+
+`--enable-grpc-gateway=false` removes the surface entirely and leaves the client port serving gRPC alone. See
+[JSON/HTTP gateway](http-gateway.md) for the API itself.
 
 ---
 
