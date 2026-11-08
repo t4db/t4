@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+	"github.com/soheilhy/cmux"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -29,6 +32,7 @@ import (
 	"github.com/t4db/t4"
 	t4etcd "github.com/t4db/t4/etcd"
 	"github.com/t4db/t4/etcd/auth"
+	"github.com/t4db/t4/internal/gateway"
 	"github.com/t4db/t4/internal/metrics"
 )
 
@@ -75,6 +79,11 @@ func runCmd() *cobra.Command {
 		// observability
 		metricsAddr  string
 		pprofEnabled bool
+		// etcd JSON/HTTP gateway (shares --listen unless --gateway-addr is set)
+		enableGRPCGateway    bool
+		gatewayAddr          string
+		gatewayCORSOrigins   string
+		gatewayHostWhitelist string
 		// branch node
 		branchPrefix     string
 		branchCheckpoint string
@@ -263,13 +272,23 @@ func runCmd() *cobra.Command {
 
 			// ── gRPC server ──────────────────────────────────────────────────
 			var grpcOpts []grpc.ServerOption
+			var clientTLSConf *tls.Config // nil when the client port is plaintext
 
 			if clientTLSCert != "" {
-				creds, err := buildClientTLS(clientTLSCert, clientTLSKey, clientTLSCA)
+				clientTLSConf, err = buildClientTLSConfig(clientTLSCert, clientTLSKey, clientTLSCA)
 				if err != nil {
 					return fmt.Errorf("client TLS: %w", err)
 				}
-				grpcOpts = append(grpcOpts, grpc.Creds(creds))
+				// With a gateway, TLS is terminated before gRPC sees a
+				// connection: on a shared port because the protocols can only
+				// be told apart above HTTP, and on a separate port so that the
+				// in-process loopback the gateway dials stays plaintext. A
+				// gRPC server holding credentials would try to handshake that
+				// pipe too, and giving it credentials as well as decrypted
+				// connections would start a second handshake inside the first.
+				if !enableGRPCGateway {
+					grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(clientTLSConf)))
+				}
 				if clientTLSCA != "" {
 					logrus.Info("client mTLS enabled")
 				} else {
@@ -296,28 +315,89 @@ func runCmd() *cobra.Command {
 				"listen_addr": listenAddr,
 				"client_tls":  tlsMode(clientTLSCert, clientTLSCA),
 				"auth":        authEnabled,
+				"gateway":     enableGRPCGateway,
 			}).Info("etcd gRPC server listening")
 
 			srv := grpc.NewServer(grpcOpts...)
 			t4etcd.New(node, authStore, tokens).Register(srv)
 
-			go func() {
-				if err := srv.Serve(lis); err != nil {
-					logrus.Errorf("gRPC serve: %v", err)
+			// ── JSON/HTTP gateway ────────────────────────────────────────────
+			var httpSrv *http.Server
+			if enableGRPCGateway {
+				loopback := gateway.NewLoopback()
+				defer loopback.Close()
+
+				conn, err := loopback.ClientConn()
+				if err != nil {
+					return fmt.Errorf("gateway loopback: %w", err)
 				}
-			}()
+				defer conn.Close()
+
+				handler, err := gateway.New(cmd.Context(), conn, gateway.Config{
+					CORSOrigins:   splitCommaList(gatewayCORSOrigins),
+					HostWhitelist: splitCommaList(gatewayHostWhitelist),
+				})
+				if err != nil {
+					return fmt.Errorf("gateway: %w", err)
+				}
+				httpSrv = &http.Server{
+					Handler: handler,
+					// A gateway request may be a watch that stays open for
+					// hours, so only the headers get a deadline.
+					ReadHeaderTimeout: 5 * time.Minute,
+				}
+
+				// The gateway reaches the gRPC server over this listener, which
+				// carries no network traffic of its own.
+				go serveGRPC(srv, loopback)
+
+				// Sharing the port is free while the port is plaintext and
+				// expensive once it is not, and the difference is large enough
+				// that nobody should discover it from a latency graph.
+				if clientTLSConf != nil && gatewayAddr == "" {
+					logrus.Warn("t4: the JSON/HTTP gateway is sharing --listen with gRPC under TLS, " +
+						"which roughly doubles gRPC request latency because the two protocols can then " +
+						"only be told apart above HTTP; give the gateway its own port with --gateway-addr " +
+						"to avoid it, or turn it off with --enable-grpc-gateway=false")
+				}
+			}
+
+			var gatewayLis net.Listener
+			if httpSrv != nil && gatewayAddr != "" {
+				gatewayLis, err = net.Listen("tcp", gatewayAddr)
+				if err != nil {
+					return fmt.Errorf("listen %s: %w", gatewayAddr, err)
+				}
+				logrus.WithFields(logrus.Fields{
+					"gateway_addr": gatewayAddr,
+					"client_tls":   tlsMode(clientTLSCert, clientTLSCA),
+				}).Info("etcd JSON/HTTP gateway listening")
+			}
+
+			serveClientPort(srv, httpSrv, lis, gatewayLis, clientTLSConf)
 
 			quit := make(chan os.Signal, 1)
 			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 			select {
 			case sig := <-quit:
 				logrus.WithField("signal", sig.String()).Info("shutdown signal received")
+				if httpSrv != nil {
+					shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if err := httpSrv.Shutdown(shutCtx); err != nil {
+						logrus.Warnf("t4: gateway shutdown: %v", err)
+					}
+					cancel()
+					logrus.Info("gateway stopped")
+				}
 				srv.GracefulStop()
 				logrus.Info("gRPC server stopped")
 				return nil
 			case <-node.Done():
 				// The node cannot serve again without a restart: exit so
 				// that whatever runs t4 starts it again, as a follower.
+				if httpSrv != nil {
+					_ = httpSrv.Close()
+				}
 				srv.Stop()
 				return fmt.Errorf("node stopped: %w", node.Err())
 			}
@@ -364,6 +444,10 @@ func runCmd() *cobra.Command {
 	// observability
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "0.0.0.0:9090", "HTTP address for /metrics, /healthz, /readyz (e.g. 0.0.0.0:9090) (env: T4_METRICS_ADDR)")
 	cmd.Flags().BoolVar(&pprofEnabled, "pprof", false, "also serve Go runtime profiles at /debug/pprof/ on --metrics-addr; they expose process internals, so enable only where that address is not publicly reachable (env: T4_PPROF)")
+	cmd.Flags().BoolVar(&enableGRPCGateway, "enable-grpc-gateway", true, "also serve the etcd v3 JSON/HTTP API on --listen, for clients that cannot speak gRPC; streaming RPCs (watch, lease keepalive) are served over websockets (env: T4_ENABLE_GRPC_GATEWAY)")
+	cmd.Flags().StringVar(&gatewayAddr, "gateway-addr", "", "serve the JSON/HTTP API on this address instead of sharing --listen; sharing the port costs gRPC latency when client TLS is on, because the two protocols can then only be told apart per request, above HTTP (env: T4_GATEWAY_ADDR)")
+	cmd.Flags().StringVar(&gatewayCORSOrigins, "gateway-cors-origins", "", "comma-separated web origins allowed to call the JSON/HTTP API, or * for all; empty sends no CORS headers, which keeps browsers out while leaving other clients unaffected (env: T4_GATEWAY_CORS_ORIGINS)")
+	cmd.Flags().StringVar(&gatewayHostWhitelist, "gateway-host-whitelist", "*", "comma-separated Host header values accepted by the JSON/HTTP API over plaintext, or * for all; narrow it to guard against DNS rebinding (env: T4_GATEWAY_HOST_WHITELIST)")
 	// branch node
 	cmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "S3 key prefix of the source node to branch from (uses --s3-bucket) (env: T4_BRANCH_PREFIX)")
 	cmd.Flags().StringVar(&branchCheckpoint, "branch-checkpoint", "", "checkpoint index key returned by 't4 branch fork' (required with --branch-prefix) (env: T4_BRANCH_CHECKPOINT)")
@@ -410,6 +494,10 @@ func runCmd() *cobra.Command {
 			"token-ttl":                            "T4_TOKEN_TTL",
 			"metrics-addr":                         "T4_METRICS_ADDR",
 			"pprof":                                "T4_PPROF",
+			"enable-grpc-gateway":                  "T4_ENABLE_GRPC_GATEWAY",
+			"gateway-addr":                         "T4_GATEWAY_ADDR",
+			"gateway-cors-origins":                 "T4_GATEWAY_CORS_ORIGINS",
+			"gateway-host-whitelist":               "T4_GATEWAY_HOST_WHITELIST",
 			"branch-prefix":                        "T4_BRANCH_PREFIX",
 			"branch-checkpoint":                    "T4_BRANCH_CHECKPOINT",
 			"grpc-keepalive-min-time":              "T4_GRPC_KEEPALIVE_MIN_TIME",
@@ -580,6 +668,18 @@ func authMode(enabled bool, tokenTTLSec int) string {
 // enforced (client cert required); when absent, only the server presents a
 // certificate (encryption-only).
 func buildClientTLS(cert, key, ca string) (credentials.TransportCredentials, error) {
+	cfg, err := buildClientTLSConfig(cert, key, ca)
+	if err != nil {
+		return nil, err
+	}
+	return credentials.NewTLS(cfg), nil
+}
+
+// buildClientTLSConfig is buildClientTLS without the gRPC wrapper, for the
+// cases that need the config itself: when the JSON gateway shares the client
+// port, this process terminates TLS rather than handing the job to gRPC, and
+// gateway.SplitTLS needs the *tls.Config to do it.
+func buildClientTLSConfig(cert, key, ca string) (*tls.Config, error) {
 	tlsCert, err := tls.LoadX509KeyPair(cert, key)
 	if err != nil {
 		return nil, fmt.Errorf("load cert/key: %w", err)
@@ -600,7 +700,7 @@ func buildClientTLS(cert, key, ca string) (credentials.TransportCredentials, err
 		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 		tlsCfg.ClientCAs = caPool
 	}
-	return credentials.NewTLS(tlsCfg), nil
+	return tlsCfg, nil
 }
 
 // buildPeerTLS constructs mTLS credentials for both the leader's gRPC server
@@ -711,6 +811,128 @@ func warnLargeGOMAXPROCS() {
 	}
 	logrus.Warnf("t4: GOMAXPROCS is %d (no CPU limit, or a very large one); Go's garbage collector scales with it, "+
 		"which can cost tens of cores on a large host. Set a container CPU limit or GOMAXPROCS (for example 8)", n)
+}
+
+// clientPortMatchTimeout bounds how long a connection may stay silent while
+// the port decides which protocol it is. Without it a client that connects and
+// says nothing occupies a matcher until it goes away.
+const clientPortMatchTimeout = 10 * time.Second
+
+// serveClientPort starts serving the client listener in the background.
+//
+// Without a gateway the gRPC server owns the listener outright, exactly as it
+// did before the gateway existed. With one, the port has to carry gRPC and
+// plain HTTP at once, and TLS decides how they are told apart.
+//
+// Plaintext connections announce their protocol in their first bytes, so cmux
+// sorts them before either server sees them and gRPC keeps its own transport.
+// Under TLS nothing distinguishes them per connection — gRPC and a browser
+// both negotiate h2 over ALPN — so the split moves up to the request, where
+// the content type is decisive, and gRPC is served through Go's HTTP/2 stack.
+// That path drops the gRPC server's own stream limit, so it is set again here
+// on the HTTP server; see gateway.GRPCHandler.
+//
+// Serving gRPC above HTTP is not free: measured on an M1 Pro over TLS, a Get
+// goes from 69 to 134 microseconds at the median when the port is shared. A
+// gatewayLis moves the gateway to its own port, which leaves the gRPC listener
+// exactly as it is without a gateway and costs it nothing.
+func serveClientPort(grpcSrv *grpc.Server, httpSrv *http.Server, lis, gatewayLis net.Listener, tlsConf *tls.Config) {
+	// Separate ports: neither server has to know about the other, and gRPC
+	// keeps the transport it has without a gateway.
+	if httpSrv != nil && gatewayLis != nil {
+		if tlsConf != nil {
+			// The gRPC server carries no credentials of its own whenever a
+			// gateway exists, so TLS is terminated for it here. ALPN has to
+			// offer h2 and nothing else: a gRPC client requires it, and this
+			// listener serves no other protocol.
+			grpcTLS := tlsConf.Clone()
+			grpcTLS.NextProtos = []string{"h2"}
+			lis = tls.NewListener(lis, grpcTLS)
+			httpSrv.TLSConfig = tlsConf
+			go serveGRPC(grpcSrv, lis)
+			go serveGatewayTLS(httpSrv, gatewayLis)
+		} else {
+			go serveGRPC(grpcSrv, lis)
+			go serveGatewayHTTP(httpSrv, gatewayLis)
+		}
+		return
+	}
+
+	switch {
+	case httpSrv == nil:
+		go serveGRPC(grpcSrv, lis)
+
+	case tlsConf == nil:
+		m := cmux.New(lis)
+		m.SetReadTimeout(clientPortMatchTimeout)
+		// HTTP/1.1 first: the HTTP/2 matcher reads the connection preface,
+		// which an HTTP/1.1 request would never send.
+		httpL := m.Match(cmux.HTTP1())
+		grpcL := m.Match(cmux.HTTP2())
+		go serveGatewayHTTP(httpSrv, httpL)
+		go serveGRPC(grpcSrv, grpcL)
+		go func() {
+			if err := m.Serve(); err != nil && !errors.Is(err, net.ErrClosed) {
+				logrus.Errorf("client port serve: %v", err)
+			}
+		}()
+
+	default:
+		httpSrv.Handler = gateway.GRPCHandler(grpcSrv, httpSrv.Handler)
+		httpSrv.TLSConfig = tlsConf
+		// Go's HTTP/2 server caps concurrent streams per connection at its own
+		// default, where the gRPC server is configured not to cap them at all.
+		// Setting it keeps the two paths saying the same thing. It is not
+		// known to fix an observable failure — grpc-go queues a stream the
+		// server has no room for rather than refusing it, and clientv3 puts
+		// every watcher sharing a context on one stream, so a client hitting
+		// the default could not be constructed here — but leaving a quieter
+		// limit on one of two routes to the same server invites a difference
+		// that only shows up under load.
+		httpSrv.HTTP2 = &http.HTTP2Config{MaxConcurrentStreams: math.MaxInt32}
+		go serveGatewayTLS(httpSrv, lis)
+	}
+}
+
+// serveGatewayTLS serves srv over TLS on lis.
+//
+// ServeTLS, rather than a tls.NewListener of our own, because it is what
+// installs the HTTP/2 handler and the ALPN protocols that advertise it — and
+// on a shared port HTTP/2 is not optional, since every browser speaks it. The
+// certificate comes from srv.TLSConfig, so the file arguments stay empty.
+func serveGatewayTLS(srv *http.Server, lis net.Listener) {
+	if err := srv.ServeTLS(lis, "", ""); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+		logrus.Errorf("gateway serve: %v", err)
+	}
+}
+
+func serveGRPC(srv *grpc.Server, lis net.Listener) {
+	if err := srv.Serve(lis); err != nil &&
+		!errors.Is(err, grpc.ErrServerStopped) && !errors.Is(err, net.ErrClosed) {
+		logrus.Errorf("gRPC serve: %v", err)
+	}
+}
+
+func serveGatewayHTTP(srv *http.Server, lis net.Listener) {
+	if err := srv.Serve(lis); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+		logrus.Warnf("t4: gateway serve: %v", err)
+	}
+}
+
+// splitCommaList parses a comma-separated flag value, the shape etcd uses for
+// its own --cors and --host-whitelist. An empty value yields no entries rather
+// than one empty one, which matters because the two lists read emptiness in
+// opposite directions (see gateway.Config).
+func splitCommaList(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled bool) {

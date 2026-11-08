@@ -77,7 +77,7 @@ node, err := t4.Open(t4.Config{
 
 ## Standalone binary
 
-The `t4` binary exposes the etcd v3 gRPC protocol. Use `etcdctl`, the official Go client, or any other etcd v3 compatible tool.
+The `t4` binary exposes the etcd v3 protocol twice over, on one port: as gRPC, for `etcdctl`, the official Go client and any other etcd v3 compatible tool; and as JSON over HTTP, for clients that cannot speak gRPC. See [JSON/HTTP Gateway](docs/http-gateway.md).
 
 ```bash
 go install github.com/t4db/t4/cmd/t4@latest
@@ -159,6 +159,7 @@ Full documentation is available at **[t4db.github.io/t4](https://t4db.github.io/
 | [Getting Started](https://t4db.github.io/t4/getting-started/) | Quickstart for standalone server and embedded Go library |
 | [API Reference](docs/api.md) | Full Go API — methods, types, errors, branching |
 | [Configuration](docs/configuration.md) | All config fields and CLI flags |
+| [JSON/HTTP Gateway](docs/http-gateway.md) | etcd's JSON API over HTTP, websocket watches, CORS, and browser access |
 | [v1 Compatibility Contract](docs/v1-compatibility.md) | Stable API, config, object-store, WAL, and checkpoint format contracts |
 | [Operations](docs/operations.md) | Multi-node clusters, S3, TLS, authentication, RBAC, observability |
 | [Backup and Restore](docs/backup-restore.md) | Checkpoints, point-in-time restore, branching, retention |
