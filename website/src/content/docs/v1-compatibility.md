@@ -84,7 +84,7 @@ keeps browsers out while leaving every other client unaffected; etcd defaults it
 pre-gateway surface exactly: one port, gRPC only. See [JSON/HTTP gateway](/http-gateway/) and
 [Upgrade](/upgrade/#the-jsonhttp-gateway-opens-on-upgrade).
 
-Environment variables documented in [Configuration](configuration) remain supported across v1.x. Command-line flags take
+Environment variables documented in [Configuration](/configuration/) remain supported across v1.x. Command-line flags take
 precedence over environment variables.
 
 ## Local Data Directory
@@ -335,7 +335,7 @@ Each WAL segment starts with a 20-byte header. Integers are big-endian.
 
 The third magic byte is the WAL format version. Writers open segments at format `2` (`T4\x02\n`) and raise the
 header to format `3` in place before appending the first entry that contains a meta op. Readers accept every format up
-to the newest they know and refuse newer segments (see [Upgrade](upgrade#what-fails-closed)).
+to the newest they know and refuse newer segments (see [Upgrade](/upgrade/#what-fails-closed)).
 
 | Format | Change                                                                                                  |
 |-------:|---------------------------------------------------------------------------------------------------------|
@@ -420,7 +420,7 @@ code is rejected.
 
 ## etcd Compatibility
 
-The etcd v3 compatibility surface is documented in [Migrating from etcd](etcd-migration). Unsupported RPCs and
+The etcd v3 compatibility surface is documented in [Migrating from etcd](/etcd-migration/). Unsupported RPCs and
 unsupported transaction forms are part of the v1 contract unless that page is updated in a future minor release.
 
 T4's v1 goal is compatibility with the etcd v3 application surface: KV, Watch, Lease, Auth, and practical multi-key
