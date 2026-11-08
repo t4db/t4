@@ -69,7 +69,7 @@ The claim is **not** that every read is linearizable regardless of configuration
 
 - Reads taken with `ReadConsistency: serializable` (consistent prefix, but may be stale relative to the leader's current revision).
 - Reads served by a follower whose stream is currently disconnected from the leader during a partition (the follower returns `ErrNotLeader` for linearizable reads rather than serving stale data).
-- Lease TTL clocks (wall-clock dependent; see [`api`](api) and the upgrade implications in [`v1-compatibility`](v1-compatibility)).
+- Lease TTL clocks (wall-clock dependent; see [`api`](/api/) and the upgrade implications in [`v1-compatibility`](/v1-compatibility/)).
 
 ### Jepsen evidence
 
@@ -173,8 +173,8 @@ The leader cannot renew the lock, but it keeps hearing its followers, and none o
 
 ## See also
 
-- [Configuration reference](configuration) — `ReadConsistency`, `FollowerWaitMode`, `WALSyncUpload`
-- [Architecture](architecture) — CAP properties, follower replication, concurrency model
-- [Operations guide](operations) — Durability and recovery, network partitions
-- [Releasing T4](releasing) — what gates a release, including the full Jepsen matrix on the release commit
+- [Configuration reference](/configuration/) — `ReadConsistency`, `FollowerWaitMode`, `WALSyncUpload`
+- [Architecture](/architecture/) — CAP properties, follower replication, concurrency model
+- [Operations guide](/operations/) — Durability and recovery, network partitions
+- [Releasing T4](https://github.com/t4db/t4/blob/main/docs/releasing.md) — what gates a release, including the full Jepsen matrix on the release commit
 - [Jepsen suite source](https://github.com/t4db/t4/tree/main/jepsen)
