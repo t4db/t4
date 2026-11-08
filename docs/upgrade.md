@@ -19,6 +19,7 @@ These are the failure modes the binary refuses rather than silently corrupting s
 | Follower on an earlier release connecting to the leader of a database created with the meta keyspace | The leader refuses the stream with `wal_format_unsupported`. Upgrade the follower. |
 | WAL entry with an op code this binary does not know (local replay, S3 replay, or the leader's peer stream) | Replay or apply is refused. A follower stops replicating and logs an error instead of retrying or attempting a leader takeover; it does not apply the entry. Same remedy. |
 | Object store does not enforce the conditional PUTs leader election needs, and `--peer-listen` is set | Startup refuses with `ErrConditionalWritesIgnored`. Use a store that enforces them — on GCS that means `--gcs-bucket` rather than the S3-compatible endpoint — or run a single node. A single node starts with a warning. |
+| `--gateway-addr` names an address T4 cannot listen on | Startup refuses with the listen error. An address T4 derived on its own — the port below `--listen` when client TLS is on — is deliberately not fail-closed: T4 warns, falls back to sharing `--listen`, and keeps serving. |
 | `manifest/latest` references a checkpoint missing referenced SSTs | Startup error. Recoverable from an earlier checkpoint via `t4 restore`. |
 | Branch registry entry points at a checkpoint older than the safe `format_version` | GC refuses to reclaim. Inspect with `t4 inspect`. |
 
@@ -40,6 +41,32 @@ The cluster keeps accepting writes throughout, modulo the ~6 s window when the l
 1. Stop the t4 process.
 2. Install the new binary.
 3. Start with the same flags. T4 replays any unsealed WAL entries from the local data directory; if the local directory is gone (ephemeral storage), it restores the latest checkpoint from S3.
+
+## The JSON/HTTP gateway opens on upgrade
+
+This release also serves the etcd v3 JSON/HTTP API, and it is on by default. Nothing changes for a gRPC client, but what
+a node listens on does:
+
+- **Plaintext `--listen`** — the same port answers both protocols. A connection's first bytes say which it is, so the
+  two are separated before either server sees them and gRPC keeps its own transport and its own tuning. No second port
+  to publish, and nothing added to the per-request path.
+- **Client TLS** — T4 opens a second listener on the port **below** `--listen` (3378 for the default 3379), under the
+  same certificate. Sharing a TLS port would mean splitting per request rather than per connection, which roughly
+  doubles gRPC request latency. **That port is new.** A firewall rule, Kubernetes Service or load balancer that forwards
+  only the client port will not reach it, and JSON clients get nothing until it is published. The Helm chart publishes it
+  as the `gateway` port from this version on; a hand-written manifest needs it added.
+
+A derived port is a convenience rather than a requirement, so it cannot stop a node from booting: if the port below
+`--listen` is taken, T4 logs a warning and falls back to sharing `--listen`. The upgrade succeeds either way, but it can
+land quietly on the slower arrangement — the startup line to look for is `etcd JSON/HTTP gateway listening` with
+`derived=true`. Name the address with `--gateway-addr` to decide for yourself; an address you name is required to work,
+and startup fails if it cannot be bound.
+
+Browsers are not let in by any of this. `--gateway-cors-origins` is empty by default, which sends no CORS headers, so a
+cross-origin call fails its preflight until an operator opts in. See [JSON/HTTP gateway](http-gateway.md) for the
+endpoints, the websocket watch, and why grpc-web cannot work.
+
+To keep exactly the pre-upgrade surface — one port, gRPC only — start with `--enable-grpc-gateway=false`.
 
 ## Databases created with the meta keyspace
 

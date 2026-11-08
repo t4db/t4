@@ -70,6 +70,15 @@ instead of replaying from the leader's memory. Set it negative to restore the co
 lock (default 5 min) and is now the leader's lock renewal interval while it hears all followers (default 20 s, minimum
 2 s). An explicitly configured value keeps working but now sets the renewal interval; values below 2 s are rejected.
 
+The JSON/HTTP gateway's flags are newer than the surface they govern, and their defaults do not reproduce the earlier
+behavior either. `--enable-grpc-gateway` defaults to `true`, so a client port that used to serve only gRPC also answers
+the etcd v3 JSON API and its websocket streams, and with client TLS configured T4 opens a second listener — the port
+below `--listen` — that earlier releases did not. `--gateway-cors-origins` is empty, which sends no CORS headers and so
+keeps browsers out while leaving every other client unaffected; etcd defaults it to `*` and T4 deliberately does not.
+`--gateway-host-whitelist` defaults to `*`, as on etcd. Starting with `--enable-grpc-gateway=false` restores the
+pre-gateway surface exactly: one port, gRPC only. See [JSON/HTTP gateway](http-gateway.md) and
+[Upgrade](upgrade.md#the-jsonhttp-gateway-opens-on-upgrade).
+
 Environment variables documented in [Configuration](configuration.md) remain supported across v1.x. Command-line flags
 take precedence over environment variables.
 
@@ -412,6 +421,13 @@ unsupported transaction forms are part of the v1 contract unless that page is up
 T4's v1 goal is compatibility with the etcd v3 application surface: KV, Watch, Lease, Auth, and practical multi-key
 conditional transactions.
 
+That surface is served in two shapes, and both are part of the contract: gRPC, and the etcd v3 JSON/HTTP API under
+`/v3/`, with websockets for its streaming RPCs. The JSON routes, field names and encodings are not T4's own — they come
+from the generated grpc-gateway handlers etcd ships in `go.etcd.io/etcd/api/v3/etcdserverpb/gw` — so they track etcd's
+JSON mapping by construction, base64 keys and 64-bit numbers as strings included. A JSON request crosses the same
+interceptors as a gRPC one, so authentication and RBAC apply identically. See
+[JSON/HTTP gateway](http-gateway.md).
+
 T4 does not aim to emulate etcd's Raft cluster administration or maintenance internals. The following etcd features are
 intentional v1 non-goals:
 
@@ -424,3 +440,4 @@ intentional v1 non-goals:
 | `MoveLeader`                                                    | Non-goal          | T4 has no Raft leadership-transfer operation. A future T4-native stepdown command may make sense, but not etcd-compatible `MoveLeader`. |
 | Nested transactions                                             | Non-goal          | Rare in normal application clients and not needed for T4's core compare/put/delete transaction model.                                   |
 | Range deletes inside transaction branches                       | Compatibility gap | Omitted from the primary v1 application surface. It can be revisited if real workloads require it.                                      |
+| grpc-web                                                        | Non-goal          | No bidirectional streaming, so `Watch` and `LeaseKeepAlive` cannot work over it against T4 or against etcd. T4 answers a grpc-web content type with `501`; browsers use the JSON API and its websockets. |
