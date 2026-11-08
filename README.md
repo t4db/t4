@@ -77,7 +77,7 @@ node, err := t4.Open(t4.Config{
 
 ## Standalone binary
 
-The `t4` binary exposes the etcd v3 protocol twice over, on one port: as gRPC, for `etcdctl`, the official Go client and any other etcd v3 compatible tool; and as JSON over HTTP, for clients that cannot speak gRPC. See [JSON/HTTP Gateway](docs/http-gateway.md).
+The `t4` binary exposes the etcd v3 protocol twice over: as gRPC, for `etcdctl`, the official Go client and any other etcd v3 compatible tool; and as JSON over HTTP, for clients that cannot speak gRPC. See [JSON/HTTP Gateway](docs/http-gateway.md).
 
 ```bash
 go install github.com/t4db/t4/cmd/t4@latest

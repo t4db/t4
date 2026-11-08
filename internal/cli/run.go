@@ -351,27 +351,46 @@ func runCmd() *cobra.Command {
 				// carries no network traffic of its own.
 				go serveGRPC(srv, loopback)
 
-				// Sharing the port is free while the port is plaintext and
-				// expensive once it is not, and the difference is large enough
-				// that nobody should discover it from a latency graph.
-				if clientTLSConf != nil && gatewayAddr == "" {
-					logrus.Warn("t4: the JSON/HTTP gateway is sharing --listen with gRPC under TLS, " +
-						"which roughly doubles gRPC request latency because the two protocols can then " +
-						"only be told apart above HTTP; give the gateway its own port with --gateway-addr " +
-						"to avoid it, or turn it off with --enable-grpc-gateway=false")
+			}
+
+			// Sharing the port is free while the port is plaintext and costs
+			// gRPC roughly half its speed once it is not, because the two
+			// protocols can then only be told apart above HTTP. So under TLS
+			// the gateway is given a port of its own even when none was asked
+			// for, derived from --listen.
+			gatewayAddrAuto := false
+			if httpSrv != nil && gatewayAddr == "" && clientTLSConf != nil {
+				if derived, ok := derivedGatewayAddr(listenAddr); ok {
+					gatewayAddr, gatewayAddrAuto = derived, true
+				} else {
+					logrus.Warnf("t4: cannot derive a gateway address from --listen %q, so the "+
+						"JSON/HTTP gateway will share it with gRPC under TLS, which roughly doubles "+
+						"gRPC request latency; set --gateway-addr to avoid it", listenAddr)
 				}
 			}
 
 			var gatewayLis net.Listener
 			if httpSrv != nil && gatewayAddr != "" {
 				gatewayLis, err = net.Listen("tcp", gatewayAddr)
-				if err != nil {
+				switch {
+				case err != nil && !gatewayAddrAuto:
 					return fmt.Errorf("listen %s: %w", gatewayAddr, err)
+				case err != nil:
+					// An address nobody asked for must not keep the node from
+					// starting. Sharing the port is slower but it works, so
+					// say what happened and carry on.
+					logrus.Warnf("t4: cannot listen on the derived gateway address %s (%v), so the "+
+						"JSON/HTTP gateway will share --listen with gRPC under TLS, which roughly "+
+						"doubles gRPC request latency; set --gateway-addr to a free port to avoid it",
+						gatewayAddr, err)
+					gatewayAddr, gatewayLis = "", nil
+				default:
+					logrus.WithFields(logrus.Fields{
+						"gateway_addr": gatewayAddr,
+						"client_tls":   tlsMode(clientTLSCert, clientTLSCA),
+						"derived":      gatewayAddrAuto,
+					}).Info("etcd JSON/HTTP gateway listening")
 				}
-				logrus.WithFields(logrus.Fields{
-					"gateway_addr": gatewayAddr,
-					"client_tls":   tlsMode(clientTLSCert, clientTLSCA),
-				}).Info("etcd JSON/HTTP gateway listening")
 			}
 
 			serveClientPort(srv, httpSrv, lis, gatewayLis, clientTLSConf)
@@ -445,7 +464,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "0.0.0.0:9090", "HTTP address for /metrics, /healthz, /readyz (e.g. 0.0.0.0:9090) (env: T4_METRICS_ADDR)")
 	cmd.Flags().BoolVar(&pprofEnabled, "pprof", false, "also serve Go runtime profiles at /debug/pprof/ on --metrics-addr; they expose process internals, so enable only where that address is not publicly reachable (env: T4_PPROF)")
 	cmd.Flags().BoolVar(&enableGRPCGateway, "enable-grpc-gateway", true, "also serve the etcd v3 JSON/HTTP API on --listen, for clients that cannot speak gRPC; streaming RPCs (watch, lease keepalive) are served over websockets (env: T4_ENABLE_GRPC_GATEWAY)")
-	cmd.Flags().StringVar(&gatewayAddr, "gateway-addr", "", "serve the JSON/HTTP API on this address instead of sharing --listen; sharing the port costs gRPC latency when client TLS is on, because the two protocols can then only be told apart per request, above HTTP (env: T4_GATEWAY_ADDR)")
+	cmd.Flags().StringVar(&gatewayAddr, "gateway-addr", "", "serve the JSON/HTTP API on this address instead of sharing --listen. Empty shares the port while it is plaintext, which is free, and takes the port below --listen once client TLS is on, where sharing would roughly double gRPC request latency (env: T4_GATEWAY_ADDR)")
 	cmd.Flags().StringVar(&gatewayCORSOrigins, "gateway-cors-origins", "", "comma-separated web origins allowed to call the JSON/HTTP API, or * for all; empty sends no CORS headers, which keeps browsers out while leaving other clients unaffected (env: T4_GATEWAY_CORS_ORIGINS)")
 	cmd.Flags().StringVar(&gatewayHostWhitelist, "gateway-host-whitelist", "*", "comma-separated Host header values accepted by the JSON/HTTP API over plaintext, or * for all; narrow it to guard against DNS rebinding (env: T4_GATEWAY_HOST_WHITELIST)")
 	// branch node
@@ -817,6 +836,31 @@ func warnLargeGOMAXPROCS() {
 // the port decides which protocol it is. Without it a client that connects and
 // says nothing occupies a matcher until it goes away.
 const clientPortMatchTimeout = 10 * time.Second
+
+// derivedGatewayAddr picks an address for the JSON/HTTP gateway from the
+// client listen address, for the case where sharing the port would be
+// expensive and the operator named no address of their own.
+//
+// It takes the port below the client port, on the same host. Below rather than
+// above because the convention everywhere in t4's own documentation — and in
+// etcd's, which t4 follows — puts the peer port one above the client port:
+// 3379 and 3380, or 2379 and 2380 on etcd. One below is the adjacent port that
+// convention leaves free.
+//
+// It reports false when --listen names nothing a port can be derived from: a
+// missing or unparseable port, or one low enough that there is nothing below
+// it. The caller then shares the port and says so.
+func derivedGatewayAddr(listenAddr string) (string, bool) {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "", false
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n <= 1 {
+		return "", false
+	}
+	return net.JoinHostPort(host, strconv.Itoa(n-1)), true
+}
 
 // serveClientPort starts serving the client listener in the background.
 //

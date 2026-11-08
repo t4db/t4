@@ -1,6 +1,6 @@
 # JSON/HTTP Gateway
 
-T4 serves the etcd v3 API in two shapes on the same port: gRPC, for `etcdctl`, the Go client and Kubernetes; and JSON over HTTP, for everything that cannot speak gRPC — browsers above all, and anything reaching for `curl`.
+T4 serves the etcd v3 API in two shapes: gRPC, for `etcdctl`, the Go client and Kubernetes; and JSON over HTTP, for everything that cannot speak gRPC — browsers above all, and anything reaching for `curl`.
 
 The HTTP surface is etcd's own. T4 registers the generated grpc-gateway handlers that ship in `go.etcd.io/etcd/api/v3/etcdserverpb/gw`, so the routes, the JSON shapes and the field names are etcd's by construction. A request crosses the same interceptors a gRPC request does, so authentication and RBAC apply identically.
 
@@ -74,35 +74,43 @@ A websocket handshake carries no CORS preflight, so this list is applied to the 
 
 `--gateway-host-whitelist` lists the `Host` values accepted over plaintext, defaulting to `*`. Narrowing it guards against DNS rebinding ([CVE-2018-5702](https://nvd.nist.gov/vuln/detail/CVE-2018-5702)), where a name under an attacker's control is made to resolve to a T4 the browser can reach but the attacker cannot. Requests over TLS skip the check, since the certificate already settles which server was reached.
 
-## Port sharing costs gRPC latency under TLS
+## Which port the gateway uses
 
-By default the gateway shares `--listen` with gRPC, as on etcd. What that costs depends on TLS.
+On a plaintext `--listen`, the gateway shares the port with gRPC, as on etcd. That costs nothing: the first bytes of a connection identify the protocol, so the two are separated before either server sees them and gRPC keeps its own transport.
 
-On a plaintext port it costs nothing: the first bytes of a connection identify the protocol, so the two are separated before either server sees them and gRPC keeps its own transport.
-
-Under TLS nothing distinguishes them per connection — gRPC and a browser both negotiate `h2` over ALPN — so the split has to happen per request, by content type, above HTTP. gRPC is then served through Go's HTTP/2 stack instead of its own, and **a request takes roughly twice as long**:
+Under TLS, sharing is expensive. Nothing distinguishes the protocols per connection — gRPC and a browser both negotiate `h2` over ALPN — so the split has to happen per request, by content type, above HTTP. gRPC is then served through Go's HTTP/2 stack instead of its own, and **a request takes roughly twice as long**:
 
 | Layout | gRPC Get, mean |
 |---|---|
 | `--enable-grpc-gateway=false` | 71 µs |
-| gateway on `--gateway-addr`, its own port | 71 µs |
+| gateway on its own port | 71 µs |
 | gateway sharing `--listen` | 137 µs |
 
 <sub>M1 Pro, 20000 sequential Gets over TLS on a local node.</sub>
 
-So when client TLS is on, give the gateway its own port:
+So when client TLS is configured, T4 gives the gateway a port of its own without being asked: the port **below** `--listen`, on the same host. Below rather than above, because the peer port is one above by convention — `3379` and `3380`, as in etcd's `2379` and `2380`.
 
 ```bash
-t4 run --listen 0.0.0.0:3379 --gateway-addr 0.0.0.0:2379
+t4 run --listen 0.0.0.0:3379 --client-tls-cert server.crt --client-tls-key server.key
+# etcd gRPC server listening       listen_addr=0.0.0.0:3379
+# etcd JSON/HTTP gateway listening gateway_addr=0.0.0.0:3378 derived=true
 ```
 
-`--listen` then serves gRPC exactly as it does with no gateway at all, and the gateway answers JSON and websockets on its own address, under the same certificate. T4 logs a warning at startup when it is sharing a TLS port, so this is not something to discover from a latency graph.
+`--listen` then serves gRPC exactly as it does with no gateway at all, and the gateway answers JSON and websockets on its own address under the same certificate. **Expose that second port** — in a Kubernetes Service, a firewall rule or a load balancer — or JSON clients cannot reach it.
+
+Name the address yourself to put it somewhere else:
+
+```bash
+t4 run --gateway-addr 0.0.0.0:2379
+```
+
+An address you name is required to work: if T4 cannot listen on it, startup fails. A derived address is not, since nobody asked for it — if the port below `--listen` is taken, T4 logs a warning, falls back to sharing `--listen`, and keeps serving. An upgrade therefore cannot fail to boot over a port collision, but it can quietly land on the slower arrangement, so the warning is worth watching for.
 
 ## Configuration
 
 | Flag | Default | Environment variable |
 |---|---|---|
 | `--enable-grpc-gateway` | `true` | `T4_ENABLE_GRPC_GATEWAY` |
-| `--gateway-addr` | *(shares `--listen`)* | `T4_GATEWAY_ADDR` |
+| `--gateway-addr` | shares `--listen` on plaintext; the port below it under TLS | `T4_GATEWAY_ADDR` |
 | `--gateway-cors-origins` | *(none)* | `T4_GATEWAY_CORS_ORIGINS` |
 | `--gateway-host-whitelist` | `*` | `T4_GATEWAY_HOST_WHITELIST` |

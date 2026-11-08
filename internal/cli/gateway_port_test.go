@@ -280,3 +280,44 @@ func TestSeparatePortLeavesGRPCAlone(t *testing.T) {
 		}
 	}
 }
+
+// TestDerivedGatewayAddr covers the address the gateway is given under TLS when
+// none was asked for. One below the client port, because the peer port is one
+// above it by convention everywhere in t4's own documentation.
+func TestDerivedGatewayAddr(t *testing.T) {
+	for _, tc := range []struct {
+		listen string
+		want   string
+		ok     bool
+	}{
+		{"0.0.0.0:3379", "0.0.0.0:3378", true},
+		{"127.0.0.1:2379", "127.0.0.1:2378", true},
+		{"[::1]:3379", "[::1]:3378", true},
+		{":3379", ":3378", true},
+		// Nothing to derive from: the caller shares the port and says so.
+		{"0.0.0.0", "", false},
+		{"0.0.0.0:notaport", "", false},
+		{"0.0.0.0:1", "", false},
+		{"0.0.0.0:0", "", false},
+		{"", "", false},
+	} {
+		got, ok := derivedGatewayAddr(tc.listen)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("derivedGatewayAddr(%q) = %q, %v; want %q, %v", tc.listen, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// TestDerivedGatewayAddrAvoidsPeerPort pins the reason for choosing the port
+// below rather than above: above is where a peer listens in every example t4
+// documents, so deriving upward would collide with multi-node mode.
+func TestDerivedGatewayAddrAvoidsPeerPort(t *testing.T) {
+	const listen, peer = "0.0.0.0:3379", "0.0.0.0:3380"
+	got, ok := derivedGatewayAddr(listen)
+	if !ok {
+		t.Fatalf("derivedGatewayAddr(%q) failed", listen)
+	}
+	if got == peer {
+		t.Errorf("derived %q, which is the documented peer address", got)
+	}
+}
