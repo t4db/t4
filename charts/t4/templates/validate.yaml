@@ -6,3 +6,15 @@
 {{- if and .Values.minio .Values.minio.enabled -}}
 {{- fail "the minio.* values were renamed to s3server.* (the built-in S3 server is now RustFS); see the chart docs" -}}
 {{- end -}}
+{{- $gatewayPort := include "t4.gatewayPort" . -}}
+{{- if $gatewayPort -}}
+{{- if eq $gatewayPort (toString (split ":" .Values.config.listenAddr)._1) -}}
+{{- fail "config.gatewayAddr uses the same port as config.listenAddr; leave it empty to share the port, or pick a different one" -}}
+{{- end -}}
+{{- if and (gt (int .Values.replicaCount) 1) (eq $gatewayPort (toString (split ":" .Values.config.peerListenAddr)._1)) -}}
+{{- fail "config.gatewayAddr uses the same port as config.peerListenAddr" -}}
+{{- end -}}
+{{- if eq $gatewayPort (toString (split ":" .Values.config.metricsAddr)._1) -}}
+{{- fail "config.gatewayAddr uses the same port as config.metricsAddr" -}}
+{{- end -}}
+{{- end -}}

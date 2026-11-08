@@ -291,6 +291,68 @@ spec:
 
 ---
 
+## JSON/HTTP gateway
+
+T4 serves the etcd v3 API as JSON over HTTP alongside gRPC, with websockets for watch and lease keepalive, for clients that cannot speak gRPC. It is on by default; `--enable-grpc-gateway=false` turns it off.
+
+On a plaintext `--listen`, as in the manifests above, it shares the etcd port. The `Service` already published is all that is needed:
+
+```bash
+kubectl port-forward svc/t4 3379:3379
+curl -X POST http://localhost:3379/v3/kv/range -d '{"key":"L2hlbGxv"}'
+```
+
+### With client TLS, expose the second port
+
+Sharing a TLS port would roughly double gRPC request latency, because the two protocols can then only be told apart per request rather than per connection. So when `--client-tls-cert` is set, T4 serves the gateway on the port **below** `--listen` — `3378` by default, since `3380` is conventionally the peer port — and that port has to be published by hand in a raw manifest:
+
+```yaml
+          ports:
+            - name: etcd
+              containerPort: 3379
+            - name: gateway        # JSON/HTTP, only when client TLS is on
+              containerPort: 3378
+            - name: metrics
+              containerPort: 9090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: t4
+spec:
+  selector:
+    app: t4
+  ports:
+    - name: etcd
+      port: 3379
+      targetPort: 3379
+    - name: gateway
+      port: 3378
+      targetPort: 3378
+```
+
+Leave it out and the pod stays healthy while JSON clients have no route to it. `--gateway-addr` pins the address somewhere else:
+
+```yaml
+            - --gateway-addr=0.0.0.0:2379
+```
+
+If the derived port happens to be taken inside the pod, T4 logs a warning and falls back to sharing `--listen`, so a collision cannot stop the node from starting — but it does mean the slower arrangement, so the warning is worth alerting on.
+
+### Letting browsers in
+
+The gateway sends no CORS headers by default, so a browser cannot call it cross-origin however the ports are arranged:
+
+```yaml
+            - --gateway-cors-origins=https://console.example.com
+```
+
+`*` allows all. The same list gates the websocket handshake, which carries no CORS preflight of its own. Clients that send no `Origin` — `curl`, servers, Kubernetes itself — are unaffected either way. `--gateway-host-whitelist` restricts which `Host` headers are accepted over plaintext and defaults to `*`.
+
+See [JSON/HTTP Gateway](http-gateway.md) for endpoints, request shapes and authentication.
+
+---
+
 ## IAM / S3 permissions
 
 T4 needs the following S3 permissions on the bucket. This list is the canonical minimum policy — see [`security.md`](security.md#s3-bucket-security) for the full version with discussion.
@@ -439,6 +501,7 @@ spans emitted and for why key names are never recorded.
 
 ## See also
 
+- [JSON/HTTP Gateway](http-gateway.md) — etcd's JSON API, websocket watches, CORS
 - [Operations guide](operations.md) — full cluster setup, TLS, auth, rolling upgrade
 - [Backup and restore](backup-restore.md) — checkpoint restore, branching
 - [Consistency model](consistency.md) — durability guarantees and read modes

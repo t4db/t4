@@ -271,8 +271,12 @@ metadata.
 | `t4 run` | `T4_CLIENT_TLS_CERT` | `--client-tls-cert` |
 | `t4 run` | `T4_CLIENT_TLS_KEY` | `--client-tls-key` |
 | `t4 run` | `T4_DATA_DIR` | `--data-dir` |
+| `t4 run` | `T4_ENABLE_GRPC_GATEWAY` | `--enable-grpc-gateway` |
 | `t4 run` | `T4_FOLLOWER_MAX_RETRIES` | `--follower-max-retries` |
 | `t4 run` | `T4_FOLLOWER_WAIT_MODE` | `--follower-wait-mode` |
+| `t4 run` | `T4_GATEWAY_ADDR` | `--gateway-addr` |
+| `t4 run` | `T4_GATEWAY_CORS_ORIGINS` | `--gateway-cors-origins` |
+| `t4 run` | `T4_GATEWAY_HOST_WHITELIST` | `--gateway-host-whitelist` |
 | `t4 run` | `T4_GCS_BUCKET` | `--gcs-bucket` |
 | `t4 run` | `T4_GCS_CREDENTIALS_FILE` | `--gcs-credentials-file` |
 | `t4 run` | `T4_GCS_ENDPOINT` | `--gcs-endpoint` |
@@ -450,8 +454,12 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--client-tls-cert` | — | `T4_CLIENT_TLS_CERT` | No | server certificate file for client-facing TLS (PEM) |
 | `t4 run` | `--client-tls-key` | — | `T4_CLIENT_TLS_KEY` | No | server private key file for client-facing TLS (PEM) |
 | `t4 run` | `--data-dir` | `/var/lib/t4` | `T4_DATA_DIR` | No | directory for Pebble data and local WAL segments |
+| `t4 run` | `--enable-grpc-gateway` | `true` | `T4_ENABLE_GRPC_GATEWAY` | No | also serve the etcd v3 JSON/HTTP API on --listen, for clients that cannot speak gRPC; streaming RPCs (watch, lease keepalive) are served over websockets |
 | `t4 run` | `--follower-max-retries` | `5` | `T4_FOLLOWER_MAX_RETRIES` | No | consecutive stream failures before a follower attempts a leader takeover |
 | `t4 run` | `--follower-wait-mode` | `quorum` | `T4_FOLLOWER_WAIT_MODE` | No | leader wait policy for follower ACKs before commit: none, quorum, or all |
+| `t4 run` | `--gateway-addr` | — | `T4_GATEWAY_ADDR` | No | serve the JSON/HTTP API on this address instead of sharing --listen. Empty shares the port while it is plaintext, which is free, and takes the port below --listen once client TLS is on, where sharing would roughly double gRPC request latency |
+| `t4 run` | `--gateway-cors-origins` | — | `T4_GATEWAY_CORS_ORIGINS` | No | comma-separated web origins allowed to call the JSON/HTTP API, or * for all; empty sends no CORS headers, which keeps browsers out while leaving other clients unaffected |
+| `t4 run` | `--gateway-host-whitelist` | `*` | `T4_GATEWAY_HOST_WHITELIST` | No | comma-separated Host header values accepted by the JSON/HTTP API over plaintext, or * for all; narrow it to guard against DNS rebinding |
 | `t4 run` | `--gcs-bucket` | — | `T4_GCS_BUCKET` | No | Google Cloud Storage bucket, reached over the GCS API; mutually exclusive with --s3-bucket |
 | `t4 run` | `--gcs-credentials-file` | — | `T4_GCS_CREDENTIALS_FILE` | No | service account key file; without it credentials come from Application Default Credentials, which is what workload identity on GKE provides |
 | `t4 run` | `--gcs-endpoint` | — | `T4_GCS_ENDPOINT` | No | custom GCS endpoint URL, for an emulator; requests are unauthenticated unless --gcs-credentials-file is also set |

@@ -133,12 +133,22 @@ func (s *Store) CheckRequest(userName string, checks []RangeCheck) error {
 
 // tokenFromCtx extracts the bearer token from gRPC metadata and looks up the
 // username.
+//
+// gRPC clients send the token under "token". A caller arriving through the
+// JSON/HTTP gateway cannot: it sets an Authorization header, which grpc-gateway
+// forwards as metadata "authorization". etcd accepts either key for exactly
+// this reason — rpctypes names them TokenFieldNameGRPC and
+// TokenFieldNameSwagger, and its auth store falls back from the first to the
+// second — so t4 does too, and a token works the same way over both protocols.
 func tokenFromCtx(ctx context.Context, tokens *TokenStore) (string, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return "", status.Error(codes.Unauthenticated, "missing metadata")
 	}
-	vals := md.Get("token")
+	vals := md.Get(rpctypes.TokenFieldNameGRPC)
+	if len(vals) == 0 {
+		vals = md.Get(rpctypes.TokenFieldNameSwagger)
+	}
 	if len(vals) == 0 {
 		return "", status.Error(codes.Unauthenticated, "missing token")
 	}

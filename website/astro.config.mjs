@@ -82,6 +82,7 @@ export default defineConfig({
 					items: [
 						{ label: 'API Reference', slug: 'api' },
 						{ label: 'Configuration', slug: 'configuration' },
+						{ label: 'JSON/HTTP Gateway', slug: 'http-gateway' },
 						{ label: 'Operations', slug: 'operations' },
 						{ label: 'Branches', slug: 'branches' },
 						{ label: 'Backup and Restore', slug: 'backup-restore' },

@@ -9,6 +9,19 @@ T4 has been deployed!
   etcd-compatible gRPC:
     {{ include "t4.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
 
+{{- if .Values.config.enableGrpcGateway }}
+{{- $gwPort := include "t4.gatewayPort" . }}
+{{- if $gwPort }}
+
+  etcd JSON/HTTP (websockets for watch):
+    {{ include "t4.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ $.Values.service.gatewayPort | default $gwPort }}/v3/kv/range
+{{- else }}
+
+  etcd JSON/HTTP (websockets for watch), on the client port above:
+    {{ include "t4.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/v3/kv/range
+{{- end }}
+{{- end }}
+
   Prometheus metrics:
     {{ include "t4.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.metricsPort }}/metrics
 
@@ -29,6 +42,13 @@ T4 has been deployed!
    without persistent volumes.  Set s3.bucket for production use, or enable
    the built-in S3 server with --set s3server.enabled=true for development.
 {{- end }}
+{{- end }}
+
+{{- if and .Values.config.enableGrpcGateway (not .Values.config.gatewayCorsOrigins) }}
+
+ℹ  The JSON/HTTP gateway sends no CORS headers, so browsers cannot call it
+   cross-origin.  Set config.gatewayCorsOrigins to the origins that should be
+   allowed (or "*" for all).  Other clients are unaffected.
 {{- end }}
 
 {{- if eq (int .Values.replicaCount) 1 }}

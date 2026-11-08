@@ -28,3 +28,11 @@ spec:
       port: {{ .Values.service.metricsPort }}
       targetPort: metrics
       protocol: TCP
+    {{- with include "t4.gatewayPort" . }}
+    {{- /* Only published when the gateway has a port of its own; while it
+           shares the client port, the client port above already serves it. */}}
+    - name: gateway
+      port: {{ $.Values.service.gatewayPort | default . }}
+      targetPort: gateway
+      protocol: TCP
+    {{- end }}

@@ -154,6 +154,8 @@ tls:
   enabled: true
 ```
 
+Enabling this also moves the JSON/HTTP gateway onto a port of its own, `3378`, which the chart publishes on the Service — see [JSON/HTTP gateway](#jsonhttp-gateway).
+
 To use your own certificate, create a TLS Secret and reference it:
 
 ```bash
@@ -238,6 +240,50 @@ helm install t4 oci://ghcr.io/t4db/charts/t4 \
   --set tls.peer.enabled=true \
   --set tls.peer.secretName=t4-peer-tls
 ```
+
+---
+
+## JSON/HTTP gateway
+
+T4 serves the etcd v3 API as JSON over HTTP alongside gRPC, with websockets for watch and lease keepalive, for clients that cannot speak gRPC. It is on by default (`config.enableGrpcGateway`), and which port it uses depends on whether client TLS is on.
+
+**Without client TLS** it shares the etcd port, so there is nothing to expose. The chart's `client` Service port serves both:
+
+```bash
+kubectl port-forward svc/t4 3379:3379
+curl -X POST http://localhost:3379/v3/kv/range -d '{"key":"L2hlbGxv"}'
+```
+
+**With client TLS** sharing the port would roughly double gRPC request latency, because the two protocols can then only be told apart per request rather than per connection. So T4 takes the port below `config.listenAddr` — `3378` by default — and the chart publishes it as a second Service port named `gateway`:
+
+```
+NAME   PORT(S)
+t4     3379/TCP,9090/TCP,3378/TCP
+```
+
+Nothing is needed to turn that on; the chart adds the container port and the Service port as soon as `tls.enabled` is set. If something in front of the Service selects ports by name — an Ingress, a Gateway API route, a NetworkPolicy — add `gateway` to it, or JSON clients cannot reach the API even though the pod is healthy.
+
+Pin the address to move it elsewhere:
+
+```yaml
+config:
+  gatewayAddr: "0.0.0.0:2379"
+```
+
+The chart refuses to render if that port collides with the client, peer or metrics port. With `proxy.enabled` the Envoy proxy terminates TLS and T4 itself stays plaintext, so the gateway keeps sharing the client port.
+
+### Letting browsers in
+
+The gateway sends no CORS headers by default, so a browser cannot call it cross-origin however the ports are arranged. Name the origins that may:
+
+```yaml
+config:
+  gatewayCorsOrigins: "https://console.example.com"
+```
+
+`*` allows all. The same list is applied to the websocket handshake, which carries no CORS preflight of its own, so without it any page could still open a watch. Clients that send no `Origin` — `curl`, servers, Kubernetes itself — are unaffected either way.
+
+`config.gatewayHostWhitelist` defaults to `*` and restricts which `Host` headers are accepted over plaintext; narrowing it guards against DNS rebinding. See the [gateway documentation](/http-gateway/) for the endpoints and request shapes.
 
 ---
 
@@ -346,6 +392,9 @@ image:
 config:
   walSyncUpload: "false"   # PVC provides durability
   logLevel: info
+  # The JSON/HTTP gateway is on by default; name the origins that may call it
+  # from a browser. Omit to keep browsers out entirely.
+  gatewayCorsOrigins: "https://console.example.com"
 
 s3:
   bucket: my-t4-prod

@@ -27,6 +27,31 @@ config:
   # Prometheus metrics and health probe address.
   metricsAddr: "0.0.0.0:9090"
 
+  # ── etcd JSON/HTTP gateway ───────────────────────────────────────────────
+  # Serves the etcd v3 API as JSON over HTTP, with websockets for watch and
+  # lease keepalive, for clients that cannot speak gRPC. See
+  # https://t4db.github.io/t4/http-gateway/
+  enableGrpcGateway: true
+
+  # Address for the JSON/HTTP API.
+  #
+  # Empty shares listenAddr while that port is plaintext, which is free. Once
+  # client-facing TLS is on, sharing would roughly double gRPC request latency,
+  # so t4 takes the port below listenAddr instead — 3378 by default — and the
+  # chart publishes it on the Service as the "gateway" port. Set this to pin a
+  # different address.
+  gatewayAddr: ""
+
+  # Comma-separated web origins allowed to call the JSON API, or "*" for all.
+  # Empty sends no CORS headers, which keeps browsers out while leaving every
+  # other client unaffected. Also applied to the websocket handshake, which
+  # carries no CORS preflight of its own.
+  gatewayCorsOrigins: ""
+
+  # Comma-separated Host header values accepted over plaintext, or "*" for all.
+  # Narrow it to guard against DNS rebinding.
+  gatewayHostWhitelist: "*"
+
   # "linearizable" or "serializable"
   readConsistency: linearizable
 
@@ -147,6 +172,10 @@ service:
   peerPort: 3380
   # Prometheus metrics port.
   metricsPort: 9090
+  # Port for the JSON/HTTP gateway, published only when the gateway has a port
+  # of its own rather than sharing the client port. Empty follows the port t4
+  # listens on.
+  gatewayPort: ""
   annotations: {}
 
 # ── ServiceAccount ────────────────────────────────────────────────────────────
