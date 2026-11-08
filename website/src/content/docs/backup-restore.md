@@ -174,7 +174,7 @@ t4 run \
   --listen 0.0.0.0:3380
 ```
 
-See [API reference — RestorePoint](api#point-in-time-restore-s3-versioning) for the Go library equivalent.
+See [API reference — RestorePoint](/api/#point-in-time-restore-s3-versioning) for the Go library equivalent.
 
 ---
 
@@ -230,6 +230,6 @@ etcdctl --endpoints=localhost:3379 get --prefix / --count-only
 
 ## See also
 
-- [Operations guide](operations) — Restore from checkpoint, Point-in-time recovery workflow, Branching
-- [Failure scenarios](failure-scenarios) — WAL and checkpoint corruption recovery
-- [API reference](api) — RestorePoint, BranchPoint
+- [Operations guide](/operations/) — Restore from checkpoint, Point-in-time recovery workflow, Branching
+- [Failure scenarios](/failure-scenarios/) — WAL and checkpoint corruption recovery
+- [API reference](/api/) — RestorePoint, BranchPoint

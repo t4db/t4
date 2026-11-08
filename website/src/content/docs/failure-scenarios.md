@@ -176,7 +176,7 @@ The lease relies on clocks: any two nodes' clocks must differ by less than 2 s. 
 
 **Recovery:**
 - If only the trailing entry of the last segment is corrupted (typical torn-write on crash), the node recovers all entries up to the corruption point. The last write that failed the CRC was not durably acknowledged, so no data is lost.
-- If corruption is deeper, entries after the corruption point in that segment are lost. Restore from a checkpoint (see [Backup and Restore](backup-restore)) and replay WAL segments from S3.
+- If corruption is deeper, entries after the corruption point in that segment are lost. Restore from a checkpoint (see [Backup and Restore](/backup-restore/)) and replay WAL segments from S3.
 
 **Tested by:** `TestWALCorruptionMidSegment`, `TestWALReplayAfterPartialUpload`
 
@@ -232,6 +232,6 @@ Tested by `TestFailoverTime`.
 
 ## See also
 
-- [Consistency model](consistency) — durability definitions, CAP properties
-- [Operations guide](operations) — S3 unavailability, network partitions, recovery procedure
-- [Backup and restore](backup-restore) — recovering from checkpoint after severe data corruption
+- [Consistency model](/consistency/) — durability definitions, CAP properties
+- [Operations guide](/operations/) — S3 unavailability, network partitions, recovery procedure
+- [Backup and restore](/backup-restore/) — recovering from checkpoint after severe data corruption

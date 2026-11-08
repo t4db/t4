@@ -3,13 +3,13 @@ title: Upgrade and Downgrade
 description: What operators need to know to move a running T4 deployment from one v1.x release to another, including fail-closed cases and downgrade safety checks.
 ---
 
-What operators need to know to move a running T4 deployment from one v1.x release to another. For the underlying compatibility rules see the [v1 Compatibility Contract](v1-compatibility).
+What operators need to know to move a running T4 deployment from one v1.x release to another. For the underlying compatibility rules see the [v1 Compatibility Contract](/v1-compatibility/).
 
 ## What v1.x guarantees
 
 - A newer v1.x binary can open a data directory and an object-store prefix written by any older v1.x binary.
 - Newer v1.x can also add fields, flags, default values, exported types, and metrics — but never remove or change the meaning of existing ones without a major version bump.
-- Default values listed in the [defaults table](v1-compatibility#configuration) do not change across v1.x unless explicitly documented as tuning guidance.
+- Default values listed in the [defaults table](/v1-compatibility/#configuration) do not change across v1.x unless explicitly documented as tuning guidance.
 
 ## What fails closed
 
@@ -35,7 +35,7 @@ For multi-node clusters, upgrade one node at a time. The leader stays available 
 3. Install the new binary and restart with the **same** flags as before.
 4. Wait for the follower to catch up — `t4 status` shows `current_revision >= leader_current_revision - tolerable_lag` and the leader's metrics show the follower reconnected.
 5. Repeat for the remaining followers.
-6. Restart the leader last. A follower wins the takeover election (~6 s; see [Consistency](consistency#behaviour-under-network-partition)). Promote it gracefully by signalling the leader with `SIGTERM`; the new leader is the highest-CommittedRev follower.
+6. Restart the leader last. A follower wins the takeover election (~6 s; see [Consistency](/consistency/#behaviour-under-network-partition)). Promote it gracefully by signalling the leader with `SIGTERM`; the new leader is the highest-CommittedRev follower.
 
 The cluster keeps accepting writes throughout, modulo the ~6 s window when the leader is being restarted.
 
@@ -143,12 +143,12 @@ If all three answers are "no", the downgrade is safe. If any answer is "yes", **
 
 The binary exits with an error referencing the schema version it rejected. Steps:
 
-1. Note the version it refused and the corresponding [compatibility contract](v1-compatibility) section.
+1. Note the version it refused and the corresponding [compatibility contract](/v1-compatibility/) section.
 2. Do **not** delete the offending object — it is needed by the newer binary you must roll back to.
 3. Roll the binary forward to a version that supports that schema. The data directory and S3 prefix are unchanged by the failed start.
 
 ## See also
 
-- [v1 Compatibility Contract](v1-compatibility) — schema and API stability rules.
-- [Releasing T4](releasing) — how releases are produced and gated.
-- [Operations](operations) — runtime monitoring, log fields, recovery procedures.
+- [v1 Compatibility Contract](/v1-compatibility/) — schema and API stability rules.
+- [Releasing T4](https://github.com/t4db/t4/blob/main/docs/releasing.md) — how releases are produced and gated.
+- [Operations](/operations/) — runtime monitoring, log fields, recovery procedures.

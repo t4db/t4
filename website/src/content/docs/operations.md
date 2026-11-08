@@ -189,7 +189,7 @@ t4 run \
   steps down immediately. While it hears every follower it renews every 20 s (valid 60 s); as soon as a follower goes
   silent or leaves, every 2 s (valid 6 s), until 60 s after the follower is back or gone.
 - The leader holds a **lease**: it acknowledges writes and serves linearizable reads only while its lease holds (see
-  [Consistency](consistency#split-brain-prevention)). A leader cut off from S3 and from its followers therefore
+  [Consistency](/consistency/#split-brain-prevention)). A leader cut off from S3 and from its followers therefore
   stops serving before any follower may take over; one cut off from S3 only keeps serving, for up to about a minute,
   since its followers still hear it. This relies on node clocks differing by less than 2 s; keep NTP running on all
   nodes.
@@ -225,7 +225,7 @@ In a healthy cluster, ordinary writes do not wait for S3. The steady-state S3 co
 
 In cluster mode the leader renews its lock every 20 seconds while it hears every follower, one GET plus one
 conditional PUT per renewal. While a follower is silent, and for 60 seconds after, it renews every 2 seconds, so that
-the follower finds it alive (see [Consistency](consistency#split-brain-prevention)). A follower that leaves or falls
+the follower finds it alive (see [Consistency](/consistency/#split-brain-prevention)). A follower that leaves or falls
 behind costs one extra lock write to move the election fence. Single-node mode does not renew a lock.
 
 Single-node synchronous S3 durability has a different cost profile. With `WALSyncUpload=true`, each acknowledged
@@ -1075,7 +1075,7 @@ if err := t4.Unfork(ctx, sourceStore, "my-branch"); err != nil {
 > cases, [Branching](#branching) is simpler and does not require versioning.
 
 `RestorePoint` bootstraps a new node from a specific set of S3 object version IDs captured at a past moment.
-See [api.md — Point-in-time restore](api.md#point-in-time-restore-s3-versioning) for the Go API.
+See [API reference — Point-in-time restore](/api/#point-in-time-restore-s3-versioning) for the Go API.
 
 ### Requirements
 
