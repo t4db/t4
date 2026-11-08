@@ -7,7 +7,17 @@ What a maintainer needs to know that is **not** already encoded in CI workflows 
 Release tag (`v*`) push triggers `image-release.yml`, which gates publish on:
 
 - `precheck` — `ci.yml` workflow must have completed with `success` on the release SHA (waits up to ~30 min).
-- `nightly` — everything `nightly.yml` runs, on the release SHA: the full Jepsen nemesis × workload matrix, `TestLongRunningConsistency` (30 min stress), etcd's three-node robustness tests on S3 and Kubernetes conformance on k0s (about 2 h). A test added to the nightly gates releases too.
+- `nightly` — `nightly.yml` on the release SHA, minus the Kubernetes conformance suite: the full Jepsen nemesis × workload matrix on S3 and GCS, `TestLongRunningConsistency` (30 min stress) and etcd's three-node robustness tests. A test added to the nightly gates releases too, unless it is excluded here.
+
+The full conformance suite is deliberately not on this path. In the most recent nightly it took 115 minutes, against 31 for the next longest job (the stress test) and 5 for the robustness tests, with the Jepsen cells running about 4 each in parallel — so it sets the release's wall clock by itself. Without it the gate finishes in roughly half an hour instead of two hours. It is also one long job on a single hosted runner, which is how the `v1.2.0` tag lost 1.5 h to `The hosted runner lost communication with the server` and had its release blocked for a reason unrelated to the code. That is cost and exposure rather than flakiness: conformance had not failed a nightly in the preceding two weeks, while the robustness tests failed three and Jepsen one.
+
+Kubernetes coverage does not leave the release path with it. `ci.yml` runs Sonobuoy's quick mode on every PR, and so on the release SHA through `precheck`, which is what catches a T4 change that breaks Kubernetes; the full suite keeps running every night on `main`. What a release gives up is the long tail of the full suite on the exact release commit, which the nightly covers a few hours either side of it.
+
+To run it against a release commit anyway, dispatch `nightly.yml` on the tag before or after cutting the release:
+
+```bash
+gh workflow run nightly.yml --ref vX.Y.Z
+```
 
 Required CI checks on `main` are whichever checks are marked **required** in branch-protection settings. That config is authoritative — this page does not duplicate the list.
 
