@@ -5,6 +5,17 @@ on:
     - cron: "0 22 * * *" # 22:00 UTC every night
   workflow_dispatch: # allow manual trigger
   workflow_call: # the release workflow runs these before building (see image-release.yml)
+    inputs:
+      skip_conformance:
+        description: >-
+          Leave the Kubernetes conformance suite out of this run. The release
+          workflow passes true: the suite runs about 115 min against about 31
+          for everything else in the nightly, so it sets a release's wall clock
+          on its own, while ci.yml's conformance smoke already gates the
+          release SHA. See docs/releasing.md.
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   jepsen:
@@ -96,6 +107,16 @@ jobs:
 
   conformance:
     name: Kubernetes conformance (k0s on T4)
+    # The nightly schedule and a manual run always include it; only a caller
+    # that asks to skip it opts out. The event names are named explicitly
+    # rather than relying on `inputs` being empty outside a workflow_call,
+    # because the failure mode of that assumption would be conformance
+    # silently never running again. github.event_name is the caller's event in
+    # a called workflow, so the release's tag push falls through to the input.
+    if: >-
+      ${{ github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || !inputs.skip_conformance }}
     runs-on: ubuntu-latest
     timeout-minutes: 270
 

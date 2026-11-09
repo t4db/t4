@@ -53,12 +53,14 @@ jobs:
           echo "Timed out waiting for CI on $SHA" >&2
           exit 1
 
-  # Everything the nightly runs: Jepsen, the stress test and etcd's
-  # robustness tests.
+  # Everything the nightly runs except the conformance suite: Jepsen, the
+  # stress test and etcd's robustness tests.
   nightly:
     name: Nightly tests (release)
     needs: precheck
     uses: ./.github/workflows/nightly.yml
+    with:
+      skip_conformance: true # why: docs/releasing.md
 
   release:
     name: Create draft release
