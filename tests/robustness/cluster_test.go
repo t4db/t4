@@ -1,11 +1,14 @@
 package robustness
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"math/rand"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,11 +90,12 @@ type cluster struct {
 }
 
 type node struct {
-	name       string
-	dataDir    string
-	clientAddr string
-	args       []string
-	logPath    string
+	name        string
+	dataDir     string
+	clientAddr  string
+	metricsAddr string
+	args        []string
+	logPath     string
 	// peerProxy fronts the node's peer listener: peers reach the node
 	// through it. s3Proxy is the node's only way to the object store.
 	peerProxy, s3Proxy *proxy
@@ -114,16 +118,17 @@ func newCluster(t *testing.T, bin string, size int, s3 *s3Config) *cluster {
 	prefix := fmt.Sprintf("%s-%d", strings.ReplaceAll(t.Name(), "/", "_"), time.Now().UnixNano())
 	for i := range size {
 		n := &node{
-			name:       fmt.Sprintf("n%d", i+1),
-			dataDir:    filepath.Join(dir, fmt.Sprintf("n%d", i+1), "data"),
-			clientAddr: freeAddr(t),
+			name:        fmt.Sprintf("n%d", i+1),
+			dataDir:     filepath.Join(dir, fmt.Sprintf("n%d", i+1), "data"),
+			clientAddr:  freeAddr(t),
+			metricsAddr: freeAddr(t),
 		}
 		n.logPath = filepath.Join(dir, n.name, "t4.log")
 		n.args = []string{"run",
 			"--node-id", n.name,
 			"--data-dir", n.dataDir,
 			"--listen", n.clientAddr,
-			"--metrics-addr", freeAddr(t),
+			"--metrics-addr", n.metricsAddr,
 			"--log-level", "info",
 		}
 		if s3 != nil {
@@ -176,12 +181,59 @@ func (c *cluster) start(ctx context.Context, bin string) error {
 }
 
 // waitReady waits until every node serves linearizable reads, which in a
-// cluster also means a leader has been elected.
+// cluster also means a leader has been elected, and then until the leader has
+// a follower replicating from it.
 func (c *cluster) waitReady(ctx context.Context) error {
 	for _, n := range c.nodes {
 		if err := n.waitReady(ctx); err != nil {
 			return err
 		}
+	}
+	return c.waitReplicated(ctx)
+}
+
+// waitReplicated waits until the leader has at least one follower connected.
+//
+// Serving a linearizable read does not imply that one has. A leader with no
+// follower cannot make a write durable by replication, so it uploads every
+// batch to object storage before acknowledging it — one synchronous PUT per
+// batch, which the leader announces as "replication below ACK target". That is
+// correct behavior and far slower than the replicated path, slow enough that
+// traffic started inside that window loses about half its requests to the
+// profile's 200 ms timeout. The run is then discarded for not reaching
+// MinimalQPS before the failpoint, which says nothing about T4.
+//
+// A single node has no peers to wait for, and never enters that mode.
+func (c *cluster) waitReplicated(ctx context.Context) error {
+	if len(c.nodes) == 1 {
+		return nil
+	}
+	var lastErr error
+	for {
+		if lastErr = c.replicated(ctx); lastErr == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("replication not ready: %w", lastErr)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// replicated reports the reason the leader is not yet replicating, or nil once
+// it is.
+func (c *cluster) replicated(ctx context.Context) error {
+	l, err := c.leader(ctx)
+	if err != nil {
+		return err
+	}
+	followers, err := l.connectedFollowers(ctx)
+	if err != nil {
+		return fmt.Errorf("%s followers: %w", l.name, err)
+	}
+	if followers == 0 {
+		return fmt.Errorf("leader %s has no follower connected", l.name)
 	}
 	return nil
 }
@@ -311,6 +363,40 @@ func (n *node) status(ctx context.Context) (*clientv3.StatusResponse, error) {
 	return c.Status(ctx, n.clientAddr)
 }
 
+// followerLagMetric is the leader's per-follower lag gauge. The leader
+// publishes one series per follower once it has acknowledged an entry, and
+// deletes the series when that follower disconnects, so the number of series
+// is the number of followers replicating from this node right now.
+const followerLagMetric = "t4_follower_lag_revisions{"
+
+// connectedFollowers counts the followers replicating from this node. It is
+// read over the metrics endpoint because nothing on the client API reports it,
+// and it is zero on a node that is not the leader.
+func (n *node) connectedFollowers(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+n.metricsAddr+"/metrics", nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("GET /metrics: %s", resp.Status)
+	}
+	followers := 0
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		if strings.HasPrefix(sc.Text(), followerLagMetric) {
+			followers++
+		}
+	}
+	return followers, sc.Err()
+}
+
 func (n *node) waitReady(ctx context.Context) error {
 	c, err := n.client()
 	if err != nil {
@@ -360,4 +446,49 @@ func freeAddr(t *testing.T) string {
 	}
 	t.Fatal("no free port")
 	return ""
+}
+
+func TestConnectedFollowers(t *testing.T) {
+	// A leader with two followers, as promhttp renders it, surrounded by the
+	// metrics that share its prefix: only the per-follower series count.
+	const body = `# HELP t4_follower_lag_revisions Number of revisions the follower is behind the leader (0 = fully caught up).
+# TYPE t4_follower_lag_revisions gauge
+t4_follower_lag_revisions{follower_id="n2"} 0
+t4_follower_lag_revisions{follower_id="n3"} 4
+# HELP t4_follower_resyncs_total Total follower resyncs.
+# TYPE t4_follower_resyncs_total counter
+t4_follower_resyncs_total 1
+# HELP t4_replication_degraded 1 when the leader cannot meet its follower ACK target.
+# TYPE t4_replication_degraded gauge
+t4_replication_degraded 0
+`
+	for _, tc := range []struct {
+		name    string
+		code    int
+		body    string
+		want    int
+		wantErr bool
+	}{
+		{name: "two followers", code: 200, body: body, want: 2},
+		// A node that is not the leader, or a leader no follower has reached
+		// yet, publishes no series at all: promhttp omits an empty family.
+		{name: "no followers", code: 200, body: "t4_replication_degraded 1\n", want: 0},
+		{name: "unavailable", code: 503, body: "", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			n := &node{metricsAddr: strings.TrimPrefix(srv.URL, "http://")}
+			got, err := n.connectedFollowers(t.Context())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error: %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Errorf("connectedFollowers = %d, want %d", got, tc.want)
+			}
+		})
+	}
 }
