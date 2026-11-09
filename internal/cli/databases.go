@@ -62,11 +62,13 @@ func validateDatabases(names []string) error {
 // serves their metrics. Without names it opens the single database cfg
 // describes, reporting on prometheus.DefaultRegisterer. With names each
 // database gets its own data directory and object-store prefix below
-// dbs/<name>, sharing s3Store's client, and reports its metrics with a "db"
+// dbs/<name>, sharing the store's client, and reports its metrics with a "db"
 // label on a registry of their own: Prometheus refuses a metric that is
 // registered both with and without the label, as it would be next to a node
 // that reports on the default registerer.
-func openDatabases(cfg t4.Config, s3Store *object.S3Store, names []string) ([]*database, http.Handler, error) {
+//
+// store may be nil, which serves every database from local storage alone.
+func openDatabases(cfg t4.Config, store object.Store, names []string) ([]*database, http.Handler, error) {
 	if len(names) == 0 {
 		node, err := t4.Open(cfg)
 		if err != nil {
@@ -75,14 +77,26 @@ func openDatabases(cfg t4.Config, s3Store *object.S3Store, names []string) ([]*d
 		return []*database{{node: node}}, promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{}), nil
 	}
 
+	// Every database gets the keys below its own prefix, so the store has to
+	// be divisible. Both backends are; this guards a future one that is not,
+	// and it is checked before any node is opened.
+	var sub object.SubStore
+	if store != nil {
+		s, ok := store.(object.SubStore)
+		if !ok {
+			return nil, nil, fmt.Errorf("--db needs an object store that can be divided by prefix, which %T cannot", store)
+		}
+		sub = s
+	}
+
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	dbs := make([]*database, 0, len(names))
 	for _, name := range names {
 		dbCfg := cfg
 		dbCfg.DataDir = filepath.Join(cfg.DataDir, databasesDir, name)
-		if s3Store != nil {
-			dbCfg.ObjectStore = s3Store.Sub(path.Join(databasesDir, name))
+		if sub != nil {
+			dbCfg.ObjectStore = sub.Sub(path.Join(databasesDir, name))
 		}
 		dbCfg.MetricsRegisterer = prometheus.WrapRegistererWith(prometheus.Labels{"db": name}, reg)
 		node, err := t4.Open(dbCfg)

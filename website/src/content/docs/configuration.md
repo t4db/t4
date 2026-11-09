@@ -151,8 +151,9 @@ t4 run --db tenant-a --db tenant-b \
 ```
 
 - Each database has its own revisions, compaction, checkpoints and auth, stored in `<data-dir>/dbs/<name>/` and below
-  `<s3-prefix>/dbs/<name>/`. Point `t4 status`, `t4 restore` or `t4 branch` at a database with
-  `--s3-prefix <s3-prefix>/dbs/<name>`.
+  `<prefix>/dbs/<name>/` in the object store, on S3 or GCS alike. The databases share one client and its connections.
+  Point `t4 status`, `t4 restore` or `t4 branch` at a database with `--s3-prefix <prefix>/dbs/<name>` (or
+  `--gcs-prefix`).
 - All databases share the client port. A client reaches the database named by the Common Name of its certificate,
   so client mTLS is required, and a certificate for a database that is not served gets no connection. A name is a DNS
   label: lowercase letters, digits and `-`, at most 63 characters.
@@ -480,7 +481,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--client-tls-cert` | — | `T4_CLIENT_TLS_CERT` | No | server certificate file for client-facing TLS (PEM) |
 | `t4 run` | `--client-tls-key` | — | `T4_CLIENT_TLS_KEY` | No | server private key file for client-facing TLS (PEM) |
 | `t4 run` | `--data-dir` | `/var/lib/t4` | `T4_DATA_DIR` | No | directory for Pebble data and local WAL segments |
-| `t4 run` | `--db` | `[]` | `T4_DBS` | No | serve this database; repeat or comma-separate for several. Each is stored below dbs/<name> in --data-dir and --s3-prefix, and clients reach the one named by the Common Name of their certificate (requires client mTLS) |
+| `t4 run` | `--db` | `[]` | `T4_DBS` | No | serve this database; repeat or comma-separate for several. Each is stored below dbs/<name> in --data-dir and in the object store's prefix, and clients reach the one named by the Common Name of their certificate (requires client mTLS) |
 | `t4 run` | `--enable-grpc-gateway` | `true` | `T4_ENABLE_GRPC_GATEWAY` | No | also serve the etcd v3 JSON/HTTP API on --listen, for clients that cannot speak gRPC; streaming RPCs (watch, lease keepalive) are served over websockets |
 | `t4 run` | `--follower-max-retries` | `5` | `T4_FOLLOWER_MAX_RETRIES` | No | consecutive stream failures before a follower attempts a leader takeover |
 | `t4 run` | `--follower-wait-mode` | `quorum` | `T4_FOLLOWER_WAIT_MODE` | No | leader wait policy for follower ACKs before commit: none, quorum, or all |

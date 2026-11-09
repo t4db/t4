@@ -139,7 +139,7 @@ func TestS3StoreSubNestsBelowPrefix(t *testing.T) {
 		{"", "dbs/a", "dbs/a/wal/1"},
 		{"/t4/", "/dbs/a/", "t4/dbs/a/wal/1"},
 	} {
-		if got := NewS3Store(nil, "bucket", tc.prefix).Sub(tc.sub).key("wal/1"); got != tc.want {
+		if got := NewS3Store(nil, "bucket", tc.prefix).Sub(tc.sub).(*S3Store).key("wal/1"); got != tc.want {
 			t.Errorf("prefix %q sub %q: key = %q, want %q", tc.prefix, tc.sub, got, tc.want)
 		}
 	}

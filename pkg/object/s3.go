@@ -38,6 +38,13 @@ type S3Store struct {
 	prefix string // optional key prefix, without leading or trailing slashes
 }
 
+var (
+	_ Store            = (*S3Store)(nil)
+	_ ConditionalStore = (*S3Store)(nil)
+	_ VersionedStore   = (*S3Store)(nil)
+	_ SubStore         = (*S3Store)(nil)
+)
+
 // NewS3Store creates a Store backed by the given S3 bucket.
 // prefix is prepended to every key (may be empty). Leading and trailing
 // slashes are ignored, so "t4", "t4/" and "/t4/" all address the same keys.
@@ -47,7 +54,7 @@ func NewS3Store(client *minio.Client, bucket, prefix string) *S3Store {
 
 // Sub returns a store for the keys below sub within s's prefix, sharing s's
 // client and its connections.
-func (s *S3Store) Sub(sub string) *S3Store {
+func (s *S3Store) Sub(sub string) Store {
 	return NewS3Store(s.client, s.bucket, s.key(strings.Trim(sub, "/")))
 }
 

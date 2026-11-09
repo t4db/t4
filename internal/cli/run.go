@@ -226,22 +226,15 @@ func runCmd() *cobra.Command {
 				logrus.Info("peer mTLS enabled for node replication")
 			}
 
-			var s3Store *object.S3Store
+			var dbStore object.Store // nil unless a store is configured
 			if s3.configured() {
 				obj, err := s3.newStore(cmd.Context(), "")
 				if err != nil {
 					return err
 				}
 				cfg.ObjectStore = obj
+				dbStore = obj
 				logrus.Infof("using object store %s", s3.uri())
-				// Several databases divide one store by prefix, which needs
-				// the store itself rather than the Store interface.
-				if len(databases) > 0 {
-					var ok bool
-					if s3Store, ok = obj.(*object.S3Store); !ok {
-						return fmt.Errorf("--db needs an S3 object store: %s cannot be divided by prefix yet", s3.uri())
-					}
-				}
 			} else {
 				logrus.Warn("no object store configured — durability is local-only")
 			}
@@ -267,7 +260,7 @@ func runCmd() *cobra.Command {
 					branchPrefix, branchCheckpoint)
 			}
 
-			dbs, metricsHandler, err := openDatabases(cfg, s3Store, databases)
+			dbs, metricsHandler, err := openDatabases(cfg, dbStore, databases)
 			if err != nil {
 				return err
 			}
@@ -573,7 +566,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "S3 key prefix of the source node to branch from (uses --s3-bucket) (env: T4_BRANCH_PREFIX)")
 	cmd.Flags().StringVar(&branchCheckpoint, "branch-checkpoint", "", "checkpoint index key returned by 't4 branch fork' (required with --branch-prefix) (env: T4_BRANCH_CHECKPOINT)")
 	// several databases
-	cmd.Flags().StringSliceVar(&databases, "db", nil, "serve this database; repeat or comma-separate for several. Each is stored below dbs/<name> in --data-dir and --s3-prefix, and clients reach the one named by the Common Name of their certificate (requires client mTLS) (env: T4_DBS)")
+	cmd.Flags().StringSliceVar(&databases, "db", nil, "serve this database; repeat or comma-separate for several. Each is stored below dbs/<name> in --data-dir and in the object store's prefix, and clients reach the one named by the Common Name of their certificate (requires client mTLS) (env: T4_DBS)")
 	// gRPC keepalive — match etcd CLI flag names + defaults so etcd v3 clients
 	// (kube-apiserver, etcdctl) don't get GOAWAY too_many_pings.
 	defaultsKA := t4etcd.DefaultKeepaliveOptions()
