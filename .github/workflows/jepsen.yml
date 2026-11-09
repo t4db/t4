@@ -6,7 +6,12 @@ on:
       - "jepsen/**"
     branches:
       - main
-      - "release-*"
+      # Digit-anchored: a bare "release-*" also matches topic branches
+      # named like release-checksums, and a PR from one then runs this
+      # workflow twice, for the push and the pull request. A release
+      # branch has to start with a version digit to match, as
+      # release-1.1 does.
+      - "release-[0-9]*"
   pull_request:
   workflow_dispatch:
 
