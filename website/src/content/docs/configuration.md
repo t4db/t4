@@ -12,8 +12,8 @@ description: All t4.Config fields and CLI flags for the T4 standalone binary.
 | `DataDir`             | `string`                           | —                | **Required.** Directory for the Pebble database and local WAL segments. Created if absent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `ObjectStore`         | `object.Store`                     | `nil`            | S3 or compatible store. `nil` = local-only, single-node mode.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `AncestorStore`       | `object.Store`                     | `nil`            | Source store for a branch node. SSTs referenced by `AncestorSSTFiles` are fetched from here instead of being re-uploaded.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `BranchPoint`         | `*BranchPoint`                     | `nil`            | If set, bootstraps the node from a fork of another database. Applied once on first boot; ignored thereafter. See [Branches](/api/#branches).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `RestorePoint`        | `*RestorePoint`                    | `nil`            | Bootstrap from a specific S3 version (requires S3 versioning). See [Point-in-time restore](/api/#point-in-time-restore-s3-versioning).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `BranchPoint`         | `*BranchPoint`                     | `nil`            | If set, bootstraps the node from a fork of another database. Applied once on first boot; ignored thereafter. See [Branches](api.md#branches).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `RestorePoint`        | `*RestorePoint`                    | `nil`            | Bootstrap from a specific S3 version (requires S3 versioning). See [Point-in-time restore](api.md#point-in-time-restore-s3-versioning).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `SegmentMaxSize`      | `int64`                            | 50 MB            | WAL segment rotation threshold in bytes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `SegmentMaxAge`       | `time.Duration`                    | 10 s             | WAL segment rotation age threshold. When `WALSyncUpload` is `false` this also controls how often async uploads run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `WALSyncUpload`       | `*bool`                            | `true`           | Controls WAL segment upload behaviour in single-node mode. `true` (default): each write is uploaded to S3 synchronously before it is acknowledged — safe when local storage is ephemeral. `false`: uploads happen asynchronously every `SegmentMaxAge`; write latency is lower but up to `SegmentMaxAge` of acknowledged writes can be lost if local storage is destroyed. Set to `false` when local storage is durable (e.g. a PVC) and low latency matters. **In cluster mode this setting has no effect:** uploads are asynchronous while any follower is connected (follower ACKs provide durability), and synchronous while none is, since object storage is then the only other copy of a write. |
@@ -138,6 +138,32 @@ Start a node. All flags below are sub-flags of the `run` subcommand.
 ```bash
 t4 run [flags]
 ```
+
+### Serving several databases
+
+`--db` makes one `t4 run` serve several independent databases, for example the datastores of many small hosted
+Kubernetes control planes:
+
+```bash
+t4 run --db tenant-a --db tenant-b \
+  --client-tls-cert server.crt --client-tls-key server.key --client-tls-ca ca.crt \
+  --s3-bucket my-bucket --s3-prefix t4/
+```
+
+- Each database has its own revisions, compaction, checkpoints and auth, stored in `<data-dir>/dbs/<name>/` and below
+  `<prefix>/dbs/<name>/` in the object store, on S3 or GCS alike. The databases share one client and its connections.
+  Point `t4 status`, `t4 restore` or `t4 branch` at a database with `--s3-prefix <prefix>/dbs/<name>` (or
+  `--gcs-prefix`).
+- All databases share the client port. A client reaches the database named by the Common Name of its certificate,
+  so client mTLS is required, and a certificate for a database that is not served gets no connection. A name is a DNS
+  label: lowercase letters, digits and `-`, at most 63 characters.
+- Metrics carry a `db` label. `/healthz`, `/healthz/leader` and `/readyz` report OK only when that holds for every
+  database.
+- `--db` runs a single node: it cannot yet be combined with `--peer-listen` or `--branch-prefix`.
+- The JSON/HTTP gateway is not served with `--db`. A database is chosen by client certificate, and a JSON or
+  websocket request has no way to present one to route by, so `--enable-grpc-gateway` is reported as off and
+  `t4 run` logs that it is.
+- If one database stops, `t4 run` exits so that its supervisor restarts it, as it does with a single database.
 
 ### Environment variables
 
@@ -271,6 +297,7 @@ metadata.
 | `t4 run` | `T4_CLIENT_TLS_CERT` | `--client-tls-cert` |
 | `t4 run` | `T4_CLIENT_TLS_KEY` | `--client-tls-key` |
 | `t4 run` | `T4_DATA_DIR` | `--data-dir` |
+| `t4 run` | `T4_DBS` | `--db` |
 | `t4 run` | `T4_ENABLE_GRPC_GATEWAY` | `--enable-grpc-gateway` |
 | `t4 run` | `T4_FOLLOWER_MAX_RETRIES` | `--follower-max-retries` |
 | `t4 run` | `T4_FOLLOWER_WAIT_MODE` | `--follower-wait-mode` |
@@ -454,6 +481,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--client-tls-cert` | — | `T4_CLIENT_TLS_CERT` | No | server certificate file for client-facing TLS (PEM) |
 | `t4 run` | `--client-tls-key` | — | `T4_CLIENT_TLS_KEY` | No | server private key file for client-facing TLS (PEM) |
 | `t4 run` | `--data-dir` | `/var/lib/t4` | `T4_DATA_DIR` | No | directory for Pebble data and local WAL segments |
+| `t4 run` | `--db` | `[]` | `T4_DBS` | No | serve this database; repeat or comma-separate for several. Each is stored below dbs/<name> in --data-dir and in the object store's prefix, and clients reach the one named by the Common Name of their certificate (requires client mTLS) |
 | `t4 run` | `--enable-grpc-gateway` | `true` | `T4_ENABLE_GRPC_GATEWAY` | No | also serve the etcd v3 JSON/HTTP API on --listen, for clients that cannot speak gRPC; streaming RPCs (watch, lease keepalive) are served over websockets |
 | `t4 run` | `--follower-max-retries` | `5` | `T4_FOLLOWER_MAX_RETRIES` | No | consecutive stream failures before a follower attempts a leader takeover |
 | `t4 run` | `--follower-wait-mode` | `quorum` | `T4_FOLLOWER_WAIT_MODE` | No | leader wait policy for follower ACKs before commit: none, quorum, or all |

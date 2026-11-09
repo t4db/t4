@@ -1,17 +1,24 @@
 // Package metrics defines Prometheus metrics for a t4 node.
 //
-// Call Register once during node startup to register all metrics on the
-// provided registerer. When reg is nil, prometheus.DefaultRegisterer is used.
+// A node registers its metrics when it opens and releases them when it
+// closes (Register, Metrics.Release). Open nodes that share a registerer share
+// their metrics; a node that should report separately, such as one database
+// of several served by one process, uses its own registerer, e.g. one wrapped
+// with a "db" label.
 package metrics
 
 import (
+	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-var (
+// Metrics holds the t4 metrics registered on one registerer.
+type Metrics struct {
 	// WritesTotal counts completed write operations by op type.
 	WritesTotal *prometheus.CounterVec
 
@@ -134,272 +141,343 @@ var (
 	// WatchScanEntriesTotal counts records decoded once by live dispatch or
 	// replay scans, plus matching deliveries to watch subscribers.
 	WatchScanEntriesTotal *prometheus.CounterVec
+
+	dbSizeFunc atomic.Pointer[func() (uint64, bool)]
+
+	reg    prometheus.Registerer
+	shared bool // listed in byReg, shared by the open nodes on reg
+	refs   int  // open nodes using these metrics, under mu
+}
+
+var (
+	mu sync.Mutex
+	// byReg holds the metrics of every pointer registerer an open node uses.
+	// Registerers of other kinds are not shared: they may not be comparable,
+	// and every registerer the Prometheus client returns is a pointer.
+	byReg = map[prometheus.Registerer]*Metrics{}
 )
 
-var once sync.Once
-var dbSizeFunc atomic.Pointer[func() (uint64, bool)]
-var gatherer prometheus.Gatherer = prometheus.DefaultGatherer
-
-// Register registers all t4 metrics on reg. Only the first call takes
-// effect — subsequent calls are no-ops (safe for multiple Open() calls).
-// If reg is nil, prometheus.DefaultRegisterer is used.
-func Register(reg prometheus.Registerer) {
+// Register returns the t4 metrics on reg (prometheus.DefaultRegisterer when
+// nil) for a node that is opening, registering them unless an open node
+// shares them already. Release them when the node closes: the last release
+// unregisters them, so that a node opened again later, on reg or on another
+// registerer wrapping the same registry, registers anew.
+func Register(reg prometheus.Registerer) (*Metrics, error) {
 	if reg == nil {
 		reg = prometheus.DefaultRegisterer
 	}
-	once.Do(func() {
-		if g, ok := reg.(prometheus.Gatherer); ok {
-			gatherer = g
+	shared := reflect.ValueOf(reg).Kind() == reflect.Pointer
+	mu.Lock()
+	defer mu.Unlock()
+	if shared {
+		if m, ok := byReg[reg]; ok {
+			m.refs++
+			return m, nil
 		}
-
-		WritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_writes_total",
-			Help: "Total write operations (put/create/update/delete/compact).",
-		}, []string{"op"})
-
-		WriteErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_write_errors_total",
-			Help: "Total write errors by op type.",
-		}, []string{"op"})
-
-		WriteDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "t4_write_duration_seconds",
-			Help:    "Write operation duration (local execution, excluding forwarding).",
-			Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .5},
-		}, []string{"op"})
-
-		ReadsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_reads_total",
-			Help: "Total read operations (get/exists/list/count).",
-		}, []string{"op"})
-
-		ReadErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_read_errors_total",
-			Help: "Total read errors by op type.",
-		}, []string{"op"})
-
-		ReadDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "t4_read_duration_seconds",
-			Help: "Read operation duration (local execution, excluding follower sync).",
-			// Up to 10s: with a top bucket of 0.5s, quantiles of slow
-			// reads (large lists, reads at old revisions) read as 0.5s
-			// however long they took.
-			Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .25, .5, 1, 2.5, 5, 10},
-		}, []string{"op"})
-
-		TxnRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_txn_requests_total",
-			Help: "Transactions by resolved write shape, compare outcome, and result.",
-		}, []string{"kind", "compare", "result"})
-
-		TxnSubOpsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_txn_suboperations_total",
-			Help: "Committed transaction sub-operations by resolved operation type.",
-		}, []string{"op"})
-
-		TxnLockWaitDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "t4_txn_lock_wait_duration_seconds",
-			Help:    "Time spent waiting for the transaction write-preparation mutex.",
-			Buckets: []float64{.00001, .00005, .0001, .0005, .001, .005, .01, .05, .1, .5},
-		})
-
-		TxnPrepareDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "t4_txn_prepare_duration_seconds",
-			Help:    "Time spent evaluating conditions and preparing a transaction under the write mutex.",
-			Buckets: []float64{.00001, .00005, .0001, .0005, .001, .005, .01, .05, .1, .5},
-		}, []string{"kind"})
-
-		ForwardedWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_forwarded_writes_total",
-			Help: "Total writes forwarded to the leader by this follower.",
-		}, []string{"op"})
-
-		ForwardDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "t4_forward_duration_seconds",
-			Help:    "Forwarded write round-trip duration.",
-			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
-		}, []string{"op"})
-
-		CurrentRevision = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "t4_current_revision",
-			Help: "Latest applied revision.",
-		})
-
-		CompactRevision = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "t4_compact_revision",
-			Help: "Compaction watermark revision.",
-		})
-
-		DBSizeBytes = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "t4_db_size_bytes",
-			Help: "On-disk size of the local Pebble database in bytes.",
-		}, func() float64 {
-			if f := dbSizeFunc.Load(); f != nil {
-				if size, ok := (*f)(); ok {
-					return float64(size)
-				}
+	}
+	m := newMetrics()
+	m.reg, m.shared, m.refs = reg, shared, 1
+	for i, c := range m.collectors() {
+		if err := reg.Register(c); err != nil {
+			for _, done := range m.collectors()[:i] {
+				reg.Unregister(done)
 			}
-			return 0
-		})
-
-		Role = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "t4_role",
-			Help: "Current node role; 1 = active, 0 = inactive.",
-		}, []string{"role"})
-
-		ReplicationDegraded = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "t4_replication_degraded",
-			Help: "1 when the leader cannot meet its follower ACK target and is flushing each batch to object storage before acknowledging.",
-		})
-
-		WALUploadsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "t4_wal_uploads_total",
-			Help: "Total WAL segments uploaded to object storage.",
-		})
-
-		WALUploadErrors = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "t4_wal_upload_errors_total",
-			Help: "Total WAL segment upload errors.",
-		})
-
-		WALUploadConflicts = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "t4_wal_upload_conflicts_total",
-			Help: "Total WAL segment uploads skipped because the object already existed.",
-		})
-
-		WALUploadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "t4_wal_upload_duration_seconds",
-			Help:    "WAL segment upload duration.",
-			Buckets: []float64{.01, .05, .1, .5, 1, 5, 10},
-		})
-
-		WALGCTotal = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "t4_wal_gc_segments_total",
-			Help: "Total WAL segments deleted from object storage during GC.",
-		})
-
-		CheckpointsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "t4_checkpoints_total",
-			Help: "Total checkpoints written to object storage.",
-		})
-
-		ElectionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_elections_total",
-			Help: "Total leader election attempts by outcome (won/lost).",
-		}, []string{"outcome"})
-
-		FollowerResyncsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_follower_resyncs_total",
-			Help: "Total follower resyncs by trigger reason.",
-		}, []string{"reason"})
-
-		AuthAttemptsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_auth_attempts_total",
-			Help: "Total authentication attempts by result (success/fail/locked).",
-		}, []string{"result"})
-
-		FollowerLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "t4_follower_lag_revisions",
-			Help: "Number of revisions the follower is behind the leader (0 = fully caught up).",
-		}, []string{"follower_id"})
-
-		ObjectStoreOpsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_object_store_ops_total",
-			Help: "Total object storage operations by op (get/put/delete/list/get_etag/put_if_absent/put_if_match) and result (success/error).",
-		}, []string{"op", "result"})
-
-		ObjectStoreDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "t4_object_store_duration_seconds",
-			Help:    "Object storage operation latency.",
-			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-		}, []string{"op"})
-
-		WatchActive = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "t4_watch_active",
-			Help: "Currently active watch subscriptions.",
-		})
-
-		WatchActivePrefixes = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "t4_watch_active_prefixes",
-			Help: "Number of distinct prefixes with active watch subscriptions.",
-		})
-
-		WatchScanDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "t4_watch_scan_duration_seconds",
-			Help:    "Duration of live dispatch or replay processing for watch batches.",
-			Buckets: []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
-		})
-
-		WatchScanRevisionSpan = prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "t4_watch_scan_revision_span",
-			Help:    "Number of revisions covered by each watch delivery batch.",
-			Buckets: []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
-		})
-
-		WatchScanEntriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "t4_watch_scan_entries_total",
-			Help: "Watch records decoded or delivered, labelled by scanned or matched.",
-		}, []string{"result"})
-
-		reg.MustRegister(
-			WritesTotal,
-			WriteErrors,
-			WriteDuration,
-			ReadsTotal,
-			ReadErrors,
-			ReadDuration,
-			TxnRequestsTotal,
-			TxnSubOpsTotal,
-			TxnLockWaitDuration,
-			TxnPrepareDuration,
-			ForwardedWritesTotal,
-			ForwardDuration,
-			CurrentRevision,
-			CompactRevision,
-			DBSizeBytes,
-			Role,
-			ReplicationDegraded,
-			WALUploadsTotal,
-			WALUploadErrors,
-			WALUploadConflicts,
-			WALUploadDuration,
-			WALGCTotal,
-			CheckpointsTotal,
-			ElectionsTotal,
-			FollowerResyncsTotal,
-			AuthAttemptsTotal,
-			FollowerLag,
-			ObjectStoreOpsTotal,
-			ObjectStoreDuration,
-			WatchActive,
-			WatchActivePrefixes,
-			WatchScanDuration,
-			WatchScanRevisionSpan,
-			WatchScanEntriesTotal,
-		)
-	})
+			return nil, fmt.Errorf("t4: register metrics: %w", err)
+		}
+	}
+	if shared {
+		byReg[reg] = m
+	}
+	return m, nil
 }
 
-// Gatherer returns the Prometheus gatherer associated with the singleton
-// metrics registration. When the configured registerer does not implement
-// prometheus.Gatherer, this falls back to prometheus.DefaultGatherer.
-func Gatherer() prometheus.Gatherer {
-	return gatherer
+// Lookup returns the metrics an open node registered on reg
+// (prometheus.DefaultRegisterer when nil), or nil if there are none or reg is
+// not a pointer. It takes no reference: the caller must not outlive the node.
+func Lookup(reg prometheus.Registerer) *Metrics {
+	if reg == nil {
+		reg = prometheus.DefaultRegisterer
+	}
+	if reflect.ValueOf(reg).Kind() != reflect.Pointer {
+		return nil
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return byReg[reg]
+}
+
+// Release gives up a reference Register returned. The last one unregisters
+// the metrics.
+func (m *Metrics) Release() {
+	mu.Lock()
+	defer mu.Unlock()
+	if m.refs--; m.refs > 0 {
+		return
+	}
+	if m.shared {
+		delete(byReg, m.reg)
+	}
+	for _, c := range m.collectors() {
+		m.reg.Unregister(c)
+	}
+}
+
+// ObserveObjectStoreOp records an object store operation (see
+// object.Observer).
+func (m *Metrics) ObserveObjectStoreOp(op string, d time.Duration, err error) {
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	m.ObjectStoreOpsTotal.WithLabelValues(op, result).Inc()
+	m.ObjectStoreDuration.WithLabelValues(op).Observe(d.Seconds())
+}
+
+func (m *Metrics) collectors() []prometheus.Collector {
+	return []prometheus.Collector{
+		m.WritesTotal,
+		m.WriteErrors,
+		m.WriteDuration,
+		m.ReadsTotal,
+		m.ReadErrors,
+		m.ReadDuration,
+		m.TxnRequestsTotal,
+		m.TxnSubOpsTotal,
+		m.TxnLockWaitDuration,
+		m.TxnPrepareDuration,
+		m.ForwardedWritesTotal,
+		m.ForwardDuration,
+		m.CurrentRevision,
+		m.CompactRevision,
+		m.DBSizeBytes,
+		m.Role,
+		m.ReplicationDegraded,
+		m.WALUploadsTotal,
+		m.WALUploadErrors,
+		m.WALUploadConflicts,
+		m.WALUploadDuration,
+		m.WALGCTotal,
+		m.CheckpointsTotal,
+		m.ElectionsTotal,
+		m.FollowerResyncsTotal,
+		m.AuthAttemptsTotal,
+		m.FollowerLag,
+		m.ObjectStoreOpsTotal,
+		m.ObjectStoreDuration,
+		m.WatchActive,
+		m.WatchActivePrefixes,
+		m.WatchScanDuration,
+		m.WatchScanRevisionSpan,
+		m.WatchScanEntriesTotal,
+	}
+}
+
+func newMetrics() *Metrics {
+	m := &Metrics{}
+	m.WritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_writes_total",
+		Help: "Total write operations (put/create/update/delete/compact).",
+	}, []string{"op"})
+
+	m.WriteErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_write_errors_total",
+		Help: "Total write errors by op type.",
+	}, []string{"op"})
+
+	m.WriteDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "t4_write_duration_seconds",
+		Help:    "Write operation duration (local execution, excluding forwarding).",
+		Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .5},
+	}, []string{"op"})
+
+	m.ReadsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_reads_total",
+		Help: "Total read operations (get/exists/list/count).",
+	}, []string{"op"})
+
+	m.ReadErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_read_errors_total",
+		Help: "Total read errors by op type.",
+	}, []string{"op"})
+
+	m.ReadDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "t4_read_duration_seconds",
+		Help: "Read operation duration (local execution, excluding follower sync).",
+		// Up to 10s: with a top bucket of 0.5s, quantiles of slow
+		// reads (large lists, reads at old revisions) read as 0.5s
+		// however long they took.
+		Buckets: []float64{.0001, .0005, .001, .005, .01, .05, .1, .25, .5, 1, 2.5, 5, 10},
+	}, []string{"op"})
+
+	m.TxnRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_txn_requests_total",
+		Help: "Transactions by resolved write shape, compare outcome, and result.",
+	}, []string{"kind", "compare", "result"})
+
+	m.TxnSubOpsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_txn_suboperations_total",
+		Help: "Committed transaction sub-operations by resolved operation type.",
+	}, []string{"op"})
+
+	m.TxnLockWaitDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "t4_txn_lock_wait_duration_seconds",
+		Help:    "Time spent waiting for the transaction write-preparation mutex.",
+		Buckets: []float64{.00001, .00005, .0001, .0005, .001, .005, .01, .05, .1, .5},
+	})
+
+	m.TxnPrepareDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "t4_txn_prepare_duration_seconds",
+		Help:    "Time spent evaluating conditions and preparing a transaction under the write mutex.",
+		Buckets: []float64{.00001, .00005, .0001, .0005, .001, .005, .01, .05, .1, .5},
+	}, []string{"kind"})
+
+	m.ForwardedWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_forwarded_writes_total",
+		Help: "Total writes forwarded to the leader by this follower.",
+	}, []string{"op"})
+
+	m.ForwardDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "t4_forward_duration_seconds",
+		Help:    "Forwarded write round-trip duration.",
+		Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+	}, []string{"op"})
+
+	m.CurrentRevision = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "t4_current_revision",
+		Help: "Latest applied revision.",
+	})
+
+	m.CompactRevision = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "t4_compact_revision",
+		Help: "Compaction watermark revision.",
+	})
+
+	m.DBSizeBytes = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "t4_db_size_bytes",
+		Help: "On-disk size of the local Pebble database in bytes.",
+	}, func() float64 {
+		if f := m.dbSizeFunc.Load(); f != nil {
+			if size, ok := (*f)(); ok {
+				return float64(size)
+			}
+		}
+		return 0
+	})
+
+	m.Role = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "t4_role",
+		Help: "Current node role; 1 = active, 0 = inactive.",
+	}, []string{"role"})
+
+	m.ReplicationDegraded = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "t4_replication_degraded",
+		Help: "1 when the leader cannot meet its follower ACK target and is flushing each batch to object storage before acknowledging.",
+	})
+
+	m.WALUploadsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "t4_wal_uploads_total",
+		Help: "Total WAL segments uploaded to object storage.",
+	})
+
+	m.WALUploadErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "t4_wal_upload_errors_total",
+		Help: "Total WAL segment upload errors.",
+	})
+
+	m.WALUploadConflicts = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "t4_wal_upload_conflicts_total",
+		Help: "Total WAL segment uploads skipped because the object already existed.",
+	})
+
+	m.WALUploadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "t4_wal_upload_duration_seconds",
+		Help:    "WAL segment upload duration.",
+		Buckets: []float64{.01, .05, .1, .5, 1, 5, 10},
+	})
+
+	m.WALGCTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "t4_wal_gc_segments_total",
+		Help: "Total WAL segments deleted from object storage during GC.",
+	})
+
+	m.CheckpointsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "t4_checkpoints_total",
+		Help: "Total checkpoints written to object storage.",
+	})
+
+	m.ElectionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_elections_total",
+		Help: "Total leader election attempts by outcome (won/lost).",
+	}, []string{"outcome"})
+
+	m.FollowerResyncsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_follower_resyncs_total",
+		Help: "Total follower resyncs by trigger reason.",
+	}, []string{"reason"})
+
+	m.AuthAttemptsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_auth_attempts_total",
+		Help: "Total authentication attempts by result (success/fail/locked).",
+	}, []string{"result"})
+
+	m.FollowerLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "t4_follower_lag_revisions",
+		Help: "Number of revisions the follower is behind the leader (0 = fully caught up).",
+	}, []string{"follower_id"})
+
+	m.ObjectStoreOpsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_object_store_ops_total",
+		Help: "Total object storage operations by op (get/put/delete/list/get_etag/put_if_absent/put_if_match) and result (success/error).",
+	}, []string{"op", "result"})
+
+	m.ObjectStoreDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "t4_object_store_duration_seconds",
+		Help:    "Object storage operation latency.",
+		Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+	}, []string{"op"})
+
+	m.WatchActive = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "t4_watch_active",
+		Help: "Currently active watch subscriptions.",
+	})
+
+	m.WatchActivePrefixes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "t4_watch_active_prefixes",
+		Help: "Number of distinct prefixes with active watch subscriptions.",
+	})
+
+	m.WatchScanDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "t4_watch_scan_duration_seconds",
+		Help:    "Duration of live dispatch or replay processing for watch batches.",
+		Buckets: []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
+	})
+
+	m.WatchScanRevisionSpan = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "t4_watch_scan_revision_span",
+		Help:    "Number of revisions covered by each watch delivery batch.",
+		Buckets: []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
+	})
+
+	m.WatchScanEntriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "t4_watch_scan_entries_total",
+		Help: "Watch records decoded or delivered, labelled by scanned or matched.",
+	}, []string{"result"})
+	return m
 }
 
 // SetRole updates the role gauges so exactly one has value 1.
-func SetRole(role string) {
+func (m *Metrics) SetRole(role string) {
 	for _, r := range []string{"leader", "follower", "single"} {
 		if r == role {
-			Role.WithLabelValues(r).Set(1)
+			m.Role.WithLabelValues(r).Set(1)
 		} else {
-			Role.WithLabelValues(r).Set(0)
+			m.Role.WithLabelValues(r).Set(0)
 		}
 	}
 }
 
 // SetDBSizeFunc installs the source sampled by DBSizeBytes on each scrape.
 // f reports ok=false when the database is unavailable (e.g. closed).
-func SetDBSizeFunc(f func() (size uint64, ok bool)) {
-	dbSizeFunc.Store(&f)
+func (m *Metrics) SetDBSizeFunc(f func() (size uint64, ok bool)) {
+	m.dbSizeFunc.Store(&f)
 }
