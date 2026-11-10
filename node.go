@@ -1031,6 +1031,10 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 
 	n.observeTerm(rec.Term)
 	n.storeRole(roleFollower)
+	// A follower has no ACK target of its own, and the loop that publishes
+	// this gauge belongs to the leader: a node demoted without the process
+	// ending would otherwise keep reporting whatever it last said as leader.
+	metrics.ReplicationDegraded.Set(0)
 	cli := peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log, n.cfg.TracerProvider)
 	n.peerCli = cli
 	n.leaderCli.Store(cli)

@@ -305,6 +305,13 @@ func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) 
 		case <-ctx.Done():
 			return
 		}
+		// Published here rather than from the commit loop, which only runs
+		// when a batch arrives: an idle leader that lost every follower would
+		// otherwise keep reporting 0 until the next write, which is when an
+		// operator most needs to be told. This loop wakes every
+		// leaderCheckInterval and on every follower disconnect.
+		metrics.ReplicationDegraded.Set(boolToFloat(n.replicationDegraded()))
+
 		now := time.Now()
 		slow := n.slowSafe(now)
 		g := n.lease.Load()
@@ -601,7 +608,6 @@ func (n *Node) commitLoop(ctx context.Context) {
 			if setter, ok := n.wal.(interface{ SetSyncUpload(bool) }); ok {
 				setter.SetSyncUpload(want)
 				degraded = want
-				metrics.ReplicationDegraded.Set(boolToFloat(want))
 				if want {
 					n.log.Warnf("t4: replication below ACK target — flushing each batch to object storage before acknowledging")
 				} else {

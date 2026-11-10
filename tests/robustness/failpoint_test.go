@@ -190,6 +190,41 @@ var failpoints = []failpoint{
 		fault: func(n *node, on bool) { n.s3Proxy.setBlackhole(on) },
 		hold:  10 * time.Second,
 	},
+	// The leader loses object storage and its followers at once. This is the
+	// shape the leader lease exists for, and the only one that puts two nodes
+	// in a position to each believe they lead: the leader cannot renew the
+	// lock, so its lease runs out, while its followers stop hearing it and one
+	// takes over. Neither of the single faults reaches it —
+	// BlackholeS3Leader's peers keep hearing it, so nobody takes over, and
+	// BlackholePeerLeader keeps renewing through object storage, so it stays
+	// leader. The hold outlasts the 6 s lease, and clients can still reach the
+	// old leader throughout, which is what makes a stale read from it
+	// possible if the lease were ever not enforced.
+	networkFailpoint{
+		name: "BlackholeS3AndPeerLeader",
+		pick: pickLeader,
+		fault: func(n *node, on bool) {
+			n.s3Proxy.setBlackhole(on)
+			n.peerProxy.setBlackhole(on)
+		},
+		// Just past the lease. Cutting both at once leaves the whole cluster
+		// unable to write until a follower takes over, so every extra second
+		// of hold is another few hundred failed operations, and failed
+		// operations are what the linearizability checker is expensive in.
+		//
+		// Read a failure here carefully. Over five runs of EtcdPutDeleteLease
+		// this produced one "Linearization illegal" and four checker
+		// timeouts, and never a clean pass; a 10 s hold timed out as well.
+		// A timeout says the history was too costly to settle, not that T4
+		// misbehaved. The one illegal run localised to a delete that had
+		// timed out inside the isolation window, and the unpatched
+		// cross-check at robustness_test.go:197 could not settle that history
+		// either, in 30 minutes per pass — so whether it was T4 or the
+		// patching of failed operations from the watch stream is still open.
+		// TestSupersededLeaderServesNoStaleRead covers the one property this
+		// scenario was added for, deterministically.
+		hold: 7 * time.Second,
+	},
 }
 
 func failpointByName(name string) (failpoint, error) {
