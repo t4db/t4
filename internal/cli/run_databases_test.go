@@ -19,7 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/t4db/t4"
 )
@@ -285,4 +289,142 @@ func TestSingleDatabaseMetricsUnchanged(t *testing.T) {
 	if strings.Contains(body, "promhttp_metric_handler") {
 		t.Fatal("/metrics without --db gained promhttp_metric_handler series")
 	}
+}
+
+// TestRunKeepsAuthPerDatabase pins that authentication does not cross
+// databases: each keeps its own users, and a token one issued buys nothing at
+// another. Nothing but the per-database loop in run enforces this — it builds
+// an auth store and a token store for each — so lifting either out of that
+// loop would let one tenant's credentials read another's keys, with no other
+// test to catch it.
+func TestRunKeepsAuthPerDatabase(t *testing.T) {
+	pki := newTestPKI(t)
+	serverCert, serverKey := pki.issue(t, "localhost", true)
+	addr := freeAddr(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		cmd := NewRootCmd()
+		cmd.SetArgs([]string{
+			"run",
+			"--db", "tenant-a", "--db", "tenant-b",
+			"--data-dir", t.TempDir(),
+			"--listen", addr,
+			"--metrics-addr", freeAddr(t),
+			"--auth-enabled",
+			"--client-tls-cert", serverCert,
+			"--client-tls-key", serverKey,
+			"--client-tls-ca", pki.caPath,
+		})
+		done <- cmd.ExecuteContext(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("t4 run: %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Error("t4 run did not stop")
+		}
+	})
+
+	a := pki.client(t, addr, "tenant-a")
+	b := pki.client(t, addr, "tenant-b")
+	put(t, a, "/k", "from-a") // also waits for the server to serve
+	put(t, b, "/k", "from-b")
+
+	opCtx, opCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer opCancel()
+
+	// A root user in each database, with a different password. The second
+	// database's calls go through after the first has auth on, which already
+	// says the switch is not process-wide.
+	for _, db := range []struct {
+		name string
+		cli  *clientv3.Client
+		pw   string
+	}{{"tenant-a", a, "pw-a"}, {"tenant-b", b, "pw-b"}} {
+		if _, err := db.cli.RoleAdd(opCtx, "root"); err != nil {
+			t.Fatalf("%s: add root role: %v", db.name, err)
+		}
+		if _, err := db.cli.UserAdd(opCtx, "root", db.pw); err != nil {
+			t.Fatalf("%s: add root: %v", db.name, err)
+		}
+		if _, err := db.cli.UserGrantRole(opCtx, "root", "root"); err != nil {
+			t.Fatalf("%s: grant root: %v", db.name, err)
+		}
+		if _, err := db.cli.AuthEnable(opCtx); err != nil {
+			t.Fatalf("%s: enable auth: %v", db.name, err)
+		}
+	}
+
+	// Each database now refuses an unauthenticated write.
+	if _, err := a.Put(opCtx, "/k", "unauthenticated"); err == nil {
+		t.Error("tenant-a served a write with no credentials after auth was enabled")
+	}
+
+	// tenant-a's password is not tenant-b's.
+	if _, err := pki.authenticate(t, opCtx, addr, "tenant-b", "root", "pw-a"); err == nil {
+		t.Error("tenant-b accepted tenant-a's password for root")
+	}
+
+	// Nor is tenant-a's token. The same token is then used against the
+	// database that issued it, so that a token broken everywhere could not
+	// pass the check above.
+	token, err := pki.authenticate(t, opCtx, addr, "tenant-a", "root", "pw-a")
+	if err != nil {
+		t.Fatalf("authenticate on tenant-a: %v", err)
+	}
+	if err := pki.rangeWithToken(t, opCtx, addr, "tenant-b", token); err == nil {
+		t.Error("tenant-b served a read with tenant-a's token")
+	}
+	if err := pki.rangeWithToken(t, opCtx, addr, "tenant-a", token); err != nil {
+		t.Errorf("tenant-a refused the token it issued: %v", err)
+	}
+}
+
+// rawConn dials the client port with a certificate naming db, below clientv3,
+// so that a request can carry a token of the test's choosing.
+func (p *testPKI) rawConn(t *testing.T, addr, db string) *grpc.ClientConn {
+	t.Helper()
+	certPath, keyPath := p.issue(t, db, false)
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+		RootCAs:      p.pool,
+		Certificates: []tls.Certificate{cert},
+		ServerName:   "localhost",
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// authenticate logs in to the database a certificate names and returns its
+// token.
+func (p *testPKI) authenticate(t *testing.T, ctx context.Context, addr, db, user, password string) (string, error) {
+	t.Helper()
+	resp, err := etcdserverpb.NewAuthClient(p.rawConn(t, addr, db)).Authenticate(ctx,
+		&etcdserverpb.AuthenticateRequest{Name: user, Password: password})
+	if err != nil {
+		return "", err
+	}
+	return resp.Token, nil
+}
+
+// rangeWithToken reads one key from the database a certificate names, offering
+// token as the caller's identity.
+func (p *testPKI) rangeWithToken(t *testing.T, ctx context.Context, addr, db, token string) error {
+	t.Helper()
+	ctx = metadata.AppendToOutgoingContext(ctx, "token", token)
+	_, err := etcdserverpb.NewKVClient(p.rawConn(t, addr, db)).Range(ctx,
+		&etcdserverpb.RangeRequest{Key: []byte("/k")})
+	return err
 }
