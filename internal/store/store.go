@@ -136,6 +136,49 @@ func sharedBlockCache() *pebble.Cache {
 	return blockCache
 }
 
+const (
+	// defaultMemTableSize is the write buffer a process serving one database
+	// gets. See defaultPebbleOptions for why it is not Pebble's 4 MiB.
+	defaultMemTableSize = 32 << 20
+
+	// minMemTableSize is the floor DividedAmong will not go below, and is
+	// Pebble's own default. Smaller buffers flush so often that they hand the
+	// compactor a stream of tiny files, which is the cost defaultMemTableSize
+	// exists to avoid.
+	minMemTableSize = 4 << 20
+)
+
+// DividedAmong returns the options for a process opening count databases at
+// once, so that they share the budget one database would take whole.
+//
+// MemTableSize and MaxConcurrentCompactions are per store and are set in
+// defaultPebbleOptions for a process serving a single database: 32 MiB of
+// write buffer, up to four buffers in flight, and up to four compaction
+// goroutines. Each database taking all of that does not scale with the number
+// of them — twenty would reserve 2.5 GiB of buffers and could run eighty
+// compactions on whatever cores the host has.
+//
+// So the buffer shrinks with the count, down to Pebble's own default, and past
+// one database each compacts with a single goroutine. A database writing hard
+// then flushes more often than it would alone, which is the trade a shared
+// process asks for. A count of one reproduces the single-database options
+// exactly, so a caller need not special-case it: it leaves the compaction
+// limit as the function defaultPebbleOptions set, because Go adjusts
+// GOMAXPROCS when a container's CPU limit changes and a number captured here
+// would stop that from reaching Pebble.
+func DividedAmong(count int) PebbleOption {
+	if count < 1 {
+		count = 1
+	}
+	size := max(uint64(defaultMemTableSize/count), minMemTableSize)
+	return func(o *pebble.Options) {
+		o.MemTableSize = size
+		if count > 1 {
+			o.MaxConcurrentCompactions = func() int { return 1 }
+		}
+	}
+}
+
 // maxCompactions bounds Pebble's compaction concurrency: enough to keep up
 // with a sustained write stream, never more than half the machine.
 func maxCompactions() int {
@@ -170,7 +213,7 @@ func defaultPebbleOptions() *pebble.Options {
 		// compactor a steady stream of tiny L0 files. Profiling attributed
 		// ~25-30% of CPU to compaction at 4 KiB values. A larger memtable cuts
 		// the flush rate proportionally and produces fewer, larger SSTs.
-		MemTableSize: 32 << 20,
+		MemTableSize: defaultMemTableSize,
 
 		// With a 32 MiB memtable, the default threshold of 2 stalls writes
 		// after 64 MiB in flight. Allowing four absorbs a flush that is slower

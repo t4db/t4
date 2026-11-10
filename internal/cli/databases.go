@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/t4db/t4"
+	istore "github.com/t4db/t4/internal/store"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -89,12 +91,19 @@ func openDatabases(cfg t4.Config, store object.Store, names []string) ([]*databa
 		sub = s
 	}
 
+	// One database's worth of write buffer and compaction workers, shared out
+	// rather than taken whole by each. Built once: a copy of cfg shares the
+	// slice's backing array, so appending per database could write the same
+	// slot twice.
+	pebbleOpts := append(slices.Clone(cfg.PebbleOptions), istore.DividedAmong(len(names)))
+
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	dbs := make([]*database, 0, len(names))
 	for _, name := range names {
 		dbCfg := cfg
 		dbCfg.DataDir = filepath.Join(cfg.DataDir, databasesDir, name)
+		dbCfg.PebbleOptions = pebbleOpts
 		if sub != nil {
 			dbCfg.ObjectStore = sub.Sub(path.Join(databasesDir, name))
 		}

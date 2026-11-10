@@ -153,6 +153,9 @@ t4 run --db tenant-a --db tenant-b \
 - All databases share the client port. A client reaches the database named by the Common Name of its certificate,
   so client mTLS is required, and a certificate for a database that is not served gets no connection. A name is a DNS
   label: lowercase letters, digits and `-`, at most 63 characters.
+- The databases share one write budget rather than each taking the whole of it: the Pebble write buffer shrinks with
+  the number of databases, down to 4 MiB, and past one database each compacts with a single worker. Adding a tenant
+  therefore does not multiply memory or compaction load, at the cost of flushing more often under a heavy write burst.
 - Metrics carry a `db` label. `/healthz`, `/healthz/leader` and `/readyz` report OK only when that holds for every
   database.
 - `--db` runs a single node: it cannot yet be combined with `--peer-listen` or `--branch-prefix`.
