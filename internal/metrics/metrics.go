@@ -70,9 +70,13 @@ var (
 	Role *prometheus.GaugeVec
 
 	// ReplicationDegraded is 1 while the leader cannot meet its configured
-	// follower ACK target and is therefore uploading each batch to object
-	// storage before acknowledging it. Sustained 1 means writes are paying an
-	// S3 round trip and the cluster has lost its replication redundancy.
+	// follower ACK target, so that the next write uploads each batch to object
+	// storage before acknowledging it. It reports the condition rather than
+	// the writes, and so is 1 on an idle leader that has lost its followers:
+	// that is the state an operator wants an alert for, and waiting for a
+	// write to notice would keep it silent exactly then. Sustained 1 means the
+	// cluster has lost its replication redundancy and writes are paying an S3
+	// round trip.
 	ReplicationDegraded prometheus.Gauge
 
 	// WALUploadsTotal counts WAL segments successfully uploaded to S3.
@@ -249,7 +253,7 @@ func Register(reg prometheus.Registerer) {
 
 		ReplicationDegraded = prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "t4_replication_degraded",
-			Help: "1 when the leader cannot meet its follower ACK target and is flushing each batch to object storage before acknowledging.",
+			Help: "1 when the leader cannot meet its follower ACK target, so that writes flush each batch to object storage before acknowledging.",
 		})
 
 		WALUploadsTotal = prometheus.NewCounter(prometheus.CounterOpts{
