@@ -6,8 +6,12 @@ T4 has been deployed!
 
 ━━ Client endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  etcd-compatible gRPC:
-    {{ include "t4.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+  etcd-compatible gRPC / advertised MemberList client URL(s):
+    {{ include "t4.advertiseClientURLs" . }}
+
+  Automatic *.svc.cluster.local URLs are internal Kubernetes addresses.
+  For clients outside the cluster, set config.advertiseClientUrls explicitly
+  to URL(s) those clients can reach.
 
 {{- if .Values.config.enableGrpcGateway }}
 {{- $gwPort := include "t4.gatewayPort" . }}
@@ -31,9 +35,12 @@ T4 has been deployed!
   curl http://localhost:{{ .Values.service.metricsPort }}/healthz
   curl http://localhost:{{ .Values.service.metricsPort }}/readyz
 
-━━ Kine integration example ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━ In-cluster Kine example (direct T4 Service) ━━━━━━━━━━━━━━━━━━━━━
 
   --kine-endpoint="etcd://{{ include "t4.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+
+  This example uses the internal direct Service, independently of MemberList URLs.
+  TLS-enabled client connections also require appropriate client TLS configuration.
 
 {{- if not .Values.s3.bucket }}
 {{- if not .Values.s3server.enabled }}

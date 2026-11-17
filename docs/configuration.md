@@ -1,5 +1,62 @@
 # Configuration Reference
 
+## Client endpoint discovery
+
+`--advertise-client-urls` (or `T4_ADVERTISE_CLIENT_URLS`) configures the client
+URLs returned by the etcd `MemberList` RPC. An explicit flag overrides the
+environment variable. With neither set, `MemberList` returns gRPC
+`Unimplemented`; etcd clients retain their existing endpoints when sync fails.
+This setting belongs to the CLI/etcd adapter, not the storage-engine `t4.Config`.
+Embedded callers can pass `etcd.WithAdvertiseClientURLs(urls)` to `etcd.New`.
+
+For a stable load balancer outside Kubernetes:
+
+```bash
+t4 run \
+  --listen=0.0.0.0:3379 \
+  --advertise-client-urls=https://t4.example.com:443
+```
+
+The environment-only equivalent is:
+
+```bash
+T4_ADVERTISE_CLIENT_URLS=https://t4.example.com:443 \
+  t4 run --listen=0.0.0.0:3379
+```
+
+For explicitly managed direct-node discovery:
+
+```bash
+t4 run \
+  --listen=0.0.0.0:3379 \
+  --advertise-client-urls=http://node-a:3379,http://node-b:3379,http://node-c:3379
+```
+
+Every node should advertise the same list. Operators must update it when the
+topology changes; a temporarily unavailable node may remain advertised until
+removed from configuration. T4 returns one synthetic member (`ID: 1`, name
+`t4`) containing the URLs in configuration order. This is static client discovery
+compatibility, not a quorum-membership list, dynamic membership, or a statement
+of current node health. Peer URLs remain empty.
+
+`--listen` binds the local client listener. `--advertise-peer` configures peer
+replication addresses. `--advertise-client-urls` independently describes addresses
+reachable by the actual clients; T4 does not infer them from either other flag.
+URLs must use `http` or `https`, a hostname or IP address, and an explicit port
+in `1..65535` (bracket IPv6 literals). Comma-separated entries may have surrounding
+ASCII whitespace. Empty entries, duplicates (ignoring scheme and DNS hostname
+case), wildcard/unspecified hosts, credentials, paths, queries, fragments, and
+control characters are rejected before database startup. Validation performs no
+DNS lookups or connection probes.
+
+For TLS, the certificate must cover each advertised hostname and clients must
+trust its issuer. An HTTPS endpoint is allowed with a plaintext local listener
+when an external load balancer terminates TLS.
+
+The Helm chart automatically advertises its client-facing Service; see the
+Kubernetes deployment guide. Outside the cluster, configure an externally
+reachable URL explicitly.
+
 ## Library: `t4.Config`
 
 | Field                 | Type                               | Default                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -252,6 +309,7 @@ metadata.
 | `t4 restore list` | `T4_S3_REGION` | `--s3-region` |
 | `t4 restore list` | `T4_S3_SECRET_ACCESS_KEY` | `--s3-secret-access-key` |
 | `t4 restore list` | `T4_S3_SESSION_TOKEN` | `--s3-session-token` |
+| `t4 run` | `T4_ADVERTISE_CLIENT_URLS` | `--advertise-client-urls` |
 | `t4 run` | `T4_ADVERTISE_PEER` | `--advertise-peer` |
 | `t4 run` | `T4_AUTH_ENABLED` | `--auth-enabled` |
 | `t4 run` | `T4_AUTO_COMPACT_INTERVAL` | `--auto-compact-interval` |
@@ -435,6 +493,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 restore list` | `--s3-region` | — | `T4_S3_REGION` | No | AWS region |
 | `t4 restore list` | `--s3-secret-access-key` | — | `T4_S3_SECRET_ACCESS_KEY` | No | AWS secret access key |
 | `t4 restore list` | `--s3-session-token` | — | `T4_S3_SESSION_TOKEN` | No | session token for temporary STS credentials; honored with --s3-access-key-id/--s3-secret-access-key |
+| `t4 run` | `--advertise-client-urls` | — | `T4_ADVERTISE_CLIENT_URLS` | No | comma-separated absolute http(s) client URLs with explicit ports for etcd endpoint discovery |
 | `t4 run` | `--advertise-peer` | — | `T4_ADVERTISE_PEER` | No | address followers use to reach this node's peer stream (default: --peer-listen) |
 | `t4 run` | `--auth-enabled` | `false` | `T4_AUTH_ENABLED` | No | enable etcd-compatible authentication and RBAC |
 | `t4 run` | `--auto-compact-interval` | `0s` | `T4_AUTO_COMPACT_INTERVAL` | No | how often to check autocompaction; 0 defaults by strategy |

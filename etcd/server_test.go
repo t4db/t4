@@ -19,14 +19,14 @@ import (
 )
 
 // newServer opens a single-node t4 Node (no S3) and wraps it in an etcd Server.
-func newServer(t *testing.T) *t4etcd.Server {
+func newServer(t *testing.T, opts ...t4etcd.ServerOption) *t4etcd.Server {
 	t.Helper()
 	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("t4.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = node.Close() })
-	return t4etcd.New(node, nil, nil)
+	return t4etcd.New(node, nil, nil, opts...)
 }
 
 func put(t *testing.T, srv *t4etcd.Server, key, val string) int64 {
