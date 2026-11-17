@@ -82,6 +82,9 @@ type Store struct {
 
 	watchPrefixes map[string]int
 
+	// metrics, when set, records watch activity (see SetMetrics).
+	metrics *metrics.Metrics
+
 	// watchHubMu protects the live-watch registry. Live revisions are decoded
 	// once after Apply and fanned out in memory instead of making every watch
 	// rescan the Pebble revision log.
@@ -133,6 +136,49 @@ func sharedBlockCache() *pebble.Cache {
 	return blockCache
 }
 
+const (
+	// defaultMemTableSize is the write buffer a process serving one database
+	// gets. See defaultPebbleOptions for why it is not Pebble's 4 MiB.
+	defaultMemTableSize = 32 << 20
+
+	// minMemTableSize is the floor DividedAmong will not go below, and is
+	// Pebble's own default. Smaller buffers flush so often that they hand the
+	// compactor a stream of tiny files, which is the cost defaultMemTableSize
+	// exists to avoid.
+	minMemTableSize = 4 << 20
+)
+
+// DividedAmong returns the options for a process opening count databases at
+// once, so that they share the budget one database would take whole.
+//
+// MemTableSize and MaxConcurrentCompactions are per store and are set in
+// defaultPebbleOptions for a process serving a single database: 32 MiB of
+// write buffer, up to four buffers in flight, and up to four compaction
+// goroutines. Each database taking all of that does not scale with the number
+// of them — twenty would reserve 2.5 GiB of buffers and could run eighty
+// compactions on whatever cores the host has.
+//
+// So the buffer shrinks with the count, down to Pebble's own default, and past
+// one database each compacts with a single goroutine. A database writing hard
+// then flushes more often than it would alone, which is the trade a shared
+// process asks for. A count of one reproduces the single-database options
+// exactly, so a caller need not special-case it: it leaves the compaction
+// limit as the function defaultPebbleOptions set, because Go adjusts
+// GOMAXPROCS when a container's CPU limit changes and a number captured here
+// would stop that from reaching Pebble.
+func DividedAmong(count int) PebbleOption {
+	if count < 1 {
+		count = 1
+	}
+	size := max(uint64(defaultMemTableSize/count), minMemTableSize)
+	return func(o *pebble.Options) {
+		o.MemTableSize = size
+		if count > 1 {
+			o.MaxConcurrentCompactions = func() int { return 1 }
+		}
+	}
+}
+
 // maxCompactions bounds Pebble's compaction concurrency: enough to keep up
 // with a sustained write stream, never more than half the machine.
 func maxCompactions() int {
@@ -167,7 +213,7 @@ func defaultPebbleOptions() *pebble.Options {
 		// compactor a steady stream of tiny L0 files. Profiling attributed
 		// ~25-30% of CPU to compaction at 4 KiB values. A larger memtable cuts
 		// the flush rate proportionally and produces fewer, larger SSTs.
-		MemTableSize: 32 << 20,
+		MemTableSize: defaultMemTableSize,
 
 		// With a 32 MiB memtable, the default threshold of 2 stalls writes
 		// after 64 MiB in flight. Allowing four absorbs a flush that is slower
@@ -385,6 +431,13 @@ func (s *Store) SetHistoryRingSize(n int) {
 		return
 	}
 	s.hist.Store(newHistoryRing(n))
+}
+
+// SetMetrics sets the metrics watches are recorded on. A store without
+// metrics, such as one opened by an inspection tool, records none. Call it
+// before the store serves watches.
+func (s *Store) SetMetrics(m *metrics.Metrics) {
+	s.metrics = m
 }
 
 // LastSequence returns the highest WAL/peer-stream sequence applied. Used by
@@ -2039,9 +2092,9 @@ func (s *Store) registerWatch(prefix string) func() {
 	prefixes := len(s.watchPrefixes)
 	s.mu.Unlock()
 
-	if metrics.WatchActive != nil {
-		metrics.WatchActive.Inc()
-		metrics.WatchActivePrefixes.Set(float64(prefixes))
+	if m := s.metrics; m != nil {
+		m.WatchActive.Inc()
+		m.WatchActivePrefixes.Set(float64(prefixes))
 	}
 
 	return func() {
@@ -2054,9 +2107,9 @@ func (s *Store) registerWatch(prefix string) func() {
 		prefixes := len(s.watchPrefixes)
 		s.mu.Unlock()
 
-		if metrics.WatchActive != nil {
-			metrics.WatchActive.Dec()
-			metrics.WatchActivePrefixes.Set(float64(prefixes))
+		if m := s.metrics; m != nil {
+			m.WatchActive.Dec()
+			m.WatchActivePrefixes.Set(float64(prefixes))
 		}
 	}
 }
@@ -2158,7 +2211,7 @@ func (s *Store) scanWatchRange(prefix string, fromRev, toRev int64, withPrevKV b
 	if err != nil {
 		return nil, false
 	}
-	recordWatchScanMetrics(time.Since(start), fromRev, toRev, scanned, len(events))
+	s.recordWatchScanMetrics(time.Since(start), fromRev, toRev, scanned, len(events))
 	return events, true
 }
 
@@ -2257,7 +2310,7 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 			lastMarkerRev, lastMarkerAt = toRev, time.Now()
 		}
 		matched := s.dispatchWatchEvents(events, toRev, standalone)
-		recordWatchScanMetrics(time.Since(start), nextRev, toRev, scanned, matched)
+		s.recordWatchScanMetrics(time.Since(start), nextRev, toRev, scanned, matched)
 		nextRev = toRev + 1
 	}
 }
@@ -2390,14 +2443,15 @@ func progressEvent(rev int64) Event {
 	return Event{Type: EventProgress, Revision: rev}
 }
 
-func recordWatchScanMetrics(d time.Duration, fromRev, toRev int64, scanned, matched int) {
-	if metrics.WatchScanDuration == nil {
+func (s *Store) recordWatchScanMetrics(d time.Duration, fromRev, toRev int64, scanned, matched int) {
+	m := s.metrics
+	if m == nil {
 		return
 	}
-	metrics.WatchScanDuration.Observe(d.Seconds())
-	metrics.WatchScanRevisionSpan.Observe(float64(toRev - fromRev + 1))
-	metrics.WatchScanEntriesTotal.WithLabelValues("scanned").Add(float64(scanned))
-	metrics.WatchScanEntriesTotal.WithLabelValues("matched").Add(float64(matched))
+	m.WatchScanDuration.Observe(d.Seconds())
+	m.WatchScanRevisionSpan.Observe(float64(toRev - fromRev + 1))
+	m.WatchScanEntriesTotal.WithLabelValues("scanned").Add(float64(scanned))
+	m.WatchScanEntriesTotal.WithLabelValues("matched").Add(float64(matched))
 }
 
 // scanLog reads log entries in [fromRev, toRev] and returns events for keys

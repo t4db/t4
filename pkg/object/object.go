@@ -63,6 +63,19 @@ type ConditionalStore interface {
 	PutIfMatch(ctx context.Context, key string, r io.Reader, matchETag string) error
 }
 
+// SubStore extends Store with a narrowing of its own keyspace. A store that
+// serves several independent tenants divides itself this way: each gets the
+// keys below one prefix and no reach outside it.
+//
+// Sub shares the underlying client, and so its connections, with the store it
+// came from: dividing a store a hundred ways costs one client, not a hundred.
+type SubStore interface {
+	Store
+	// Sub returns the store of the keys below sub within this store's own
+	// prefix. Leading and trailing slashes in sub are ignored.
+	Sub(sub string) Store
+}
+
 // VersionedStore extends Store with version-pinned reads. Implementations
 // backed by S3 (or any store with object versioning) can satisfy this
 // interface. It is used for point-in-time restore via RestorePoint.

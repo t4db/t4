@@ -101,6 +101,7 @@ var (
 	_ Store            = (*GCSStore)(nil)
 	_ ConditionalStore = (*GCSStore)(nil)
 	_ VersionedStore   = (*GCSStore)(nil)
+	_ SubStore         = (*GCSStore)(nil)
 )
 
 // NewGCSStoreFromConfig creates a GCSStore from explicit t4 GCS settings.
@@ -168,6 +169,17 @@ func gcsCredentials(ctx context.Context, cfg GCSConfig) (oauth2.TokenSource, err
 			"(set --gcs-credentials-file, or GOOGLE_APPLICATION_CREDENTIALS)", err)
 	}
 	return creds.TokenSource, nil
+}
+
+// Sub returns a store for the keys below sub within s's prefix, sharing s's
+// HTTP client and its connections.
+func (s *GCSStore) Sub(sub string) Store {
+	return &GCSStore{
+		http:     s.http,
+		endpoint: s.endpoint,
+		bucket:   s.bucket,
+		prefix:   s.name(strings.Trim(sub, "/")),
+	}
 }
 
 // name returns the full object name for a store-relative key.
