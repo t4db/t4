@@ -43,6 +43,7 @@ func runCmd() *cobra.Command {
 
 		dataDir               string
 		listenAddr            string
+		advertiseClientURLs   string
 		segmentMaxSizeMB      int64
 		segmentMaxAgeSec      int
 		checkpointIntervalMin int
@@ -99,6 +100,11 @@ func runCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Run a t4 node",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			urls, err := parseAdvertiseClientURLs(advertiseClientURLs)
+			if err != nil {
+				return fmt.Errorf("--advertise-client-urls: %w", err)
+			}
+
 			lvl, err := logrus.ParseLevel(logLevel)
 			if err != nil {
 				return fmt.Errorf("invalid log level %q: %w", logLevel, err)
@@ -319,7 +325,7 @@ func runCmd() *cobra.Command {
 			}).Info("etcd gRPC server listening")
 
 			srv := grpc.NewServer(grpcOpts...)
-			t4etcd.New(node, authStore, tokens).Register(srv)
+			t4etcd.New(node, authStore, tokens, t4etcd.WithAdvertiseClientURLs(urls)).Register(srv)
 
 			// ── JSON/HTTP gateway ────────────────────────────────────────────
 			var httpSrv *http.Server
@@ -426,6 +432,7 @@ func runCmd() *cobra.Command {
 	s3 = addObjectStoreFlags(cmd, false)
 	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&dataDir, "data-dir", "/var/lib/t4", "directory for Pebble data and local WAL segments (env: T4_DATA_DIR)")
+	cmd.Flags().StringVar(&advertiseClientURLs, "advertise-client-urls", "", "comma-separated absolute http(s) client URLs with explicit ports for etcd endpoint discovery (env: T4_ADVERTISE_CLIENT_URLS)")
 	cmd.Flags().StringVar(&listenAddr, "listen", "0.0.0.0:3379", "gRPC listen address (kine/etcd protocol) (env: T4_LISTEN)")
 	cmd.Flags().Int64Var(&segmentMaxSizeMB, "segment-max-size-mb", 50, "WAL segment rotation size threshold in MiB (env: T4_SEGMENT_MAX_SIZE_MB)")
 	cmd.Flags().IntVar(&segmentMaxAgeSec, "segment-max-age-sec", 10, "WAL segment rotation age threshold in seconds (env: T4_SEGMENT_MAX_AGE_SEC)")
@@ -482,6 +489,7 @@ func runCmd() *cobra.Command {
 		return applyEnvVars(cmd, map[string]string{
 			"data-dir":                             "T4_DATA_DIR",
 			"listen":                               "T4_LISTEN",
+			"advertise-client-urls":                "T4_ADVERTISE_CLIENT_URLS",
 			"segment-max-size-mb":                  "T4_SEGMENT_MAX_SIZE_MB",
 			"segment-max-age-sec":                  "T4_SEGMENT_MAX_AGE_SEC",
 			"wal-sync-upload":                      "T4_WAL_SYNC_UPLOAD",

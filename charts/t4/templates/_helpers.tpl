@@ -232,3 +232,18 @@ stays plaintext, so the gateway keeps sharing the port.
 {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{/* Client discovery uses the client-facing Service, independently of peers. */}}
+{{- define "t4.advertiseClientURLs" -}}
+{{- if .Values.config.advertiseClientUrls -}}
+{{- .Values.config.advertiseClientUrls -}}
+{{- else -}}
+{{- $tls := eq (include "t4.clientFacingTLSEnabled" .) "true" -}}
+{{- $scheme := ternary "https" "http" $tls -}}
+{{- if .Values.proxy.enabled -}}
+{{- printf "%s://%s-proxy.%s.svc.cluster.local:%d" $scheme (include "t4.fullname" .) .Release.Namespace (int .Values.proxy.service.port) -}}
+{{- else -}}
+{{- printf "%s://%s.%s.svc.cluster.local:%d" $scheme (include "t4.fullname" .) .Release.Namespace (int .Values.service.port) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
