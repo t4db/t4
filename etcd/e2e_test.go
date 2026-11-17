@@ -475,3 +475,111 @@ func BenchmarkEtcdList(b *testing.B) {
 		}
 	}
 }
+
+// TestE2EThreeNodeBinaryKeyForwarding exercises the public etcd transport,
+// follower -> leader transaction forwarding, and committed WAL replication.
+func TestE2EThreeNodeBinaryKeyForwarding(t *testing.T) {
+	store := object.NewMem()
+	var nodes []*t4.Node
+	var endpoints []string
+	for i := 0; i < 3; i++ {
+		addr := freeAddr(t)
+		node, err := t4.Open(t4.Config{DataDir: t.TempDir(), ObjectStore: store, NodeID: fmt.Sprintf("binary-%d", i), PeerListenAddr: addr, AdvertisePeerAddr: addr, FollowerMaxRetries: 2, PeerBufferSize: 1000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = node.Close() })
+		nodes = append(nodes, node)
+		endpoints = append(endpoints, startEtcdServer(t, node))
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	leader := waitForLeader(t, nodes, 10*time.Second)
+	var leaderCli, followerCli *clientv3.Client
+	for i, node := range nodes {
+		if node == leader {
+			leaderCli = newEtcdClient(t, endpoints[i])
+		} else if followerCli == nil {
+			followerCli = newEtcdClient(t, endpoints[i])
+		}
+	}
+	keys := []string{"/juicefs\xfdsetting", "/juicefs\xfdsessions\xff", "/juicefs\ufffdsetting"}
+	get := func(cli *clientv3.Client, key, value string) int64 {
+		t.Helper()
+		r, err := cli.Get(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Kvs) != 1 {
+			t.Fatalf("exact key %x: want one value, got %v", key, r.Kvs)
+		}
+		if string(r.Kvs[0].Key) != key || string(r.Kvs[0].Value) != value {
+			t.Fatalf("key/value mismatch: want %x/%x got %x/%x", key, value, r.Kvs[0].Key, r.Kvs[0].Value)
+		}
+		return r.Kvs[0].ModRevision
+	}
+	for _, key := range keys {
+		r, err := followerCli.Txn(ctx).If(clientv3.Compare(clientv3.Version(key), "=", 0)).Then(clientv3.OpPut(key, "first")).Commit()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !r.Succeeded {
+			t.Fatal("create compare failed")
+		}
+		rev := get(leaderCli, key, "first")
+		if strings.Contains(key, "\xfd") {
+			replacement := strings.ToValidUTF8(key, "\ufffd")
+			bad, err := leaderCli.Get(ctx, replacement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bad.Kvs) != 0 {
+				t.Fatalf("corrupted replacement key exists: %x", replacement)
+			}
+		}
+		r, err = followerCli.Txn(ctx).If(clientv3.Compare(clientv3.ModRevision(key), "=", rev)).Then(clientv3.OpPut(key, "updated")).Commit()
+		if err != nil || !r.Succeeded {
+			t.Fatalf("update: %v %v", r, err)
+		}
+		get(leaderCli, key, "updated")
+		// A distinct absent key forces the failure branch.
+		r, err = followerCli.Txn(ctx).If(clientv3.Compare(clientv3.Version(key+"/absent\x80"), ">", 0)).Then(clientv3.OpPut(key, "wrong")).Else(clientv3.OpPut(key, "failure")).Commit()
+		if err != nil || r.Succeeded {
+			t.Fatalf("failure branch: %v %v", r, err)
+		}
+		get(leaderCli, key, "failure")
+		get(followerCli, key, "failure")
+	}
+	// Delete FD while keeping the literal replacement rune key distinct.
+	r, err := followerCli.Txn(ctx).Then(clientv3.OpDelete(keys[0])).Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Responses[0].GetResponseDeleteRange().Deleted != 1 {
+		t.Fatal("binary delete did not report exact deleted key")
+	}
+	for i, node := range nodes {
+		if err := node.WaitForRevision(ctx, r.Header.Revision-1); err != nil {
+			t.Fatal(err)
+		}
+		cli := newEtcdClient(t, endpoints[i])
+		got, err := cli.Get(ctx, "/juicefs", clientv3.WithPrefix())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Kvs) != 2 {
+			t.Fatalf("node %d: want two remaining keys, got %v", i, got.Kvs)
+		}
+		for _, key := range keys[1:] {
+			get(cli, key, "failure")
+		}
+		// Inspect each replica directly as well; a linearizable read could wait
+		// for catch-up and would otherwise hide a missing WAL entry.
+		for _, key := range keys[1:] {
+			kv, err := node.Get(key)
+			if err != nil || kv == nil || kv.Key != key || string(kv.Value) != "failure" {
+				t.Fatalf("node %d raw key %x: %v %v", i, key, kv, err)
+			}
+		}
+	}
+}
