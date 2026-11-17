@@ -22,7 +22,7 @@ import (
 // followLoop receives WAL entries from the leader and applies them locally.
 // On ErrLeaderUnreachable it attempts a TakeOver election.
 func (n *Node) followLoop(bgCtx context.Context) {
-	lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
+	lock := n.grp.lock
 	cli := n.peerCli
 	// fromRev is the next WAL/peer-stream sequence to request. The peer
 	// protocol's FollowRequest.FromRevision is a sequence number (after the
@@ -290,7 +290,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	}
 
 	if won {
-		if err := n.becomeLeader(bgCtx, lock, rec, takeoverStart, false); err != nil {
+		if err := n.becomeLeader(bgCtx, rec, takeoverStart, false); err != nil {
 			n.log.Errorf("t4: promotion failed: %v", err)
 			return nil, false
 		}

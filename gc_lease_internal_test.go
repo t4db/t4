@@ -14,6 +14,7 @@ func TestGCContextFollowsLease(t *testing.T) {
 	ctx := context.Background()
 
 	single := &Node{}
+	single.grp = newGroup(Config{}, NoopLogger, single)
 	single.storeRole(roleSingle)
 	if _, cancel, ok := single.gcContext(ctx); !ok {
 		t.Error("single node may not GC")
@@ -22,25 +23,26 @@ func TestGCContextFollowsLease(t *testing.T) {
 	}
 
 	leader := &Node{}
+	leader.grp = newGroup(Config{}, NoopLogger, leader)
 	leader.storeRole(roleLeader)
 	if _, _, ok := leader.gcContext(ctx); ok {
 		t.Error("leader without a lease may GC")
 	}
 
-	leader.extendLease(time.Now().Add(-time.Hour), false)
+	leader.grp.extendLease(time.Now().Add(-time.Hour), false)
 	if _, _, ok := leader.gcContext(ctx); ok {
 		t.Error("leader with an expired lease may GC")
 	}
 
 	start := time.Now()
-	leader.extendLease(start, false)
+	leader.grp.extendLease(start, false)
 	gcCtx, cancel, ok := leader.gcContext(ctx)
 	if !ok {
 		t.Fatal("leader with a fresh lease may not GC")
 	}
 	defer cancel()
 	deadline, has := gcCtx.Deadline()
-	if want := leader.leaseDeadline(start); !has || deadline.After(want) {
+	if want := leader.grp.leaseDeadline(start); !has || deadline.After(want) {
 		t.Errorf("GC deadline %v, want at most the lease deadline %v", deadline, want)
 	}
 }

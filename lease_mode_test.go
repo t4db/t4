@@ -321,8 +321,8 @@ func TestLeaseTimingInvariants(t *testing.T) {
 	check(knownTakeoverDelay < followerKnownWindow,
 		"a known follower must be able to take over while it is still known")
 	for _, interval := range []time.Duration{minLeaderWatchInterval, 20 * time.Second, 5 * time.Minute, time.Hour} {
-		n := &Node{cfg: Config{LeaderWatchInterval: interval}}
-		check(interval < n.slowTTL()-leaseSafetyMargin,
+		g := &group{watchInterval: interval}
+		check(interval < g.slowTTL()-leaseSafetyMargin,
 			fmt.Sprintf("a slow lease must outlast the slow renewal interval (%v)", interval))
 	}
 }

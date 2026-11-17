@@ -30,7 +30,7 @@ import (
 // first lease runs from then. opening is true when called from Open, which
 // may then create the database with the meta keyspace (see
 // initMetaAtGenesis); a promotion never does.
-func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord, lockWriteStart time.Time, opening bool) error {
+func (n *Node) becomeLeader(bgCtx context.Context, rec *election.LockRecord, lockWriteStart time.Time, opening bool) error {
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	if err := n.recoverLocalWALBeforeLeadership(walDir); err != nil {
 		return err
@@ -116,7 +116,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.peerLis = lis
 	n.peerGRPC = grpcSrv
 	n.leaderCli.Store(nil) // leader does not forward writes
-	n.extendLease(lockWriteStart, false)
+	n.grp.extendLease(lockWriteStart, false)
 	n.leasePeers.Store(peerSrv)
 	n.termStartSeq.Store(nextSeq)
 	n.fenceSeq.Store(-1)
@@ -159,7 +159,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.updateMetrics()
 	metrics.ElectionsTotal.WithLabelValues("won").Inc()
 	n.log.Infof("t4: elected leader (term=%d, peer=%s)", rec.Term, n.cfg.PeerListenAddr)
-	go n.watchLoop(bgCtx, lock, rec.Term)
+	go n.grp.watchLoop(bgCtx, rec.Term)
 	return nil
 }
 
@@ -182,164 +182,6 @@ func (n *Node) recoverLocalWALBeforeLeadership(walDir string) error {
 		return fmt.Errorf("t4: refusing leadership: local WAL sequence %d is ahead of Pebble sequence %d after replay", maxSeq, appliedSeq)
 	}
 	return nil
-}
-
-// watchLoop keeps this node's leadership valid and detects when it is lost.
-//
-// It renews the lock (see lease.go): it reads the lock, then rewrites it with
-// the time the renewal started, how long it stays valid and the election
-// fence, conditioned on the ETag it read, so a TakeOver in between is
-// detected and the node steps down. It renews every LeaderWatchInterval while
-// every follower is demonstrably hearing it, every fastRenewInterval
-// otherwise, at once when it leaves slow mode, and whenever the commit loop
-// needs the fence moved.
-func (n *Node) watchLoop(ctx context.Context, lock *election.Lock, term uint64) {
-	var disconnectC <-chan struct{}
-	if n.peerSrv != nil {
-		disconnectC = n.peerSrv.DisconnectC
-	}
-	check := time.NewTicker(leaderCheckInterval)
-	defer check.Stop()
-	slowInterval := n.cfg.LeaderWatchInterval
-
-	// stepDown fences writes while cancelling the node's background work,
-	// then stops the peer server so followers lose their streams and find
-	// the new leader. fenceMu is released before grpcSrv.Stop(): Stop waits
-	// for in-flight handlers, which take fenceMu.RLock themselves.
-	stepDown := func(reason, why string) {
-		n.log.Errorf("t4: leader watch (%s): %s — stepping down", reason, why)
-		n.fenceMu.Lock()
-		n.stop(fmt.Errorf("t4: stepped down as leader: %s", why))
-		n.fenceMu.Unlock()
-		if grpcSrv := n.peerGRPC; grpcSrv != nil {
-			grpcSrv.Stop()
-		}
-	}
-
-	// failed handles a renewal that could not reach object storage. Once
-	// the lease has ended too, this leader serves nothing, yet followers
-	// that still hear it never take over: step down so that one that can
-	// reach object storage does. It waits a renewal interval past the end
-	// of the lease first, so that one failed renewal right when the lease
-	// shortens (leaving slow mode) is retried rather than ending the term.
-	failed := func(reason string, err error) bool {
-		if now := time.Now(); now.Before(n.leaseDeadline(now).Add(fastRenewInterval)) {
-			return true
-		}
-		stepDown(reason, fmt.Sprintf("lease ended and the lock cannot be renewed: %v", err))
-		return false
-	}
-
-	// renew writes the lock once; it returns false after stepping down. It
-	// does not take fenceMu: writes waiting on follower acknowledgements
-	// must not delay it. Safety comes from the lease, which every write
-	// acknowledgement and linearizable read checks.
-	renew := func(reason string, slow bool) bool {
-		// A fenced node (Close in flight, commitLoop dead from a fatal
-		// error, …) must not assert liveness it cannot back up; whichever
-		// path set n.closed tears down the peer server.
-		if n.closed.Load() {
-			n.log.Debugf("t4: leader watch (%s): node fenced — exiting watch loop", reason)
-			return false
-		}
-		start := time.Now()
-		rCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		rec, etag, err := lock.ReadETag(rCtx)
-		cancel()
-		if err != nil {
-			n.log.Warnf("t4: leader watch (%s): read lock: %v", reason, err)
-			return failed(reason, err)
-		}
-		if rec == nil || rec.Term != term || rec.NodeID != n.cfg.NodeID {
-			stepDown(reason, fmt.Sprintf("lock superseded (current: %+v)", rec))
-			return false
-		}
-		// Position before revision: the revision read afterwards covers it.
-		pos := n.db.Load().LastPosition()
-		rev := n.db.Load().CurrentRevision()
-		if wantSeq, wantRev, wantTerm := n.fenceWanted(); wantSeq > pos.Seq {
-			pos.Seq, pos.Term = wantSeq, max(pos.Term, wantTerm)
-			if wantRev > rev {
-				rev = wantRev
-			}
-		}
-		seq := pos.Seq
-		// The flag as the commit loop wants it now; a write waiting on it is
-		// acknowledged only once this renewal has recorded it.
-		complete := n.objectStoreComplete.Load()
-		n.flagWriteStarting(complete)
-		ttl := fastTTL
-		if slow {
-			ttl = n.slowTTL()
-		}
-		tCtx, tCancel := context.WithTimeout(ctx, 5*time.Second)
-		err = lock.Renew(tCtx, term, n.cfg.AdvertisePeerAddr, etag, election.Fence{Rev: rev, Seq: pos.Seq, Term: pos.Term}, complete, start, ttl)
-		tCancel()
-		if errors.Is(err, object.ErrPreconditionFailed) {
-			stepDown(reason, "renewal precondition failed — lock taken")
-			return false
-		}
-		if err != nil {
-			n.log.Warnf("t4: leader watch (%s): renew lock: %v", reason, err)
-			return failed(reason, err)
-		}
-		n.extendLease(start, slow)
-		n.flagWritten(complete)
-		n.fenced(seq)
-		return true
-	}
-
-	var lastAttempt time.Time
-	if !renew("start", false) {
-		return
-	}
-	lastAttempt = time.Now()
-	for {
-		reason := ""
-		select {
-		case <-check.C:
-		case <-disconnectC:
-			reason = "disconnect"
-		case <-n.fenceReqC:
-			reason = "fence"
-		case <-ctx.Done():
-			return
-		}
-		now := time.Now()
-		slow := n.slowSafe(now)
-		g := n.lease.Load()
-		interval := fastRenewInterval
-		if slow {
-			interval = slowInterval
-		}
-		switch {
-		case now.Sub(lastAttempt) >= interval:
-			if reason == "" {
-				reason = "renew"
-			}
-		case g != nil && g.slow && !slow:
-			// The last renewal was slow but a follower may no longer
-			// hear this leader: the lease now runs from that renewal
-			// for fastTTL only and may have ended. Renew at once.
-			reason = "fast mode"
-		case g != nil && !g.slow && slow:
-			// Entering slow mode, the next renewal is slowInterval
-			// away, but the lease from the last (fast) renewal ends
-			// fastTTL after it. Renew now to obtain a slow lease.
-			reason = "slow mode"
-		case n.fencePending():
-			reason = "fence"
-		default:
-			continue
-		}
-		if now.Sub(lastAttempt) < leaderCheckInterval {
-			continue // at most one attempt per check interval
-		}
-		lastAttempt = now
-		if !renew(reason, slow) {
-			return
-		}
-	}
 }
 
 // ── Write forwarding (leader side) ───────────────────────────────────────────
@@ -976,7 +818,7 @@ func (n *Node) gcContext(ctx context.Context) (context.Context, context.CancelFu
 	now := time.Now()
 	limit := now.Add(2 * time.Minute)
 	if n.loadRole() == roleLeader {
-		deadline := n.leaseDeadline(now)
+		deadline := n.grp.leaseDeadline(now)
 		if !now.Before(deadline) {
 			return nil, nil, false
 		}
