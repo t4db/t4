@@ -87,7 +87,7 @@ func (n *Node) Put(ctx context.Context, key string, value []byte, lease int64) (
 		return 0, ErrClosed
 	}
 	if n.loadRole() == roleFollower {
-		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardPut, Key: key, Value: value, Lease: lease})
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardPut, Key: peer.WireKey(key), Value: value, Lease: lease})
 		if err != nil {
 			return 0, err
 		}
@@ -181,7 +181,7 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 	defer func() { endSpan(span, err) }()
 
 	if n.loadRole() == roleFollower {
-		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardCreate, Key: key, Value: value, Lease: lease})
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardCreate, Key: peer.WireKey(key), Value: value, Lease: lease})
 		if err != nil {
 			return 0, err
 		}
@@ -237,7 +237,7 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 	ctx, span := n.startSpan(ctx, "t4.update", key)
 	defer func() { endSpan(span, err) }()
 	if n.loadRole() == roleFollower {
-		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardUpdate, Key: key, Value: value, Revision: revision, Lease: lease})
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardUpdate, Key: peer.WireKey(key), Value: value, Revision: revision, Lease: lease})
 		if err != nil {
 			return 0, nil, false, err
 		}
@@ -303,7 +303,7 @@ func (n *Node) Delete(ctx context.Context, key string) (rev int64, err error) {
 	defer func() { endSpan(span, err) }()
 
 	if n.loadRole() == roleFollower {
-		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardDeleteIfRevision, Key: key, Revision: 0})
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardDeleteIfRevision, Key: peer.WireKey(key), Revision: 0})
 		if err != nil {
 			return 0, err
 		}
@@ -343,7 +343,7 @@ func (n *Node) DeleteIfRevision(ctx context.Context, key string, revision int64)
 	defer func() { endSpan(span, err) }()
 
 	if n.loadRole() == roleFollower {
-		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardDeleteIfRevision, Key: key, Revision: revision})
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardDeleteIfRevision, Key: peer.WireKey(key), Revision: revision})
 		if err != nil {
 			return 0, nil, false, err
 		}
@@ -510,7 +510,7 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err er
 		}
 		deletedKeys := make(map[string]struct{}, len(resp.DeletedKeys))
 		for _, k := range resp.DeletedKeys {
-			deletedKeys[k] = struct{}{}
+			deletedKeys[string(k)] = struct{}{}
 		}
 		return TxnResponse{
 			Succeeded:   resp.Succeeded,
@@ -728,7 +728,7 @@ func txnCondsToMsg(conds []TxnCondition) []peer.TxnCondMsg {
 	msgs := make([]peer.TxnCondMsg, len(conds))
 	for i, c := range conds {
 		msgs[i] = peer.TxnCondMsg{
-			Key:            c.Key,
+			Key:            peer.WireKey(c.Key),
 			Target:         uint8(c.Target),
 			Result:         uint8(c.Result),
 			ModRevision:    c.ModRevision,
@@ -749,7 +749,7 @@ func txnOpsToMsg(ops []TxnOp) []peer.TxnOpMsg {
 	for i, op := range ops {
 		msgs[i] = peer.TxnOpMsg{
 			Type:  uint8(op.Type),
-			Key:   op.Key,
+			Key:   peer.WireKey(op.Key),
 			Value: op.Value,
 			Lease: op.Lease,
 		}
@@ -774,7 +774,7 @@ func msgToTxnConds(msgs []peer.TxnCondMsg) []TxnCondition {
 	conds := make([]TxnCondition, len(msgs))
 	for i, c := range msgs {
 		conds[i] = TxnCondition{
-			Key:            c.Key,
+			Key:            string(c.Key),
 			Target:         TxnCondTarget(c.Target),
 			Result:         TxnCondResult(c.Result),
 			ModRevision:    c.ModRevision,
@@ -795,7 +795,7 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 	for i, m := range msgs {
 		ops[i] = TxnOp{
 			Type:  TxnOpType(m.Type),
-			Key:   m.Key,
+			Key:   string(m.Key),
 			Value: m.Value,
 			Lease: m.Lease,
 		}
@@ -1468,7 +1468,7 @@ func kvToMsg(kv *KeyValue) *peer.KVMsg {
 		return nil
 	}
 	return &peer.KVMsg{
-		Key: kv.Key, Value: kv.Value, Revision: kv.Revision,
+		Key: peer.WireKey(kv.Key), Value: kv.Value, Revision: kv.Revision,
 		CreateRevision: kv.CreateRevision, PrevRevision: kv.PrevRevision,
 		Version: kv.Version, Lease: kv.Lease,
 	}
@@ -1479,7 +1479,7 @@ func msgToKV(m *peer.KVMsg) *KeyValue {
 		return nil
 	}
 	return &KeyValue{
-		Key: m.Key, Value: m.Value, Revision: m.Revision,
+		Key: string(m.Key), Value: m.Value, Revision: m.Revision,
 		CreateRevision: m.CreateRevision, PrevRevision: m.PrevRevision,
 		Version: m.Version, Lease: m.Lease,
 	}

@@ -36,6 +36,22 @@ For multi-node clusters, upgrade one node at a time. The leader stays available 
 
 The cluster keeps accepting writes throughout, modulo the ~6 s window when the leader is being restarted.
 
+### Byte-exact peer forwarding
+
+Upgrade **all followers first, then the leader**. Peer forward wire version 2
+preserves arbitrary etcd key bytes: valid UTF-8 retains the legacy JSON string;
+invalid UTF-8 uses a base64 object that legacy string decoders reject before
+mutation. Ordinary UTF-8 forwarding to a legacy leader continues to work.
+Binary-key forwarding fails closed until the leader is upgraded; send such
+operations only once every node is upgraded.
+
+A new leader rejects legacy (version 0) or unknown-version forward RPCs with
+`FailedPrecondition` and `forward_wire_version_unsupported`, before dispatch.
+Upgrading the leader first therefore blocks legacy followers' writes and
+linearizable read-index requests until those followers are upgraded. The leader
+cannot recover original bytes already replaced by a legacy sender. This gate
+is independent of WAL and checkpoint formats, which remain unchanged.
+
 ## Single-node upgrade
 
 1. Stop the t4 process.

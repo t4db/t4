@@ -8,10 +8,14 @@
 package peer
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -85,6 +89,15 @@ func (Codec) Name() string { return "t4-bin" }
 
 func (Codec) Marshal(v interface{}) ([]byte, error) {
 	switch m := v.(type) {
+	case *ForwardRequest:
+		if m == nil {
+			return nil, fmt.Errorf("peer: nil forward request")
+		}
+		// Stamp a shallow copy: callers retain ownership of the request and
+		// nested slices; encoding never mutates them or copies key payloads.
+		stamped := *m
+		stamped.WireVersion = forwardWireVersion
+		return json.Marshal(&stamped)
 	case *WalEntryMsg:
 		return marshalWalEntryMsg(m)
 	case *AckMsg:
@@ -262,35 +275,108 @@ const (
 	ForwardLeaseRenewedAt             // read how long ago each of Leases was last renewed (ForwardResponse.Ages)
 )
 
+// WireKey preserves arbitrary key bytes only at the peer JSON boundary.
+// UTF-8 -> legacy JSON string; other bytes -> {"base64":"..."}.
+// The object shape makes legacy string decoders reject binary keys before
+// mutation. WAL, storage and public key types retain their existing formats.
+type WireKey string
+
+func (k WireKey) MarshalJSON() ([]byte, error) {
+	if utf8.ValidString(string(k)) {
+		return json.Marshal(string(k))
+	}
+	return json.Marshal(struct {
+		Base64 string `json:"base64"`
+	}{
+		base64.StdEncoding.EncodeToString([]byte(k)),
+	})
+}
+
+func (k *WireKey) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return fmt.Errorf("peer: empty wire key")
+	}
+	if data[0] == '"' {
+		// JSON strings must already be valid UTF-8. Legacy senders may have
+		// replaced bytes before transmission; only the version gate can detect
+		// that sender, never guessing from a legitimate replacement rune.
+		if !utf8.Valid(data) {
+			return fmt.Errorf("peer: invalid UTF-8 wire key string")
+		}
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+		*k = WireKey(text)
+		return nil
+	}
+	// Read a fixed object grammar instead of a map: duplicate members must
+	// fail too, and nested input is never recursively decoded by this parser.
+	d := json.NewDecoder(bytes.NewReader(data))
+	token, err := d.Token()
+	if err != nil || token != json.Delim('{') {
+		return fmt.Errorf("peer: wire key must be string or base64 object")
+	}
+	token, err = d.Token()
+	if err != nil || token != "base64" {
+		return fmt.Errorf("peer: wire key requires base64 member")
+	}
+	token, err = d.Token()
+	text, ok := token.(string)
+	if err != nil || !ok {
+		return fmt.Errorf("peer: wire key base64 must be string")
+	}
+	token, err = d.Token()
+	if err != nil || token != json.Delim('}') {
+		return fmt.Errorf("peer: wire key requires exactly one member")
+	}
+	if _, err = d.Token(); err != io.EOF {
+		return fmt.Errorf("peer: trailing wire key data")
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(text)
+	// Strict rejects nonzero padding bits; re-encoding also rejects CR/LF,
+	// which the standard decoder deliberately ignores even in strict mode.
+	if err != nil || base64.StdEncoding.EncodeToString(raw) != text {
+		return fmt.Errorf("peer: invalid wire key base64")
+	}
+	*k = WireKey(raw)
+	return nil
+}
+
+// Independent of persisted WAL/checkpoint versions. Version 0 is legacy;
+// its strings may already have lost bytes before reaching the leader.
+const forwardWireVersion uint8 = 2
+
 // KVMsg is the wire representation of a key-value record.
 type KVMsg struct {
-	Key            string `json:"key"`
-	Value          []byte `json:"value"`
-	Revision       int64  `json:"revision"`
-	CreateRevision int64  `json:"create_revision"`
-	PrevRevision   int64  `json:"prev_revision"`
-	Version        int64  `json:"version,omitempty"`
-	Lease          int64  `json:"lease"`
+	Key            WireKey `json:"key"`
+	Value          []byte  `json:"value"`
+	Revision       int64   `json:"revision"`
+	CreateRevision int64   `json:"create_revision"`
+	PrevRevision   int64   `json:"prev_revision"`
+	Version        int64   `json:"version,omitempty"`
+	Lease          int64   `json:"lease"`
 }
 
 // TxnCondMsg is the wire representation of a TxnCondition.
 type TxnCondMsg struct {
-	Key            string `json:"key"`
-	Target         uint8  `json:"target"`
-	Result         uint8  `json:"result"`
-	ModRevision    int64  `json:"mod_revision,omitempty"`
-	CreateRevision int64  `json:"create_revision,omitempty"`
-	Version        int64  `json:"version,omitempty"`
-	Value          []byte `json:"value,omitempty"`
-	Lease          int64  `json:"lease,omitempty"`
+	Key            WireKey `json:"key"`
+	Target         uint8   `json:"target"`
+	Result         uint8   `json:"result"`
+	ModRevision    int64   `json:"mod_revision,omitempty"`
+	CreateRevision int64   `json:"create_revision,omitempty"`
+	Version        int64   `json:"version,omitempty"`
+	Value          []byte  `json:"value,omitempty"`
+	Lease          int64   `json:"lease,omitempty"`
 }
 
 // TxnOpMsg is the wire representation of a TxnOp (one branch operation).
 type TxnOpMsg struct {
-	Type  uint8  `json:"type"` // 0=put, 1=delete, 2=meta put, 3=meta delete, 4=delete lease keys
-	Key   string `json:"key"`
-	Value []byte `json:"value,omitempty"`
-	Lease int64  `json:"lease,omitempty"`
+	Type  uint8   `json:"type"` // 0=put, 1=delete, 2=meta put, 3=meta delete, 4=delete lease keys
+	Key   WireKey `json:"key"`
+	Value []byte  `json:"value,omitempty"`
+	Lease int64   `json:"lease,omitempty"`
 }
 
 // TxnReqMsg is the wire representation of a TxnRequest.
@@ -303,24 +389,25 @@ type TxnReqMsg struct {
 
 // ForwardRequest encodes a write operation for forwarding to the leader.
 type ForwardRequest struct {
-	Op       ForwardOp  `json:"op"`
-	Key      string     `json:"key"`
-	Value    []byte     `json:"value,omitempty"`
-	Revision int64      `json:"revision,omitempty"` // CAS revision / compact target
-	Lease    int64      `json:"lease,omitempty"`
-	TxnReq   *TxnReqMsg `json:"txn,omitempty"`    // ForwardTxn only
-	Leases   []int64    `json:"leases,omitempty"` // ForwardLeaseRenewedAt only
+	WireVersion uint8      `json:"wire_version,omitempty"`
+	Op          ForwardOp  `json:"op"`
+	Key         WireKey    `json:"key"`
+	Value       []byte     `json:"value,omitempty"`
+	Revision    int64      `json:"revision,omitempty"` // CAS revision / compact target
+	Lease       int64      `json:"lease,omitempty"`
+	TxnReq      *TxnReqMsg `json:"txn,omitempty"`    // ForwardTxn only
+	Leases      []int64    `json:"leases,omitempty"` // ForwardLeaseRenewedAt only
 }
 
 // ForwardResponse encodes the leader's reply to a forwarded write.
 type ForwardResponse struct {
-	Revision    int64    `json:"revision"`
-	OldKV       *KVMsg   `json:"old_kv,omitempty"` // Update / DeleteIfRevision
-	Succeeded   bool     `json:"succeeded"`        // CAS result
-	ErrCode     string   `json:"err_code,omitempty"`
-	ErrMsg      string   `json:"err_msg,omitempty"`
-	DeletedKeys []string `json:"deleted_keys,omitempty"` // ForwardTxn: keys actually removed
-	Ages        []int64  `json:"ages,omitempty"`         // ForwardLeaseRenewedAt: nanoseconds since each lease was renewed
+	Revision    int64     `json:"revision"`
+	OldKV       *KVMsg    `json:"old_kv,omitempty"` // Update / DeleteIfRevision
+	Succeeded   bool      `json:"succeeded"`        // CAS result
+	ErrCode     string    `json:"err_code,omitempty"`
+	ErrMsg      string    `json:"err_msg,omitempty"`
+	DeletedKeys []WireKey `json:"deleted_keys,omitempty"` // ForwardTxn: keys actually removed
+	Ages        []int64   `json:"ages,omitempty"`         // ForwardLeaseRenewedAt: nanoseconds since each lease was renewed
 }
 
 // ForwardHandler is implemented by the Node to handle forwarded writes on the

@@ -214,7 +214,7 @@ func (n *Node) writeMeta(ctx context.Context, op wal.Op, key string, value []byt
 		if op == wal.OpMetaDelete {
 			fop = peer.ForwardMetaDelete
 		}
-		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: fop, Key: key, Value: value})
+		resp, err := n.forwardWrite(ctx, &peer.ForwardRequest{Op: fop, Key: peer.WireKey(key), Value: value})
 		if err != nil {
 			return err
 		}

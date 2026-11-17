@@ -355,24 +355,24 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 	}
 	switch req.Op {
 	case peer.ForwardPut:
-		rev, err := n.Put(ctx, req.Key, req.Value, req.Lease)
+		rev, err := n.Put(ctx, string(req.Key), req.Value, req.Lease)
 		code, msg := encodeErr(err)
 		return &peer.ForwardResponse{Revision: rev, Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
 
 	case peer.ForwardCreate:
-		rev, err := n.Create(ctx, req.Key, req.Value, req.Lease)
+		rev, err := n.Create(ctx, string(req.Key), req.Value, req.Lease)
 		code, msg := encodeErr(err)
 		return &peer.ForwardResponse{Revision: rev, Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
 
 	case peer.ForwardUpdate:
-		newRev, oldKV, updated, err := n.Update(ctx, req.Key, req.Value, req.Revision, req.Lease)
+		newRev, oldKV, updated, err := n.Update(ctx, string(req.Key), req.Value, req.Revision, req.Lease)
 		code, msg := encodeErr(err)
 		resp := &peer.ForwardResponse{Revision: newRev, Succeeded: updated, ErrCode: code, ErrMsg: msg}
 		resp.OldKV = kvToMsg(oldKV)
 		return resp, nil
 
 	case peer.ForwardDeleteIfRevision:
-		newRev, oldKV, deleted, err := n.DeleteIfRevision(ctx, req.Key, req.Revision)
+		newRev, oldKV, deleted, err := n.DeleteIfRevision(ctx, string(req.Key), req.Revision)
 		code, msg := encodeErr(err)
 		resp := &peer.ForwardResponse{Revision: newRev, Succeeded: deleted, ErrCode: code, ErrMsg: msg}
 		resp.OldKV = kvToMsg(oldKV)
@@ -406,12 +406,12 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 		return &peer.ForwardResponse{Revision: rev, Succeeded: true}, nil
 
 	case peer.ForwardMetaPut:
-		err := n.MetaPut(ctx, req.Key, req.Value)
+		err := n.MetaPut(ctx, string(req.Key), req.Value)
 		code, msg := encodeErr(err)
 		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
 
 	case peer.ForwardMetaDelete:
-		err := n.MetaDelete(ctx, req.Key)
+		err := n.MetaDelete(ctx, string(req.Key))
 		code, msg := encodeErr(err)
 		return &peer.ForwardResponse{Succeeded: err == nil, ErrCode: code, ErrMsg: msg}, nil
 
@@ -457,9 +457,9 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 			code, msg := encodeErr(err)
 			return &peer.ForwardResponse{ErrCode: code, ErrMsg: msg}, nil
 		}
-		deletedKeys := make([]string, 0, len(resp.DeletedKeys))
+		deletedKeys := make([]peer.WireKey, 0, len(resp.DeletedKeys))
 		for k := range resp.DeletedKeys {
-			deletedKeys = append(deletedKeys, k)
+			deletedKeys = append(deletedKeys, peer.WireKey(k))
 		}
 		return &peer.ForwardResponse{
 			Revision:    resp.Revision,
