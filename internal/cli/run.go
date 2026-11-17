@@ -260,7 +260,7 @@ func runCmd() *cobra.Command {
 					branchPrefix, branchCheckpoint)
 			}
 
-			dbs, metricsHandler, err := openDatabases(cfg, dbStore, databases)
+			dbs, metricsHandler, err := openDatabases(cmd.Context(), cfg, dbStore, databases)
 			if err != nil {
 				return err
 			}

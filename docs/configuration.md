@@ -153,6 +153,13 @@ t4 run --db tenant-a --db tenant-b \
 - All databases share the client port. A client reaches the database named by the Common Name of its certificate,
   so client mTLS is required, and a certificate for a database that is not served gets no connection. A name is a DNS
   label: lowercase letters, digits and `-`, at most 63 characters.
+- The client CA therefore decides who reaches which database: any certificate it signs can name any database.
+  `--client-tls-ca` must hold only CAs whose keys the operator alone controls. Do not add a tenant's own CA to it if
+  the tenant, or its control plane, holds that CA's key: it could then sign a certificate for another tenant's
+  database.
+- `t4 run --db` refuses to start where a database served without `--db` already lives (`<data-dir>/db`,
+  `<data-dir>/wal`, or `manifest/` or `wal/` below the object store's prefix). `--db` would leave that database
+  unserved, and its clients would find an empty one in its place.
 - The databases share one write budget rather than each taking the whole of it: the Pebble write buffer shrinks with
   the number of databases, down to 4 MiB, and past one database each compacts with a single worker. Adding a tenant
   therefore does not multiply memory or compaction load, at the cost of flushing more often under a heavy write burst.

@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -15,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/internal/checkpoint"
 	istore "github.com/t4db/t4/internal/store"
 	"github.com/t4db/t4/pkg/object"
 )
@@ -70,7 +75,7 @@ func validateDatabases(names []string) error {
 // that reports on the default registerer.
 //
 // store may be nil, which serves every database from local storage alone.
-func openDatabases(cfg t4.Config, store object.Store, names []string) ([]*database, http.Handler, error) {
+func openDatabases(ctx context.Context, cfg t4.Config, store object.Store, names []string) ([]*database, http.Handler, error) {
 	if len(names) == 0 {
 		node, err := t4.Open(cfg)
 		if err != nil {
@@ -89,6 +94,9 @@ func openDatabases(cfg t4.Config, store object.Store, names []string) ([]*databa
 			return nil, nil, fmt.Errorf("--db needs an object store that can be divided by prefix, which %T cannot", store)
 		}
 		sub = s
+	}
+	if err := refuseSingleDatabase(ctx, cfg.DataDir, store); err != nil {
+		return nil, nil, err
 	}
 
 	// One database's worth of write buffer and compaction workers, shared out
@@ -118,4 +126,32 @@ func openDatabases(cfg t4.Config, store object.Store, names []string) ([]*databa
 		dbs = append(dbs, &database{name: name, node: node})
 	}
 	return dbs, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), nil
+}
+
+// refuseSingleDatabase fails when dataDir or store holds the database of a
+// t4 run without --db. --db serves databases below dbs/ and would leave that
+// one unserved, so its clients would find an empty database where their data
+// was.
+func refuseSingleDatabase(ctx context.Context, dataDir string, store object.Store) error {
+	for _, dir := range []string{"db", "wal"} {
+		p := filepath.Join(dataDir, dir)
+		if _, err := os.Stat(p); err == nil {
+			return fmt.Errorf("--db: %s holds a database served without --db, which --db would leave unserved; move it below %s/<name>/ or run without --db", p, filepath.Join(dataDir, databasesDir))
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("--db: %w", err)
+		}
+	}
+	if store == nil {
+		return nil
+	}
+	for _, prefix := range []string{path.Dir(checkpoint.ManifestKey) + "/", "wal/"} {
+		keys, err := store.List(ctx, prefix)
+		if err != nil {
+			return fmt.Errorf("--db: look for a database served without --db: %w", err)
+		}
+		if len(keys) > 0 {
+			return fmt.Errorf("--db: the object store holds a database served without --db (%s), which --db would leave unserved; move it below %s/<name>/ or run without --db", keys[0], databasesDir)
+		}
+	}
+	return nil
 }

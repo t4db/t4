@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/pkg/object"
 )
 
 // TestRunServesSeveralDatabases runs t4 run with two databases and checks
@@ -275,7 +276,7 @@ func get(t *testing.T, c *clientv3.Client, key string) string {
 // TestSingleDatabaseMetricsUnchanged: without --db, /metrics serves the
 // default registry as before, without promhttp's own handler series.
 func TestSingleDatabaseMetricsUnchanged(t *testing.T) {
-	dbs, handler, err := openDatabases(t4.Config{DataDir: t.TempDir()}, nil, nil)
+	dbs, handler, err := openDatabases(context.Background(), t4.Config{DataDir: t.TempDir()}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,4 +428,50 @@ func (p *testPKI) rangeWithToken(t *testing.T, ctx context.Context, addr, db, to
 	_, err := etcdserverpb.NewKVClient(p.rawConn(t, addr, db)).Range(ctx,
 		&etcdserverpb.RangeRequest{Key: []byte("/k")})
 	return err
+}
+
+// divisibleMem is a Mem that --db accepts as an object store.
+type divisibleMem struct{ *object.Mem }
+
+func (divisibleMem) Sub(string) object.Store { return object.NewMem() }
+
+// TestDatabasesRefuseSingleDatabase checks that --db does not start next to
+// the database of a run without it, which it would leave unserved.
+func TestDatabasesRefuseSingleDatabase(t *testing.T) {
+	ctx := context.Background()
+	for _, dir := range []string{"db", "wal"} {
+		dataDir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dataDir, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := openDatabases(ctx, t4.Config{DataDir: dataDir}, nil, []string{"a"}); err == nil || !strings.Contains(err.Error(), "served without --db") {
+			t.Errorf("%s in the data directory: err = %v, want a refusal", dir, err)
+		}
+	}
+	for _, key := range []string{"manifest/latest", "wal/0000000001"} {
+		store := divisibleMem{object.NewMem()}
+		if err := store.Put(ctx, key, strings.NewReader("x")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := openDatabases(ctx, t4.Config{DataDir: t.TempDir()}, store, []string{"a"}); err == nil || !strings.Contains(err.Error(), "served without --db") {
+			t.Errorf("%s in the object store: err = %v, want a refusal", key, err)
+		}
+	}
+
+	// Databases already served with --db are not mistaken for one.
+	dataDir := t.TempDir()
+	dbs, _, err := openDatabases(ctx, t4.Config{DataDir: dataDir}, nil, []string{"a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, db := range dbs {
+		_ = db.node.Close()
+	}
+	dbs, _, err = openDatabases(ctx, t4.Config{DataDir: dataDir}, nil, []string{"a"})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, db := range dbs {
+		_ = db.node.Close()
+	}
 }
