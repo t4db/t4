@@ -101,7 +101,7 @@ func TestWireKeyVersionGateGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	for _, version := range []int{0, 1, 3, 255} {

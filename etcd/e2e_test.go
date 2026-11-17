@@ -528,7 +528,7 @@ func TestE2EThreeNodeBinaryKeyForwarding(t *testing.T) {
 		}
 		rev := get(leaderCli, key, "first")
 		if strings.Contains(key, "\xfd") {
-			replacement := strings.ToValidUTF8(key, "\ufffd")
+			replacement := strings.ReplaceAll(strings.ReplaceAll(key, "\xfd", "\ufffd"), "\xff", "\ufffd")
 			bad, err := leaderCli.Get(ctx, replacement)
 			if err != nil {
 				t.Fatal(err)

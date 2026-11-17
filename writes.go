@@ -708,7 +708,8 @@ func txnCompareLabel(succeeded bool) string {
 }
 
 // txnToForwardRequest converts a TxnRequest into a peer ForwardRequest for
-// follower-to-leader forwarding.
+// follower-to-leader forwarding. WireKey casts below preserve the original
+// string bytes without copying payloads; only the codec chooses a JSON shape.
 func txnToForwardRequest(req TxnRequest) *peer.ForwardRequest {
 	return &peer.ForwardRequest{
 		Op: peer.ForwardTxn,
