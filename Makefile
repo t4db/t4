@@ -1,4 +1,4 @@
-.PHONY: docs-generate test-apiserver test-conformance test-etcd-diff test-robustness
+.PHONY: docs-generate test-apiserver test-conformance test-etcd-diff test-robustness tla
 
 docs-generate:
 	go run ./hack/docgen
@@ -18,3 +18,6 @@ ROBUSTNESS_TMP ?= $(CURDIR)/.tmp/robustness
 test-robustness:
 	mkdir -p $(ROBUSTNESS_TMP)
 	cd tests/robustness && TMPDIR=$${TMPDIR:-$(ROBUSTNESS_TMP)} RESULTS_DIR=$${RESULTS_DIR:-$(ROBUSTNESS_TMP)/results} go test -count=1 -timeout 30m ./...
+
+tla:
+	./hack/tla.sh

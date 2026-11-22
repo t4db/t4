@@ -107,6 +107,27 @@ jobs:
             ./pkg/object \
             ./tests/compat
 
+  model-check-tla:
+    name: Check TLA+ Election and Go Replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Check the election model and replay transitions
+        run: make tla
+
   test-integration-linux:
     name: Test Integration (Linux)
     runs-on: ubuntu-latest
