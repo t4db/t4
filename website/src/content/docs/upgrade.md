@@ -91,6 +91,29 @@ endpoints, the websocket watch, and why grpc-web cannot work.
 
 To keep exactly the pre-upgrade surface — one port, gRPC only — start with `--enable-grpc-gateway=false`.
 
+## `MemberList` answers only when client URLs are configured
+
+Before this release `MemberList` returned one synthetic member with an empty
+`ClientURLs` list. That is destructive for an etcd client with
+`AutoSyncInterval` set: the official Go client replaces its endpoints with
+whatever `MemberList` returns, so the first refresh left it with none and every
+request after that failed. Such a client connected, worked, and dropped seconds
+later.
+
+The RPC now answers with `--advertise-client-urls`, and returns gRPC
+`Unimplemented` when that flag is unset rather than a successful empty response.
+A syncing client logs the failed sync and keeps the endpoints it was given,
+which is the only answer a server can give without guessing an address its
+clients may not be able to reach. The flag deliberately does not fall back to
+`--listen`: that is `0.0.0.0:3379` out of the box, and a node behind a Service,
+NAT or load balancer cannot tell which of its addresses a client used.
+
+So a script that only checked that `member list` succeeded now sees
+`Unimplemented` until the flag is set, and the Helm chart leaves
+`config.advertiseClientUrls` empty, so chart deployments are included. Name the
+address clients reach T4 at — `--advertise-client-urls=https://t4.example.com:443`
+— and `member list` and endpoint sync both answer with it.
+
 ## Databases created with the meta keyspace
 
 Databases created by this release or later keep T4's own bookkeeping (etcd leases, auth users, roles and tokens) in the
