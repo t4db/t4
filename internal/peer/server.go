@@ -679,6 +679,14 @@ func (s *Server) BroadcastShutdown() {
 	}
 }
 func (s *Server) Forward(ctx context.Context, req *ForwardRequest) (*ForwardResponse, error) {
+	// Validate before handler lookup/dispatch, including read-index requests:
+	// old follower -> new leader must fail closed, never commit mutated keys.
+	if req == nil {
+		return nil, status.Error(codes.FailedPrecondition, "forward_wire_version_unsupported: missing request")
+	}
+	if req.WireVersion != forwardWireVersion {
+		return nil, status.Errorf(codes.FailedPrecondition, "forward_wire_version_unsupported: received %d, require %d", req.WireVersion, forwardWireVersion)
+	}
 	s.mu.Lock()
 	h := s.forwardHandler
 	s.mu.Unlock()
