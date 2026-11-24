@@ -221,6 +221,11 @@ type AckMsg struct {
 // Shutdown is a special flag: when true the leader is shutting down gracefully
 // and the follower should start a TakeOver election immediately. Heartbeat
 // marks a message that carries nothing but the leader's liveness.
+//
+// Its json tags are vestigial: Codec owns this type on every path, so Key is
+// never JSON-encoded and keeps arbitrary bytes as a plain string. Anything
+// that routes it through encoding/json instead would silently replace invalid
+// UTF-8 in Key with U+FFFD, which is why forwarded keys use WireKey.
 type WalEntryMsg struct {
 	ID                  int64  `json:"id,omitempty"`
 	Revision            int64  `json:"revision"`
@@ -408,6 +413,14 @@ type ForwardResponse struct {
 	ErrMsg      string    `json:"err_msg,omitempty"`
 	DeletedKeys []WireKey `json:"deleted_keys,omitempty"` // ForwardTxn: keys actually removed
 	Ages        []int64   `json:"ages,omitempty"`         // ForwardLeaseRenewedAt: nanoseconds since each lease was renewed
+}
+
+// carriesKey reports whether req carries key bytes that a legacy sender could
+// already have mangled. A forward without any — a read index, a compaction, a
+// lease renewal — cannot carry a corrupted key, and no response to one carries
+// a key either, so the version gate lets it through.
+func (r *ForwardRequest) carriesKey() bool {
+	return r.Key != "" || r.TxnReq != nil
 }
 
 // ForwardHandler is implemented by the Node to handle forwarded writes on the
