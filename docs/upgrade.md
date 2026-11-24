@@ -17,6 +17,7 @@ These are the failure modes the binary refuses rather than silently corrupting s
 | Checkpoint `format_version` newer than this binary understands | Startup refuses to restore. Operator must roll the binary forward. |
 | WAL frame magic / version newer than this binary understands | Startup refuses to replay. Same remedy. |
 | Follower on an earlier release connecting to the leader of a database created with the meta keyspace | The leader refuses the stream with `wal_format_unsupported`. Upgrade the follower. |
+| Follower forwarding a write on an earlier peer forward wire version | The leader refuses it with `forward_wire_version_unsupported` rather than committing a key whose bytes the sender may already have replaced. Keyless forwards (read index, compaction, lease renewal) are unaffected. Upgrade the follower. |
 | WAL entry with an op code this binary does not know (local replay, S3 replay, or the leader's peer stream) | Replay or apply is refused. A follower stops replicating and logs an error instead of retrying or attempting a leader takeover; it does not apply the entry. Same remedy. |
 | Object store does not enforce the conditional PUTs leader election needs, and `--peer-listen` is set | Startup refuses with `ErrConditionalWritesIgnored`. Use a store that enforces them — on GCS that means `--gcs-bucket` rather than the S3-compatible endpoint — or run a single node. A single node starts with a warning. |
 | `--gateway-addr` names an address T4 cannot listen on | Startup refuses with the listen error. An address T4 derived on its own — the port below `--listen` when client TLS is on — is deliberately not fail-closed: T4 warns, falls back to sharing `--listen`, and keeps serving. |
@@ -45,12 +46,15 @@ mutation. Ordinary UTF-8 forwarding to a legacy leader continues to work.
 Binary-key forwarding fails closed until the leader is upgraded; send such
 operations only once every node is upgraded.
 
-A new leader rejects legacy (version 0) or unknown-version forward RPCs with
-`FailedPrecondition` and `forward_wire_version_unsupported`, before dispatch.
-Upgrading the leader first therefore blocks legacy followers' writes and
-linearizable read-index requests until those followers are upgraded. The leader
-cannot recover original bytes already replaced by a legacy sender. This gate
-is independent of WAL and checkpoint formats, which remain unchanged.
+A new leader rejects a legacy (version 0) or unknown-version forward with
+`FailedPrecondition` and `forward_wire_version_unsupported`, before dispatch,
+but only when it carries a key: the leader cannot recover bytes a legacy sender
+has already replaced. A forward that carries no key — a read index, a
+compaction, a lease renewal — has nothing to corrupt and is served as usual, so
+upgrading the leader first blocks a legacy follower's writes while leaving its
+linearizable reads working. The leader logs the follower to upgrade, at most
+once a minute. This gate is independent of WAL and checkpoint formats, which
+remain unchanged.
 
 ## Single-node upgrade
 

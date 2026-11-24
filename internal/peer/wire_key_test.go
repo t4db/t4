@@ -104,15 +104,20 @@ func TestWireKeyVersionGateGRPC(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	// A legacy sender's key may already have lost bytes, so anything carrying
+	// key material is refused — whether the key is at the top level or only
+	// inside a transaction.
 	for _, version := range []int{0, 1, 3, 255} {
-		for _, op := range []peer.ForwardOp{peer.ForwardPut, peer.ForwardGetRevision} {
-			req := map[string]any{"key": "\xfd", "op": op}
+		for _, req := range []map[string]any{
+			{"op": peer.ForwardPut, "key": "\xfd"},
+			{"op": peer.ForwardTxn, "txn": map[string]any{"success": []map[string]any{{"key": "\xfd"}}}},
+		} {
 			if version != 0 {
 				req["wire_version"] = version
 			}
 			err := conn.Invoke(ctx, "/peer.WalStream/Forward", req, &peer.ForwardResponse{})
 			if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "forward_wire_version_unsupported") {
-				t.Fatalf("v%d: %v", version, err)
+				t.Fatalf("v%d op %v: %v", version, req["op"], err)
 			}
 		}
 	}
@@ -126,11 +131,31 @@ func TestWireKeyVersionGateGRPC(t *testing.T) {
 	if handler.calls.Load() != 0 {
 		t.Fatal("rejected request reached handler")
 	}
+	// A legacy forward with no key material cannot carry a mangled key, and
+	// no response to one carries a key either: a read index, a compaction and
+	// a lease renewal keep working while the follower waits to be upgraded.
+	keyless := []peer.ForwardOp{peer.ForwardGetRevision, peer.ForwardGetSequence, peer.ForwardCompact, peer.ForwardLeaseRenew, peer.ForwardLeaseRenewedAt}
+	want := int64(0)
+	for _, version := range []int{0, 1, 3, 255} {
+		for _, op := range keyless {
+			req := map[string]any{"op": op}
+			if version != 0 {
+				req["wire_version"] = version
+			}
+			if err := conn.Invoke(ctx, "/peer.WalStream/Forward", req, &peer.ForwardResponse{}); err != nil {
+				t.Fatalf("v%d op %v: %v", version, op, err)
+			}
+			want++
+			if got := handler.calls.Load(); got != want {
+				t.Fatalf("v%d op %v: handler calls %d, want %d", version, op, got, want)
+			}
+		}
+	}
 	valid := map[string]any{"wire_version": 2, "key": "/valid", "op": peer.ForwardPut}
 	if err := conn.Invoke(ctx, "/peer.WalStream/Forward", valid, &peer.ForwardResponse{}); err != nil {
 		t.Fatal(err)
 	}
-	if handler.calls.Load() != 1 {
+	if handler.calls.Load() != want+1 {
 		t.Fatal("valid request not dispatched")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	grpcpeer "google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/metrics"
@@ -129,6 +130,11 @@ type Server struct {
 
 	// members tracks every follower that has streamed from this leader.
 	members map[string]*member
+
+	// lastVersionWarnNano throttles the forward wire version warning: a
+	// legacy follower sends one forward per write, and the warning says the
+	// same thing every time.
+	lastVersionWarnNano atomic.Int64
 
 	log peerLogger
 }
@@ -679,12 +685,16 @@ func (s *Server) BroadcastShutdown() {
 	}
 }
 func (s *Server) Forward(ctx context.Context, req *ForwardRequest) (*ForwardResponse, error) {
-	// Validate before handler lookup/dispatch, including read-index requests:
-	// old follower -> new leader must fail closed, never commit mutated keys.
+	// Validate before handler lookup/dispatch: a legacy sender's key may
+	// already have lost bytes, and the leader cannot recover them, so a
+	// forward that carries key material fails closed. One that carries none
+	// has nothing to corrupt and is served, which keeps a follower waiting
+	// its turn in a rolling upgrade reading linearizably.
 	if req == nil {
 		return nil, status.Error(codes.FailedPrecondition, "forward_wire_version_unsupported: missing request")
 	}
-	if req.WireVersion != forwardWireVersion {
+	if req.WireVersion != forwardWireVersion && req.carriesKey() {
+		s.warnForwardVersion(ctx, req.WireVersion)
 		return nil, status.Errorf(codes.FailedPrecondition, "forward_wire_version_unsupported: received %d, require %d", req.WireVersion, forwardWireVersion)
 	}
 	s.mu.Lock()
@@ -694,6 +704,23 @@ func (s *Server) Forward(ctx context.Context, req *ForwardRequest) (*ForwardResp
 		return nil, status.Error(codes.Unavailable, "leader not ready")
 	}
 	return h.HandleForward(ctx, req)
+}
+
+// warnForwardVersion names the follower a refused forward came from, at most
+// once a minute. Mirrors the wal_format_unsupported warning: what an operator
+// needs is the node to upgrade, not one line per rejected write.
+func (s *Server) warnForwardVersion(ctx context.Context, version uint8) {
+	now := time.Now().UnixNano()
+	last := s.lastVersionWarnNano.Load()
+	if now-last < int64(time.Minute) || !s.lastVersionWarnNano.CompareAndSwap(last, now) {
+		return
+	}
+	from := "a follower"
+	if p, ok := grpcpeer.FromContext(ctx); ok {
+		from = p.Addr.String()
+	}
+	s.log.Warnf("peer: refusing forwarded writes from %s: it speaks forward wire version %d, this leader requires %d — upgrade the node",
+		from, version, forwardWireVersion)
 }
 
 // ── entry ring buffer ─────────────────────────────────────────────────────────
