@@ -13,6 +13,55 @@ T4 ships a Helm chart that deploys a StatefulSet with persistent volumes, health
 
 ---
 
+## Client endpoint discovery
+
+The Helm chart requires no extra configuration for etcd client endpoint sync:
+
+```yaml
+replicaCount: 3
+
+config:
+  advertiseClientUrls: ""
+```
+
+With an empty value, the chart advertises its client-facing Service using
+`http://<fullname>.<namespace>.svc.cluster.local:<service.port>`. When
+`proxy.enabled=true`, it uses `<fullname>-proxy` and `proxy.service.port` instead.
+Client-facing TLS changes the scheme to `https`. This works for both one and
+multiple replicas and is independent of the peer replication `advertiseAddr`.
+
+These automatic addresses are internal Kubernetes addresses. If clients connect
+from outside the cluster through external DNS, an Ingress, or a load balancer,
+set an address those clients can reach:
+
+```yaml
+config:
+  advertiseClientUrls: "https://t4.example.com:443"
+```
+
+Use `config.advertiseClientUrls` as the supported Helm setting; do not duplicate
+it in `extraArgs` or `extraEnv`. The chart passes it as `T4_ADVERTISE_CLIENT_URLS`.
+Each URL requires an explicit port. For TLS, the certificate must cover the
+advertised hostname and clients must trust its issuer. External TLS termination
+can advertise HTTPS while T4 listens internally over plaintext.
+
+The etcd `MemberList` RPC returns one synthetic member with all configured URLs.
+It is a static client discovery compatibility surface, not a quorum-membership
+list or a report of current node health. For raw manifests, set
+`T4_ADVERTISE_CLIENT_URLS` explicitly to the client-facing Service URL; without
+configuration, `MemberList` returns gRPC `Unimplemented`, allowing etcd clients
+to keep their original endpoints. `--listen` binds the local client listener;
+`--advertise-peer` describes replication addresses; neither supplies client
+discovery URLs automatically outside Helm.
+
+Outside Kubernetes, `t4 run --listen=0.0.0.0:3379
+--advertise-client-urls=https://t4.example.com:443` advertises a stable load
+balancer. For direct-node discovery, use
+`--advertise-client-urls=http://node-a:3379,http://node-b:3379,http://node-c:3379`
+on every node. Keep the same list on all nodes and update it when topology
+changes; temporarily unavailable nodes may remain advertised until removed.
+Every advertised URL must be reachable by the actual clients.
+
 ## Quick start — single node
 
 ```bash

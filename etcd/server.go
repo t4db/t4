@@ -56,10 +56,11 @@ type Server struct {
 	etcdserverpb.UnimplementedClusterServer
 	etcdserverpb.UnimplementedMaintenanceServer
 
-	node          *t4.Node
-	authStore     *auth.Store
-	tokens        *auth.TokenStore
-	leaseLoopOnce sync.Once
+	node                *t4.Node
+	authStore           *auth.Store
+	tokens              *auth.TokenStore
+	leaseLoopOnce       sync.Once
+	advertiseClientURLs []string
 }
 
 // checkRequest returns PermissionDenied unless the user ctx authenticated as
@@ -76,11 +77,25 @@ func (s *Server) checkRequest(ctx context.Context, checks []auth.RangeCheck) err
 	return s.authStore.CheckRequest(user, checks)
 }
 
+// ServerOption configures an etcd protocol adapter at construction time.
+type ServerOption func(*Server)
+
+// WithAdvertiseClientURLs sets static client discovery endpoints. These URLs
+// describe client entrypoints, not replication peers or dynamic membership.
+func WithAdvertiseClientURLs(urls []string) ServerOption {
+	return func(s *Server) {
+		s.advertiseClientURLs = append([]string(nil), urls...)
+	}
+}
+
 // New returns a Server backed by node. When authStore and tokens are non-nil,
 // the Auth gRPC service is registered and RBAC is enforced on all KV/Watch
 // calls.
-func New(node *t4.Node, authStore *auth.Store, tokens *auth.TokenStore) *Server {
+func New(node *t4.Node, authStore *auth.Store, tokens *auth.TokenStore, opts ...ServerOption) *Server {
 	s := &Server{node: node, authStore: authStore, tokens: tokens}
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.maybeStartLeaseLoop()
 	return s
 }
@@ -474,11 +489,15 @@ func (s *Server) MemberUpdate(_ context.Context, _ *etcdserverpb.MemberUpdateReq
 	return nil, unimplemented()
 }
 func (s *Server) MemberList(_ context.Context, _ *etcdserverpb.MemberListRequest) (*etcdserverpb.MemberListResponse, error) {
+	if len(s.advertiseClientURLs) == 0 {
+		return nil, status.Error(codes.Unimplemented, "client endpoint discovery requires configured advertised client URLs (--advertise-client-urls)")
+	}
 	return &etcdserverpb.MemberListResponse{
 		Header: s.header(),
 		Members: []*etcdserverpb.Member{{
-			ID:   1,
-			Name: "t4",
+			ID:         1,
+			Name:       "t4",
+			ClientURLs: append([]string(nil), s.advertiseClientURLs...),
 		}},
 	}, nil
 }
