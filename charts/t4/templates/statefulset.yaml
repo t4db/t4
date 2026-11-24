@@ -137,8 +137,10 @@ spec:
                 {{ . }} \
                 {{- end }}
           env:
+            {{- with .Values.config.advertiseClientUrls }}
             - name: T4_ADVERTISE_CLIENT_URLS
-              value: {{ include "t4.advertiseClientURLs" . | quote }}
+              value: {{ . | quote }}
+            {{- end }}
             - name: MY_POD_NAME
               valueFrom:
                 fieldRef:

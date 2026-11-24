@@ -40,29 +40,31 @@ See the [full Kubernetes deployment guide](https://t4db.github.io/t4/deployment/
 
 ## Client endpoint discovery
 
-The Helm chart requires no extra configuration for etcd client endpoint sync:
-
-```yaml
-replicaCount: 3
-
-config:
-  advertiseClientUrls: ""
-```
-
-With an empty value, the chart advertises its client-facing Service using
-`http://<fullname>.<namespace>.svc.cluster.local:<service.port>`. When
-`proxy.enabled=true`, it uses `<fullname>-proxy` and `proxy.service.port` instead.
-Client-facing TLS changes the scheme to `https`. This works for both one and
-multiple replicas and is independent of the peer replication `advertiseAddr`.
-
-These automatic addresses are internal Kubernetes addresses. If clients connect
-from outside the cluster through external DNS, an Ingress, or a load balancer,
-set an address those clients can reach:
+Clients that refresh their endpoint list periodically — the etcd Go client's
+`AutoSync` — call `MemberList`. T4 answers with the URLs configured in
+`config.advertiseClientUrls`:
 
 ```yaml
 config:
   advertiseClientUrls: "https://t4.example.com:443"
 ```
+
+The chart leaves it empty, and `MemberList` then returns gRPC `Unimplemented`,
+so clients keep the endpoints they were configured with. That default is
+deliberate: the chart cannot know where its clients run, and advertising
+`*.svc.cluster.local` to one outside the cluster would replace a working
+endpoint with a name it cannot resolve.
+
+For clients inside the cluster, advertise the client-facing Service:
+
+```yaml
+config:
+  advertiseClientUrls: "http://t4.default.svc.cluster.local:3379"
+```
+
+Use the release's own fullname, namespace and `service.port`. With
+`proxy.enabled=true`, clients reach `<fullname>-proxy` on `proxy.service.port`
+instead; with client-facing TLS the scheme is `https`.
 
 Use `config.advertiseClientUrls` as the supported Helm setting; do not duplicate
 it in `extraArgs` or `extraEnv`. The chart passes it as `T4_ADVERTISE_CLIENT_URLS`.
@@ -72,12 +74,9 @@ can advertise HTTPS while T4 listens internally over plaintext.
 
 The etcd `MemberList` RPC returns one synthetic member with all configured URLs.
 It is a static client discovery compatibility surface, not a quorum-membership
-list or a report of current node health. For raw manifests, set
-`T4_ADVERTISE_CLIENT_URLS` explicitly to the client-facing Service URL; without
-configuration, `MemberList` returns gRPC `Unimplemented`, allowing etcd clients
-to keep their original endpoints. `--listen` binds the local client listener;
-`--advertise-peer` describes replication addresses; neither supplies client
-discovery URLs automatically outside Helm.
+list or a report of current node health. `--listen` binds the local client
+listener; `--advertise-peer` describes replication addresses; neither supplies
+client discovery URLs.
 
 Outside Kubernetes, `t4 run --listen=0.0.0.0:3379
 --advertise-client-urls=https://t4.example.com:443` advertises a stable load

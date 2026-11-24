@@ -58,9 +58,9 @@ For TLS, the certificate must cover each advertised hostname and clients must
 trust its issuer. An HTTPS endpoint is allowed with a plaintext local listener
 when an external load balancer terminates TLS.
 
-The Helm chart automatically advertises its client-facing Service; see the
-Kubernetes deployment guide. Outside the cluster, configure an externally
-reachable URL explicitly.
+The Helm chart leaves this unset, so clients keep their configured endpoints
+until `config.advertiseClientUrls` names an address they can reach; see the
+Kubernetes deployment guide.
 
 ## Library: `t4.Config`
 
