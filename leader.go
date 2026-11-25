@@ -465,6 +465,7 @@ func (n *Node) HandleForward(ctx context.Context, req *peer.ForwardRequest) (*pe
 			Revision:    resp.Revision,
 			Succeeded:   resp.Succeeded,
 			DeletedKeys: deletedKeys,
+			Nested:      txnResultsToMsg(resp.Nested),
 		}, nil
 	}
 	return nil, fmt.Errorf("t4: unknown forward op %d", req.Op)
@@ -489,6 +490,10 @@ func v1ForwardSupported(req *peer.ForwardRequest) error {
 			return fmt.Errorf("t4: txn condition target %d is unknown to a v1.1 leader", c.Target)
 		}
 	}
+	// Op types above TxnDelete cover every later addition, nested txns
+	// included: a v1.1 leader had no wire version gate, so it would accept
+	// one of those ops and silently drop it, which is exactly what this
+	// simulation exists to catch.
 	for _, ops := range [][]peer.TxnOpMsg{req.TxnReq.Success, req.TxnReq.Failure} {
 		for _, op := range ops {
 			if TxnOpType(op.Type) > TxnDelete {

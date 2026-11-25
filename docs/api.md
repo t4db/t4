@@ -76,14 +76,22 @@ type TxnResponse struct {
     Succeeded   bool                // true if all Conditions passed
     Revision    int64               // revision of the write, or current revision for a no-op
     DeletedKeys map[string]struct{} // set of keys actually removed by the write
+    Nested      []TxnResult         // one per TxnNested op in the branch taken, in order
+}
+
+// TxnResult is the outcome of one nested transaction.
+type TxnResult struct {
+    Succeeded bool
+    Nested    []TxnResult // results within the branch this one took
 }
 
 // TxnOp is one write operation in a transaction branch.
 type TxnOp struct {
-    Type  TxnOpType // TxnPut, TxnDelete or TxnDeleteLease
-    Key   string    // unused for TxnDeleteLease
-    Value []byte    // used for TxnPut
-    Lease int64     // used for TxnPut (must reference a live lease, or 0) and TxnDeleteLease
+    Type  TxnOpType   // TxnPut, TxnDelete, TxnDeleteLease or TxnNested
+    Key   string      // unused for TxnDeleteLease and TxnNested
+    Value []byte      // used for TxnPut
+    Lease int64       // used for TxnPut (must reference a live lease, or 0) and TxnDeleteLease
+    Txn   *TxnRequest // used for TxnNested
 }
 
 // TxnOpType identifies the kind of operation within a transaction branch.
@@ -95,7 +103,16 @@ const (
     // TxnDeleteLease deletes every key attached to Lease when the txn
     // commits, including keys attached by concurrent writes.
     TxnDeleteLease TxnOpType = 4
+    // TxnNested evaluates Txn and applies the ops of whichever branch its
+    // own Conditions select, as etcd's nested RequestTxn does. Its
+    // conditions are evaluated in the same atomic step as the enclosing
+    // transaction's, and it may not carry Guards of its own.
+    TxnNested TxnOpType = 5
 )
+
+// MaxTxnDepth bounds how deeply TxnNested may nest; deeper returns
+// ErrTxnTooDeep. A top-level transaction is depth 0.
+const MaxTxnDepth = 128
 
 // TxnCondition is one predicate in the If clause.
 type TxnCondition struct {
