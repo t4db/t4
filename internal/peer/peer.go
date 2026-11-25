@@ -8,15 +8,12 @@
 package peer
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
-	"unicode/utf8"
 
+	"github.com/t4db/t4/internal/jsonbytes"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -280,74 +277,9 @@ const (
 	ForwardLeaseRenewedAt             // read how long ago each of Leases was last renewed (ForwardResponse.Ages)
 )
 
-// WireKey preserves arbitrary key bytes only at the peer JSON boundary.
-// UTF-8 -> legacy JSON string; other bytes -> {"base64":"..."}.
-// The object shape makes legacy string decoders reject binary keys before
-// mutation. WAL, storage and public key types retain their existing formats.
-type WireKey string
-
-func (k WireKey) MarshalJSON() ([]byte, error) {
-	if utf8.ValidString(string(k)) {
-		return json.Marshal(string(k))
-	}
-	return json.Marshal(struct {
-		Base64 string `json:"base64"`
-	}{
-		base64.StdEncoding.EncodeToString([]byte(k)),
-	})
-}
-
-func (k *WireKey) UnmarshalJSON(data []byte) error {
-	data = bytes.TrimSpace(data)
-	if len(data) == 0 {
-		return fmt.Errorf("peer: empty wire key")
-	}
-	if data[0] == '"' {
-		// JSON strings must already be valid UTF-8. Legacy senders may have
-		// replaced bytes before transmission; only the version gate can detect
-		// that sender, never guessing from a legitimate replacement rune.
-		if !utf8.Valid(data) {
-			return fmt.Errorf("peer: invalid UTF-8 wire key string")
-		}
-		var text string
-		if err := json.Unmarshal(data, &text); err != nil {
-			return err
-		}
-		*k = WireKey(text)
-		return nil
-	}
-	// Read a fixed object grammar instead of a map: duplicate members must
-	// fail too, and nested input is never recursively decoded by this parser.
-	d := json.NewDecoder(bytes.NewReader(data))
-	token, err := d.Token()
-	if err != nil || token != json.Delim('{') {
-		return fmt.Errorf("peer: wire key must be string or base64 object")
-	}
-	token, err = d.Token()
-	if err != nil || token != "base64" {
-		return fmt.Errorf("peer: wire key requires base64 member")
-	}
-	token, err = d.Token()
-	text, ok := token.(string)
-	if err != nil || !ok {
-		return fmt.Errorf("peer: wire key base64 must be string")
-	}
-	token, err = d.Token()
-	if err != nil || token != json.Delim('}') {
-		return fmt.Errorf("peer: wire key requires exactly one member")
-	}
-	if _, err = d.Token(); err != io.EOF {
-		return fmt.Errorf("peer: trailing wire key data")
-	}
-	raw, err := base64.StdEncoding.Strict().DecodeString(text)
-	// Strict rejects nonzero padding bits; re-encoding also rejects CR/LF,
-	// which the standard decoder deliberately ignores even in strict mode.
-	if err != nil || base64.StdEncoding.EncodeToString(raw) != text {
-		return fmt.Errorf("peer: invalid wire key base64")
-	}
-	*k = WireKey(raw)
-	return nil
-}
+// WireKey is a key on the peer wire: arbitrary bytes that survive JSON.
+// See internal/jsonbytes for why a plain string will not do.
+type WireKey = jsonbytes.String
 
 // Independent of persisted WAL/checkpoint versions. Version 0 is legacy;
 // its strings may already have lost bytes before reaching the leader.

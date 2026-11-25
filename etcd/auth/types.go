@@ -1,7 +1,13 @@
 // Package auth implements etcd-compatible authentication and RBAC for T4.
 package auth
 
-import "go.etcd.io/etcd/api/v3/authpb"
+import (
+	"encoding/json"
+
+	"go.etcd.io/etcd/api/v3/authpb"
+
+	"github.com/t4db/t4/internal/jsonbytes"
+)
 
 // PermType mirrors authpb.Permission_Type for local use.
 type PermType = authpb.Permission_Type
@@ -13,10 +19,51 @@ const (
 )
 
 // Permission grants access to a key range.
+//
+// Key and RangeEnd hold the bytes the client sent, which etcd defines as
+// arbitrary: authpb.Permission declares them as bytes, not as a string. They
+// stay Go strings here because callers compare and slice them as such, and
+// the JSON methods below are what keeps those bytes intact on disk.
 type Permission struct {
 	Key      string   `json:"key"`
 	RangeEnd string   `json:"rangeEnd,omitempty"`
 	PermType PermType `json:"permType"`
+}
+
+// permissionJSON is the stored form of a Permission. The ranges go through
+// jsonbytes.String because encoding/json replaces invalid UTF-8 in a Go
+// string with U+FFFD: a role granted a range that is not valid UTF-8 would
+// be written with a different range than the one granted, and since the
+// in-memory cache keeps the granted range while the load path reads the
+// stored one, the cluster would begin enforcing that other range after a
+// restart — widening or narrowing the ACL with nothing logged.
+//
+// A range that is valid UTF-8, which is all of them in practice, encodes
+// exactly as before, so stored roles and anything reading them are
+// unaffected.
+type permissionJSON struct {
+	Key      jsonbytes.String `json:"key"`
+	RangeEnd jsonbytes.String `json:"rangeEnd,omitempty"`
+	PermType PermType         `json:"permType"`
+}
+
+func (p Permission) MarshalJSON() ([]byte, error) {
+	return json.Marshal(permissionJSON{
+		Key:      jsonbytes.String(p.Key),
+		RangeEnd: jsonbytes.String(p.RangeEnd),
+		PermType: p.PermType,
+	})
+}
+
+func (p *Permission) UnmarshalJSON(data []byte) error {
+	var stored permissionJSON
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return err
+	}
+	p.Key = string(stored.Key)
+	p.RangeEnd = string(stored.RangeEnd)
+	p.PermType = stored.PermType
+	return nil
 }
 
 // covers reports whether p grants permType access to the given key.
