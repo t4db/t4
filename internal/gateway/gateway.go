@@ -10,16 +10,22 @@
 // imitation. Requests therefore cross the server's interceptors, so auth and
 // RBAC apply to a JSON caller exactly as to a gRPC one.
 //
-// Streaming RPCs arrive over websockets. Watch and LeaseKeepAlive are
-// bidirectional, and no plain-HTTP framing carries those, which is why a
-// browser cannot watch over grpc-web either: grpc-web has no bidirectional
-// streaming, so the client half-closes after its first message and the watch is
-// torn down before an event can reach it. The websocket proxy is what makes
-// them work, and it is why this package exists rather than a grpc-web filter.
+// Streaming RPCs reach it two ways. A client with only one request to send —
+// create a watch, renew a lease — can POST that request and then read
+// responses as newline-delimited JSON off the response body it left open.
+// Its request body ends as soon as it is sent, and the server reads that
+// half-close as "no more requests on this stream" rather than as the end of
+// the stream, which is what makes the arrangement work; it is how etcd's own
+// non-browser JSON clients watch. A client that has to keep sending on the
+// same stream needs the websocket proxy, and a browser needs it regardless,
+// having no way to stream a request body at all. grpc-web is served by
+// neither: it carries no bidirectional streaming, and its framing is not
+// this gateway's.
 package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
@@ -27,6 +33,7 @@ import (
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/sirupsen/logrus"
 	"github.com/tmc/grpc-websocket-proxy/wsproxy"
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/etcdserverpb/gw"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -92,6 +99,7 @@ func New(ctx context.Context, conn *grpc.ClientConn, cfg Config) (http.Handler, 
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/version", versionHandler(etcdserverpb.NewMaintenanceClient(conn)))
 	mux.Handle("/v3/", wsproxy.WebsocketProxy(gwmux,
 		// A websocket carries no method, and every gateway route is a POST.
 		wsproxy.WithRequestMutator(func(_ *http.Request, outgoing *http.Request) *http.Request {
@@ -120,6 +128,38 @@ func New(ctx context.Context, conn *grpc.ClientConn, cfg Config) (http.Handler, 
 	}, nil
 }
 
+// versionHandler answers etcd's /version, which is not part of the gRPC API
+// and so has no generated route. A client reads it before anything else to
+// decide which API prefix to speak — patroni refuses to start without it —
+// and expects etcd's two fields back.
+//
+// The server version comes from Status rather than a constant of its own, so
+// the two can never disagree. etcd reports a cluster version of major.minor.0,
+// the minimum version across members, and that is what a single logical
+// member reports here.
+func versionHandler(mc etcdserverpb.MaintenanceClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp, err := mc.Status(r.Context(), &etcdserverpb.StatusRequest{})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Server  string `json:"etcdserver"`
+			Cluster string `json:"etcdcluster"`
+		}{resp.Version, clusterVersion(resp.Version)})
+	}
+}
+
+// clusterVersion drops the patch component, as etcd's cluster version does.
+func clusterVersion(v string) string {
+	if i := strings.LastIndex(v, "."); i > 0 {
+		return v[:i] + ".0"
+	}
+	return v
+}
+
 // accessController is the first thing an HTTP request meets. It mirrors the
 // wrapper etcd puts in the same position (embed/serve.go, createAccessController)
 // and adds an origin check on the websocket handshake, which CORS cannot cover.
@@ -138,9 +178,9 @@ func (ac *accessController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// grpc-web is not served, and saying so is worth the few lines. The
 	// marshaler below accepts any content type, so a grpc-web client POSTing
-	// to /v3/watch would otherwise be handed an empty stream and a 200 —
-	// which is the silent non-answer that sends people looking for this
-	// gateway in the first place.
+	// to /v3/watch would otherwise be handed a 200 and a stream of JSON its
+	// framing cannot decode — the silent non-answer that sends people looking
+	// for this gateway in the first place.
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc-web") {
 		http.Error(w,
 			"grpc-web is not supported; use the JSON API under /v3/, "+

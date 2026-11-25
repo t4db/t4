@@ -3,6 +3,7 @@ package etcd
 import (
 	"context"
 	"errors"
+	"io"
 	"sort"
 	"sync"
 	"time"
@@ -78,6 +79,16 @@ func (s *Server) Watch(stream etcdserverpb.Watch_WatchServer) error {
 	for {
 		req, err := stream.Recv()
 		if err != nil {
+			// io.EOF means the client half-closed its send side: it will
+			// create no more watches, but it is still receiving events.
+			// Every etcd JSON client that watches over a single POST — the
+			// request body ends as soon as it is sent — looks like this, so
+			// returning here would hand them an empty stream. etcd keeps
+			// such a stream serving until the RPC context ends; wait for
+			// that instead and let the deferred cancel do the cleanup.
+			if errors.Is(err, io.EOF) {
+				<-ctx.Done()
+			}
 			return nil
 		}
 
