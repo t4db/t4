@@ -1,62 +1,5 @@
 # Configuration Reference
 
-## Client endpoint discovery
-
-`--advertise-client-urls` (or `T4_ADVERTISE_CLIENT_URLS`) configures the client
-URLs returned by the etcd `MemberList` RPC. An explicit flag overrides the
-environment variable. With neither set, `MemberList` returns gRPC
-`Unimplemented`; etcd clients retain their existing endpoints when sync fails.
-This setting belongs to the CLI/etcd adapter, not the storage-engine `t4.Config`.
-Embedded callers can pass `etcd.WithAdvertiseClientURLs(urls)` to `etcd.New`.
-
-For a stable load balancer outside Kubernetes:
-
-```bash
-t4 run \
-  --listen=0.0.0.0:3379 \
-  --advertise-client-urls=https://t4.example.com:443
-```
-
-The environment-only equivalent is:
-
-```bash
-T4_ADVERTISE_CLIENT_URLS=https://t4.example.com:443 \
-  t4 run --listen=0.0.0.0:3379
-```
-
-For explicitly managed direct-node discovery:
-
-```bash
-t4 run \
-  --listen=0.0.0.0:3379 \
-  --advertise-client-urls=http://node-a:3379,http://node-b:3379,http://node-c:3379
-```
-
-Every node should advertise the same list. Operators must update it when the
-topology changes; a temporarily unavailable node may remain advertised until
-removed from configuration. T4 returns one synthetic member (`ID: 1`, name
-`t4`) containing the URLs in configuration order. This is static client discovery
-compatibility, not a quorum-membership list, dynamic membership, or a statement
-of current node health. Peer URLs remain empty.
-
-`--listen` binds the local client listener. `--advertise-peer` configures peer
-replication addresses. `--advertise-client-urls` independently describes addresses
-reachable by the actual clients; T4 does not infer them from either other flag.
-URLs must use `http` or `https`, a hostname or IP address, and an explicit port
-in `1..65535` (bracket IPv6 literals). Comma-separated entries may have surrounding
-ASCII whitespace. Empty entries, duplicates (ignoring scheme and DNS hostname
-case), wildcard/unspecified hosts, credentials, paths, queries, fragments, and
-control characters are rejected before database startup. Validation performs no
-DNS lookups or connection probes.
-
-For TLS, the certificate must cover each advertised hostname and clients must
-trust its issuer. An HTTPS endpoint is allowed with a plaintext local listener
-when an external load balancer terminates TLS.
-
-The Helm chart leaves this unset, so clients keep their configured endpoints
-until `config.advertiseClientUrls` names an address they can reach; see the
-Kubernetes deployment guide.
-
 ## Library: `t4.Config`
 
 | Field                 | Type                               | Default                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -191,6 +134,25 @@ Start a node. All flags below are sub-flags of the `run` subcommand.
 ```bash
 t4 run [flags]
 ```
+
+### Client endpoint discovery
+
+`--advertise-client-urls` (env `T4_ADVERTISE_CLIENT_URLS`) sets the client URLs
+returned by the etcd `MemberList` RPC: comma-separated absolute `http(s)` URLs
+with explicit ports. T4 answers with one synthetic member (`ID: 1`, name `t4`)
+carrying them in configuration order, and no peer URLs.
+
+Unset, `MemberList` returns gRPC `Unimplemented`, so a client that syncs its
+endpoints keeps the ones it was configured with. The flag deliberately does not
+fall back to `--listen`: a node cannot tell which of its addresses a given
+client can reach. See [Upgrade](upgrade.md#memberlist-answers-only-when-client-urls-are-configured)
+for what that changed, and the [Kubernetes guide](kubernetes.md#client-endpoint-discovery)
+for the Helm setting.
+
+URLs are validated before the database starts — scheme, an explicit port in
+`1..65535`, and no wildcard hosts, credentials, paths, queries or duplicates —
+with no DNS lookups or connection probes. Embedded callers pass
+`etcd.WithAdvertiseClientURLs(urls)` to `etcd.New`.
 
 ### Environment variables
 
