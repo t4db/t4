@@ -88,7 +88,7 @@ func TestClientEndpointSync(t *testing.T) {
 				return resp, err
 			}))...)
 			t4etcd.New(node, nil, nil, opts...).Register(gs)
-			go gs.Serve(lis)
+			go func() { _ = gs.Serve(lis) }()
 			t.Cleanup(gs.Stop)
 			// Start with a different spelling to prove AutoSync really refreshes.
 			initial := lis.Addr().String()

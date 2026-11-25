@@ -6,12 +6,18 @@ T4 has been deployed!
 
 ━━ Client endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  etcd-compatible gRPC / advertised MemberList client URL(s):
-    {{ include "t4.advertiseClientURLs" . }}
+  etcd-compatible gRPC:
+    {{ include "t4.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+{{- with .Values.config.advertiseClientUrls }}
 
-  Automatic *.svc.cluster.local URLs are internal Kubernetes addresses.
-  For clients outside the cluster, set config.advertiseClientUrls explicitly
-  to URL(s) those clients can reach.
+  Advertised to clients through MemberList (etcd AutoSync):
+    {{ . }}
+{{- else }}
+
+  Clients that refresh endpoints through MemberList (etcd AutoSync) keep the
+  endpoints they were configured with. To advertise an address instead, set
+  config.advertiseClientUrls to URL(s) those clients can reach.
+{{- end }}
 
 {{- if .Values.config.enableGrpcGateway }}
 {{- $gwPort := include "t4.gatewayPort" . }}

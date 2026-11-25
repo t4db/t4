@@ -15,10 +15,11 @@ advertiseAddr: ""
 
 # ── T4 runtime configuration ─────────────────────────────────────────────
 config:
-  # Client URLs returned by the etcd MemberList RPC.
-  # Empty: automatically advertise the chart's client-facing Service.
-  # Override when clients use external DNS, an Ingress, or a load balancer.
-  # Multiple endpoints: comma-separated absolute http(s) URLs.
+  # Client URLs returned by the etcd MemberList RPC: comma-separated absolute
+  # http(s) URLs with explicit ports. Empty: MemberList returns Unimplemented
+  # and etcd clients keep the endpoints they were configured with.
+  # In-cluster clients: "http://<fullname>.<namespace>.svc.cluster.local:3379".
+  # External clients: the DNS name, Ingress or load balancer they reach T4 at.
   advertiseClientUrls: ""
   # Directory for Pebble DB and local WAL segments.
   dataDir: /var/lib/t4
