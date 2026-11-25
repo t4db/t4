@@ -172,7 +172,6 @@ Key API differences from the etcd v3 Go client:
 | `etcdctl snapshot restore`                                      | Not supported                                 | Use `t4 branch fork` for point-in-time copies |
 | `MemberAdd` / `MemberRemove` / `MemberUpdate` / `MemberPromote` | Not supported                                 | Not needed for standard clients               |
 | etcd v2 API                                                     | Not supported                                 | Migrate to v3 first                           |
-| gRPC gateway (HTTP/JSON)                                        | Not included                                  | Use a gRPC proxy (e.g. grpc-gateway) in front |
 
 ## Slow watcher cancellation
 

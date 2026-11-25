@@ -132,6 +132,41 @@ func TestKVRoundTrip(t *testing.T) {
 	}
 }
 
+// TestVersion covers the one route that is not generated from etcd's protocol.
+// A client reads it to pick an API prefix before it calls anything else, and
+// patroni refuses to start when it is missing, so both field names and the
+// major.minor.0 cluster version matter.
+func TestVersion(t *testing.T) {
+	base, _ := newGateway(t, gateway.Config{})
+
+	resp, err := http.Get(base + "/version")
+	if err != nil {
+		t.Fatalf("get /version: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+
+	body, err := readAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var got struct {
+		Server  string `json:"etcdserver"`
+		Cluster string `json:"etcdcluster"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode %s: %v", body, err)
+	}
+	if strings.Count(got.Server, ".") != 2 {
+		t.Errorf("etcdserver = %q, want a three-part version", got.Server)
+	}
+	if want := got.Server[:strings.LastIndex(got.Server, ".")] + ".0"; got.Cluster != want {
+		t.Errorf("etcdcluster = %q, want %q", got.Cluster, want)
+	}
+}
+
 // TestKeyspaceIsShared checks that the gateway writes where gRPC reads.
 func TestKeyspaceIsShared(t *testing.T) {
 	base, conn := newGateway(t, gateway.Config{})

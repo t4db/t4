@@ -23,11 +23,23 @@ Turn it off with `--enable-grpc-gateway=false`.
 
 Every etcd v3 route is served under `/v3/`: `kv/range`, `kv/put`, `kv/deleterange`, `kv/txn`, `kv/compaction`, the `lease/`, `auth/`, `cluster/` and `maintenance/` families, and `watch`. The `/v3beta/` prefix etcd used before 3.4 is accepted and rewritten.
 
+`/version` is served at the root, outside `/v3/`, as on etcd. It reports the emulated `etcdserver` version and an `etcdcluster` version of `major.minor.0`, and some clients read it to choose an API prefix before they call anything else — Patroni refuses to start without it.
+
 Keys, values and range ends are base64-encoded, and 64-bit numbers are JSON strings. Both are protobuf's JSON mapping rather than T4 choices, and both are what etcd does.
 
-## Watch and lease keepalive need a websocket
+## Streaming: watch and lease keepalive
 
-`Watch` and `LeaseKeepAlive` are bidirectional streams, and plain HTTP has no framing for those. Open them over a websocket on the same path:
+`Watch` and `LeaseKeepAlive` are bidirectional streams. Two shapes of HTTP client can hold one open.
+
+**A single POST**, when the client has only one request to send. POST the create request, leave the response body open, and read one JSON frame per line. The request body ends as soon as it has been sent; T4 reads that as "this client will send no more requests", not as the end of the stream, and keeps streaming until the response body is closed. This is how etcd's own non-browser JSON clients watch:
+
+```bash
+curl -N http://localhost:3379/v3/watch -d '{"create_request":{"key":"L2hlbGxv"}}'
+# {"result":{"header":{...},"watch_id":"1","created":true}}
+# {"result":{"header":{...},"watch_id":"1","events":[{"kv":{"key":"L2hlbGxv",...}}]}}
+```
+
+**A websocket**, when the client is a browser — which cannot stream a request body at all — or when it has to keep sending on the same stream, to create a second watch or cancel one:
 
 ```javascript
 const ws = new WebSocket("ws://localhost:3379/v3/watch")
@@ -39,7 +51,7 @@ ws.onmessage = (m) => console.log(JSON.parse(m.data).result)
 
 ### grpc-web will not work, on T4 or on etcd
 
-A browser cannot watch an etcd-compatible server over grpc-web, whatever proxy sits in front. grpc-web has no bidirectional streaming: the client half-closes the request after its first message, the server's receive loop ends, and the watch is torn down before any event can reach it. The request returns `200` with `grpc-status: 0` and no events — a watch that looks established and silently delivers nothing.
+A browser cannot watch an etcd-compatible server over grpc-web, whatever proxy sits in front: grpc-web carries no bidirectional streaming at all, and `Watch` is a bidirectional RPC. The call returns `200` with `grpc-status: 0` and no events — a watch that looks established and silently delivers nothing, which is the symptom that sends people looking for this page.
 
 Unary calls do work behind a grpc-web proxy such as Envoy's `grpc_web` filter. If that is all you need, that route is available and requires nothing from T4. For anything streaming, use the websocket above.
 
