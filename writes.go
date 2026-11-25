@@ -516,6 +516,7 @@ func (n *Node) Txn(ctx context.Context, req TxnRequest) (out TxnResponse, err er
 			Succeeded:   resp.Succeeded,
 			Revision:    resp.Revision,
 			DeletedKeys: deletedKeys,
+			Nested:      msgToTxnResults(resp.Nested),
 		}, decodeErr(resp.ErrCode, resp.ErrMsg)
 	}
 	for {
@@ -552,10 +553,10 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 		return TxnResponse{}, err
 	}
 	prepareStart := time.Now()
-	e, succeeded, deletedKeys, observed, stats, metaToken, err := n.prepareTxn(req, false)
+	e, eval, deletedKeys, observed, stats, metaToken, err := n.prepareTxn(req, false)
 	prepareDuration := time.Since(prepareStart)
 	kind := stats.kind()
-	compare := txnCompareLabel(succeeded)
+	compare := txnCompareLabel(eval.succeeded)
 	if errors.Is(err, ErrTxnGuard) && (observed.rev > n.db.Load().CurrentRevision() || observed.metaToken != 0) {
 		// The guard failed on a write still being committed, which may yet
 		// fail: answer once it commits, and evaluate again if it does not.
@@ -591,7 +592,7 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 			n.mu.Unlock()
 			observeTxnPreparation(lockWait, prepareDuration, kind)
 			metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
-			return TxnResponse{Succeeded: succeeded, Revision: curRev}, nil
+			return TxnResponse{Succeeded: eval.succeeded, Revision: curRev, Nested: eval.nested}, nil
 		}
 		// The result depends on a write still being committed, which may yet
 		// fail. No client has seen that write, so if the committed state alone
@@ -631,7 +632,7 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 			return TxnResponse{}, errReevaluateTxn
 		}
 		metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "noop").Inc()
-		return TxnResponse{Succeeded: succeeded, Revision: observed.rev}, nil
+		return TxnResponse{Succeeded: eval.succeeded, Revision: observed.rev, Nested: eval.nested}, nil
 	}
 	wr := newWriteReq(ctx, e)
 	wr.metaToken = metaToken
@@ -645,7 +646,7 @@ func (n *Node) txnLocal(ctx context.Context, req TxnRequest) (TxnResponse, error
 	}
 	metrics.TxnRequestsTotal.WithLabelValues(kind, compare, "committed").Inc()
 	stats.observeCommitted()
-	return TxnResponse{Succeeded: succeeded, Revision: rev, DeletedKeys: deletedKeys}, nil
+	return TxnResponse{Succeeded: eval.succeeded, Revision: rev, DeletedKeys: deletedKeys, Nested: eval.nested}, nil
 }
 
 type txnStats struct {
@@ -711,15 +712,42 @@ func txnCompareLabel(succeeded bool) string {
 // follower-to-leader forwarding. WireKey casts below preserve the original
 // string bytes without copying payloads; only the codec chooses a JSON shape.
 func txnToForwardRequest(req TxnRequest) *peer.ForwardRequest {
-	return &peer.ForwardRequest{
-		Op: peer.ForwardTxn,
-		TxnReq: &peer.TxnReqMsg{
-			Guards:     txnCondsToMsg(req.Guards),
-			Conditions: txnCondsToMsg(req.Conditions),
-			Success:    txnOpsToMsg(req.Success),
-			Failure:    txnOpsToMsg(req.Failure),
-		},
+	return &peer.ForwardRequest{Op: peer.ForwardTxn, TxnReq: txnToMsg(req)}
+}
+
+// A nested op's type travels as a number, so the wire's idea of it and the
+// core's must agree; this fails to compile if they drift apart.
+var _ = [1]struct{}{}[peer.TxnOpNested-uint8(TxnNested)]
+
+func txnToMsg(req TxnRequest) *peer.TxnReqMsg {
+	return &peer.TxnReqMsg{
+		Guards:     txnCondsToMsg(req.Guards),
+		Conditions: txnCondsToMsg(req.Conditions),
+		Success:    txnOpsToMsg(req.Success),
+		Failure:    txnOpsToMsg(req.Failure),
 	}
+}
+
+func txnResultsToMsg(results []TxnResult) []peer.TxnResultMsg {
+	if len(results) == 0 {
+		return nil
+	}
+	msgs := make([]peer.TxnResultMsg, len(results))
+	for i, r := range results {
+		msgs[i] = peer.TxnResultMsg{Succeeded: r.Succeeded, Nested: txnResultsToMsg(r.Nested)}
+	}
+	return msgs
+}
+
+func msgToTxnResults(msgs []peer.TxnResultMsg) []TxnResult {
+	if len(msgs) == 0 {
+		return nil
+	}
+	results := make([]TxnResult, len(msgs))
+	for i, m := range msgs {
+		results[i] = TxnResult{Succeeded: m.Succeeded, Nested: msgToTxnResults(m.Nested)}
+	}
+	return results
 }
 
 func txnCondsToMsg(conds []TxnCondition) []peer.TxnCondMsg {
@@ -749,10 +777,14 @@ func txnOpsToMsg(ops []TxnOp) []peer.TxnOpMsg {
 	msgs := make([]peer.TxnOpMsg, len(ops))
 	for i, op := range ops {
 		msgs[i] = peer.TxnOpMsg{
-			Type:  uint8(op.Type),
-			Key:   peer.WireKey(op.Key),
-			Value: op.Value,
-			Lease: op.Lease,
+			Type:     uint8(op.Type),
+			Key:      peer.WireKey(op.Key),
+			Value:    op.Value,
+			Lease:    op.Lease,
+			RangeEnd: peer.WireKey(op.RangeEnd),
+		}
+		if op.Txn != nil {
+			msgs[i].Txn = txnToMsg(*op.Txn)
 		}
 	}
 	return msgs
@@ -795,10 +827,15 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 	ops := make([]TxnOp, len(msgs))
 	for i, m := range msgs {
 		ops[i] = TxnOp{
-			Type:  TxnOpType(m.Type),
-			Key:   string(m.Key),
-			Value: m.Value,
-			Lease: m.Lease,
+			Type:     TxnOpType(m.Type),
+			Key:      string(m.Key),
+			Value:    m.Value,
+			Lease:    m.Lease,
+			RangeEnd: string(m.RangeEnd),
+		}
+		if m.Txn != nil {
+			sub := forwardMsgToTxnRequest(m.Txn)
+			ops[i].Txn = &sub
 		}
 	}
 	return ops
@@ -815,7 +852,7 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 //
 // internal is set only by initMetaAtGenesis: it allows meta ops before the
 // meta keyspace is enabled and writes to the reserved format key.
-func (n *Node) prepareTxn(req TxnRequest, internal bool) (wal.Entry, bool, map[string]struct{}, txnObserved, txnStats, uint64, error) {
+func (n *Node) prepareTxn(req TxnRequest, internal bool) (wal.Entry, txnEval, map[string]struct{}, txnObserved, txnStats, uint64, error) {
 	e, succeeded, deletedKeys, observed, stats, err := n.prepareTxnEntry(req, internal)
 	if err != nil || e.Op == 0 || stats.metaOps == 0 {
 		// Most transactions hold only data ops: nothing to track.
@@ -833,7 +870,14 @@ type txnObserved struct {
 	metaToken uint64
 }
 
-func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, map[string]struct{}, txnObserved, txnStats, error) {
+// txnEval is what evaluating a transaction's conditions concluded: which
+// branch was taken, and the same for every TxnNested op within it.
+type txnEval struct {
+	succeeded bool
+	nested    []TxnResult
+}
+
+func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, txnEval, map[string]struct{}, txnObserved, txnStats, error) {
 	var observed txnObserved
 	readKey := func(key string) (*istore.KeyValue, error) {
 		if p, ok := n.pending[key]; ok && p.rev > observed.rev {
@@ -878,26 +922,78 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, 
 		return true, nil
 	}
 
+	// flattenNested replaces each TxnNested op with the ops of whichever of
+	// its branches its own conditions select. Those conditions go through
+	// holds, so they read the state the enclosing transaction's conditions
+	// read — one atomic step decides the whole tree, which is what makes a
+	// nested compare-and-set as safe as a top-level one.
+	var flattenNested func(ops []TxnOp, depth int) ([]TxnOp, []TxnResult, error)
+	flattenNested = func(ops []TxnOp, depth int) ([]TxnOp, []TxnResult, error) {
+		if !slices.ContainsFunc(ops, func(op TxnOp) bool { return op.Type == TxnNested }) {
+			return ops, nil, nil
+		}
+		if depth >= MaxTxnDepth {
+			return nil, nil, ErrTxnTooDeep
+		}
+		out := make([]TxnOp, 0, len(ops))
+		var results []TxnResult
+		for _, op := range ops {
+			if op.Type != TxnNested {
+				out = append(out, op)
+				continue
+			}
+			if op.Txn == nil {
+				return nil, nil, fmt.Errorf("txn: nested op carries no transaction")
+			}
+			if len(op.Txn.Guards) > 0 {
+				// A guard aborts the whole transaction, so one on a branch
+				// that may not be taken would change what the enclosing
+				// transaction means. Callers hoist guards to the top level.
+				return nil, nil, fmt.Errorf("txn: nested txn cannot carry guards")
+			}
+			held, err := holds(op.Txn.Conditions)
+			if err != nil {
+				return nil, nil, err
+			}
+			branch := op.Txn.Success
+			if !held {
+				branch = op.Txn.Failure
+			}
+			subOps, subResults, err := flattenNested(branch, depth+1)
+			if err != nil {
+				return nil, nil, err
+			}
+			out = append(out, subOps...)
+			results = append(results, TxnResult{Succeeded: held, Nested: subResults})
+		}
+		return out, results, nil
+	}
+
 	guarded, err := holds(req.Guards)
 	if err != nil {
-		return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
 	}
 	if !guarded {
 		// The observed writes go back with the error: the answer depends on
 		// them committing.
-		return wal.Entry{}, false, nil, observed, txnStats{}, ErrTxnGuard
+		return wal.Entry{}, txnEval{}, nil, observed, txnStats{}, ErrTxnGuard
 	}
 	succeeded, err := holds(req.Conditions)
 	if err != nil {
-		return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
 	}
 
 	ops := req.Success
 	if !succeeded {
 		ops = req.Failure
 	}
+	eval := txnEval{succeeded: succeeded}
+	ops, eval.nested, err = flattenNested(ops, 0)
+	if err != nil {
+		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
+	}
 	if len(ops) == 0 {
-		return wal.Entry{}, succeeded, nil, observed, txnStats{}, nil
+		return wal.Entry{}, eval, nil, observed, txnStats{}, nil
 	}
 
 	// Pre-resolve all ops (read current state) before incrementing nextRev,
@@ -913,9 +1009,13 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, 
 		skip           bool // delete of a non-existent key
 	}
 	resolved := make([]resolvedOp, 0, len(ops))
+	ops, err = n.expandRangeDeletesLocked(ops, readKey)
+	if err != nil {
+		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
+	}
 	ops, err = n.expandLeaseDeletesLocked(ops, readKey)
 	if err != nil {
-		return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
 	}
 	for _, op := range ops {
 		switch op.Type {
@@ -923,10 +1023,10 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, 
 		case TxnMetaPut, TxnMetaDelete:
 			if !internal {
 				if err := validateMetaKey(op.Key); err != nil {
-					return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+					return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
 				}
 				if err := n.requireMetaLocked(); err != nil {
-					return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+					return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
 				}
 			}
 			walOp := wal.OpMetaPut
@@ -940,14 +1040,14 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, 
 		default:
 			// Never ignore an op type this binary does not know: silently
 			// dropping part of a transaction breaks its atomicity.
-			return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: unknown op type %d", op.Type)
+			return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: unknown op type %d", op.Type)
 		}
 		existing, ok := readCache[op.Key]
 		if !ok {
 			var err error
 			existing, err = readKey(op.Key)
 			if err != nil {
-				return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, err
+				return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
 			}
 			readCache[op.Key] = existing
 		}
@@ -989,11 +1089,11 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, 
 		}
 	}
 	if len(active) == 0 {
-		return wal.Entry{}, succeeded, nil, observed, txnStats{}, nil
+		return wal.Entry{}, eval, nil, observed, txnStats{}, nil
 	}
 
-	if len(active) > 65535 {
-		return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
+	if len(active) > maxTxnBranchOps {
+		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is %d", len(active), maxTxnBranchOps)
 	}
 
 	// Data and meta keys live in separate keyspaces, so the same name may
@@ -1007,7 +1107,7 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, 
 	for _, r := range active {
 		k := branchKey{meta: r.walOp.IsMeta(), key: r.key}
 		if _, dup := seen[k]; dup {
-			return wal.Entry{}, false, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: duplicate key %q in branch", r.key)
+			return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: duplicate key %q in branch", r.key)
 		}
 		seen[k] = struct{}{}
 		if !k.meta {
@@ -1067,7 +1167,7 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, bool, 
 		Term:     n.term,
 		Op:       wal.OpTxn,
 		Value:    wal.EncodeTxnOps(subOps),
-	}, succeeded, deletedKeys, observed, stats, nil
+	}, eval, deletedKeys, observed, stats, nil
 }
 
 // expandLeaseDeletesLocked replaces each TxnDeleteLease op with deletes of
@@ -1103,6 +1203,78 @@ func (n *Node) expandLeaseDeletesLocked(ops []TxnOp, readKey func(string) (*isto
 				return nil, err
 			}
 			if kv != nil && kv.Lease == op.Lease {
+				out = append(out, TxnOp{Type: TxnDelete, Key: key})
+			}
+		}
+	}
+	return out, nil
+}
+
+// maxTxnBranchOps is the most write ops one transaction branch may apply. It
+// also bounds how far a range delete scans: the scan stops one past the cap,
+// so a range over a large keyspace is refused without reading all of it.
+const maxTxnBranchOps = 65535
+
+// expandRangeDeletesLocked replaces each TxnDelete carrying a RangeEnd with
+// deletes of the keys in that range: those the store holds and those pending
+// writes add, kept only while readKey still shows them present. Must be
+// called under n.mu, which is what makes the set of keys atomic with the
+// transaction that deletes them. Must also be called before
+// expandLeaseDeletesLocked, whose output carries no RangeEnd.
+func (n *Node) expandRangeDeletesLocked(ops []TxnOp, readKey func(string) (*istore.KeyValue, error)) ([]TxnOp, error) {
+	isRange := func(op TxnOp) bool { return op.Type == TxnDelete && op.RangeEnd != "" }
+	if !slices.ContainsFunc(ops, isRange) {
+		return ops, nil
+	}
+	out := make([]TxnOp, 0, len(ops))
+	for _, op := range ops {
+		if !isRange(op) {
+			out = append(out, op)
+			continue
+		}
+		// "\x00" is etcd's "no upper bound"; any other end is exclusive, so
+		// an end at or below the start matches nothing.
+		unbounded := op.RangeEnd == "\x00"
+		if !unbounded && op.RangeEnd <= op.Key {
+			continue
+		}
+		inRange := func(key string) bool {
+			return key >= op.Key && (unbounded || key < op.RangeEnd)
+		}
+
+		// One past the cap: enough to tell "at the limit" from "over it"
+		// without scanning a keyspace this transaction cannot delete anyway.
+		kvs, err := n.db.Load().ListRange("", istore.ReadOptions{
+			FromKey:  op.Key,
+			Limit:    int64(maxTxnBranchOps) + 1,
+			KeysOnly: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		keys := make([]string, 0, len(kvs))
+		for _, kv := range kvs {
+			if inRange(kv.Key) {
+				keys = append(keys, kv.Key)
+			}
+		}
+		for key, p := range n.pending {
+			if !p.deleted && inRange(key) {
+				keys = append(keys, key)
+			}
+		}
+		slices.Sort(keys)
+		keys = slices.Compact(keys)
+		if len(keys) > maxTxnBranchOps {
+			return nil, fmt.Errorf("txn: range delete [%q, %q) matches more than %d keys",
+				op.Key, op.RangeEnd, maxTxnBranchOps)
+		}
+		for _, key := range keys {
+			kv, err := readKey(key)
+			if err != nil {
+				return nil, err
+			}
+			if kv != nil {
 				out = append(out, TxnOp{Type: TxnDelete, Key: key})
 			}
 		}
@@ -1245,8 +1417,12 @@ func (n *Node) evalCommittedNoop(req TxnRequest, rev int64) (noop, succeeded boo
 		ops = req.Failure
 	}
 	for _, op := range ops {
-		// Only a data delete of a missing key writes nothing; every other op,
-		// meta ops included, is a write.
+		// Only a data delete of a missing key writes nothing; every other op
+		// is treated as a write — meta ops because they are one, TxnNested
+		// because deciding whether its branch writes would mean evaluating
+		// its conditions here too. Answering "not a no-op" costs the txn the
+		// fast path and nothing else, so this stays conservative rather than
+		// growing a second evaluator that has to agree with prepareTxnEntry.
 		if op.Type != TxnDelete {
 			return false, succeeded, nil
 		}

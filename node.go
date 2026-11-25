@@ -48,6 +48,10 @@ var (
 	// ErrTxnGuard is returned by Node.Txn when one of the request's Guards
 	// does not hold. Nothing was written.
 	ErrTxnGuard = errors.New("t4: txn guard does not hold")
+
+	// ErrTxnTooDeep is returned by Node.Txn when TxnNested ops nest deeper
+	// than MaxTxnDepth. Nothing was written.
+	ErrTxnTooDeep = errors.New("t4: too many operations in txn request")
 )
 
 // TxnCondTarget identifies which field of a key's metadata is compared.
@@ -102,6 +106,15 @@ const (
 	// under the write lock, so a key attached by a concurrent write is
 	// deleted with the others, and one a concurrent write detached is not.
 	TxnDeleteLease
+	// TxnNested evaluates the transaction in Txn and applies the ops of
+	// whichever of its branches its own Conditions select, as etcd's
+	// RequestOp_RequestTxn does. Key, Value and Lease are unused.
+	//
+	// The nested conditions are evaluated in the same atomic step as the
+	// enclosing transaction's, against the same state, so a nested
+	// compare-and-set is as atomic as a top-level one. Nesting is bounded by
+	// MaxTxnDepth.
+	TxnNested
 )
 
 // TxnOp is one write operation in a transaction's Then or Else branch.
@@ -110,7 +123,34 @@ type TxnOp struct {
 	Key   string
 	Value []byte
 	Lease int64
+	// RangeEnd, with Type TxnDelete, deletes every key in [Key, RangeEnd)
+	// instead of the single key Key. A RangeEnd of "\x00" means no upper
+	// bound, as in etcd. Empty is a single-key delete.
+	//
+	// The keys are found under the write lock, like TxnDeleteLease's, so a
+	// key a concurrent write adds to the range is deleted with the others
+	// and one it removes is not. A range matching more than 65535 keys is
+	// refused rather than held under that lock: use Node.Delete range by
+	// range, or DeleteRange on the etcd API, which commits in batches.
+	RangeEnd string
+	// Txn is the nested transaction evaluated when Type is TxnNested, and is
+	// nil for every other type.
+	Txn *TxnRequest
 }
+
+// MaxTxnDepth is the deepest a TxnNested chain may go before Node.Txn
+// refuses the transaction with ErrTxnTooDeep. A top-level transaction is
+// depth 0.
+//
+// etcd has no depth setting of its own: its request check passes the
+// remaining op budget down into each nested transaction, and since a nested
+// transaction is itself an op, the budget falls by at least one per level —
+// so depth there is bounded by --max-txn-ops, 128 by default. This matches
+// that bound, which means any nesting etcd accepts out of the box T4 accepts
+// too. It is deliberately not configurable: clients cannot negotiate it, so
+// a setting would make compatibility depend on a flag, and the limit exists
+// to bound recursion rather than to be tuned.
+const MaxTxnDepth = 128
 
 // TxnRequest is the input to Node.Txn.
 // If all Conditions are met the Success ops are applied atomically; otherwise
@@ -130,6 +170,17 @@ type TxnResponse struct {
 	Succeeded   bool                // true if all Conditions were satisfied
 	Revision    int64               // revision assigned to the write, or current revision if no-op
 	DeletedKeys map[string]struct{} // set of keys actually removed by the txn's write ops
+	// Nested holds one result per TxnNested op in the branch that was taken,
+	// in the order those ops appear. It is nil when the branch nests nothing.
+	Nested []TxnResult
+}
+
+// TxnResult is the outcome of one nested transaction.
+type TxnResult struct {
+	Succeeded bool // true if the nested transaction's own Conditions were satisfied
+	// Nested holds the results of the nested transactions within the branch
+	// this one took.
+	Nested []TxnResult
 }
 
 // nodeRole identifies whether the node is leader, follower, or single-node.

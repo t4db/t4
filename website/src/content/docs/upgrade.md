@@ -21,6 +21,7 @@ These are the failure modes the binary refuses rather than silently corrupting s
 | WAL frame magic / version newer than this binary understands | Startup refuses to replay. Same remedy. |
 | Follower on an earlier release connecting to the leader of a database created with the meta keyspace | The leader refuses the stream with `wal_format_unsupported`. Upgrade the follower. |
 | Follower forwarding a write on an earlier peer forward wire version | The leader refuses it with `forward_wire_version_unsupported` rather than committing a key whose bytes the sender may already have replaced. Keyless forwards (read index, compaction, lease renewal) are unaffected. Upgrade the follower. |
+| Follower forwarding a transaction with nested ops or a branch range delete to a leader from before they existed | The leader refuses it with `forward_wire_version_unsupported` rather than applying the transaction with a branch missing, or deleting one key where a range was asked for. Only those transactions are refused; the follower's other writes still go through. Upgrade the leader. |
 | WAL entry with an op code this binary does not know (local replay, S3 replay, or the leader's peer stream) | Replay or apply is refused. A follower stops replicating and logs an error instead of retrying or attempting a leader takeover; it does not apply the entry. Same remedy. |
 | Object store does not enforce the conditional PUTs leader election needs, and `--peer-listen` is set | Startup refuses with `ErrConditionalWritesIgnored`. Use a store that enforces them — on GCS that means `--gcs-bucket` rather than the S3-compatible endpoint — or run a single node. A single node starts with a warning. |
 | `--gateway-addr` names an address T4 cannot listen on | Startup refuses with the listen error. An address T4 derived on its own — the port below `--listen` when client TLS is on — is deliberately not fail-closed: T4 warns, falls back to sharing `--listen`, and keeps serving. |
@@ -90,6 +91,40 @@ cross-origin call fails its preflight until an operator opts in. See [JSON/HTTP 
 endpoints, the websocket watch, and why grpc-web cannot work.
 
 To keep exactly the pre-upgrade surface — one port, gRPC only — start with `--enable-grpc-gateway=false`.
+
+## Transaction branches: nesting and range deletes
+
+`Txn` branches gained two things this release, and both are resolved on the
+leader in the same atomic step as the transaction's own conditions:
+
+- **A nested `RequestTxn`**, which etcd clients use for a compare-and-set
+  whose fallback is itself a compare-and-set — Patroni's leader refresh is the
+  common case. Nesting is capped at 128 levels, the depth etcd's default
+  `--max-txn-ops` permits.
+- **A range delete**, which removes `[key, range_end)` in the transaction's
+  single revision. The keys are found under the write lock, so a key a
+  concurrent write adds to the range is removed with the others. Two limits
+  follow from that lock: a range matching more than 65535 keys is refused
+  rather than resolved while writes wait, and a range must start above the
+  reserved `\x00` prefix, since the core resolves it without knowing which
+  keys are T4's own. Neither applies to a standalone `DeleteRange`, which
+  filters reserved keys itself and commits large ranges in batches.
+
+Only the leader can decide branches, so a follower forwards the whole
+transaction. A forwarded transaction carrying either feature is stamped **peer
+forward wire version 3**, and a leader from an earlier release refuses it with
+`FailedPrecondition` and `forward_wire_version_unsupported`. **Upgrade all
+followers first, then the leader**, as for wire version 2.
+
+Refusing matters most for the range delete: its op type is an ordinary
+single-key delete, so a leader that predates the feature would decode the op,
+ignore the range end, and delete one key where the branch asked for a range.
+
+Everything else keeps stamping version 2, so the rest of a follower's writes
+go through to a leader that is one release behind: a request carries the
+lowest wire version that can represent it, not the newest the sender knows.
+Only transactions that nest or delete a range are blocked while a rolling
+upgrade is in progress, and they are blocked loudly.
 
 ## `MemberList` answers only when client URLs are configured
 

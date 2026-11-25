@@ -106,8 +106,9 @@ func TestWireKeyVersionGateGRPC(t *testing.T) {
 	defer cancel()
 	// A legacy sender's key may already have lost bytes, so anything carrying
 	// key material is refused — whether the key is at the top level or only
-	// inside a transaction.
-	for _, version := range []int{0, 1, 3, 255} {
+	// inside a transaction. Version 3 is understood (nested txn ops), so the
+	// unknown ones either side of the supported range stand in for it.
+	for _, version := range []int{0, 1, 4, 255} {
 		for _, req := range []map[string]any{
 			{"op": peer.ForwardPut, "key": "\xfd"},
 			{"op": peer.ForwardTxn, "txn": map[string]any{"success": []map[string]any{{"key": "\xfd"}}}},
@@ -121,6 +122,23 @@ func TestWireKeyVersionGateGRPC(t *testing.T) {
 			}
 		}
 	}
+	// A stamp this binary understands is still refused when the request needs
+	// a newer one: a nested txn applied by a leader that ignored the nesting
+	// would commit a transaction with a branch missing.
+	nested := map[string]any{
+		"wire_version": 2,
+		"op":           peer.ForwardTxn,
+		"txn": map[string]any{"failure": []map[string]any{
+			{"type": peer.TxnOpNested, "txn": map[string]any{
+				"success": []map[string]any{{"key": "/k"}},
+			}},
+		}},
+	}
+	err = conn.Invoke(ctx, "/peer.WalStream/Forward", nested, &peer.ForwardResponse{})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "forward_wire_version_unsupported") {
+		t.Fatalf("nested txn stamped v2: %v", err)
+	}
+
 	malformed := map[string]any{"wire_version": 2, "key": map[string]any{"base64": "%"}}
 	if err := conn.Invoke(ctx, "/peer.WalStream/Forward", malformed, &peer.ForwardResponse{}); err == nil {
 		t.Fatal("malformed key accepted")

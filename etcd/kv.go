@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 
@@ -387,11 +388,11 @@ func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserv
 	}
 
 	// Convert both branches to t4 ops (write ops only).
-	successOps, err := convertWriteOps(r.Success)
+	successOps, err := convertWriteOps(r.Success, 0)
 	if err != nil {
 		return nil, kvError(err)
 	}
-	failureOps, err := convertWriteOps(r.Failure)
+	failureOps, err := convertWriteOps(r.Failure, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -408,12 +409,7 @@ func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserv
 
 	// The checks above are not atomic with the write: guard on the leases
 	// still existing when it commits.
-	var leases []int64
-	for _, op := range slices.Concat(successOps, failureOps) {
-		if op.Type == t4.TxnPut {
-			leases = append(leases, op.Lease)
-		}
-	}
+	leases := txnOpLeases(slices.Concat(successOps, failureOps))
 	guards, err := s.leaseGuards(ctx, leases...)
 	if err != nil {
 		return nil, err
@@ -518,10 +514,19 @@ func convertCompare(cmp *etcdserverpb.Compare) (t4.TxnCondition, error) {
 	return c, nil
 }
 
-// convertWriteOps extracts the write ops (Put / DeleteRange) from a list of
-// RequestOps and converts them to t4.TxnOps.  Range ops are skipped here and
-// handled later by buildTxnResponses.  Nested Txn ops are rejected.
-func convertWriteOps(ops []*etcdserverpb.RequestOp) ([]t4.TxnOp, error) {
+// convertWriteOps extracts the write ops (Put / DeleteRange / nested Txn)
+// from a list of RequestOps and converts them to t4.TxnOps.  Range ops are
+// skipped here and handled later by buildTxnResponses.
+//
+// depth counts enclosing transactions. The core refuses a transaction nested
+// deeper than t4.MaxTxnDepth, but the check belongs here too: this function
+// recurses over client input, and a request is bounded only by the message
+// size, so thousands of near-empty nested ops would otherwise exhaust the
+// stack before the core saw them.
+func convertWriteOps(ops []*etcdserverpb.RequestOp, depth int) ([]t4.TxnOp, error) {
+	if depth > t4.MaxTxnDepth {
+		return nil, rpctypes.ErrGRPCTooManyOps
+	}
 	var result []t4.TxnOp
 	for _, op := range ops {
 		switch v := op.GetRequest().(type) {
@@ -540,18 +545,68 @@ func convertWriteOps(ops []*etcdserverpb.RequestOp) ([]t4.TxnOp, error) {
 			if err := validateUserKey(key); err != nil {
 				return nil, err
 			}
-			// Only single-key deletes are supported in atomic txn branches.
-			if len(v.RequestDeleteRange.RangeEnd) > 0 {
-				return nil, status.Error(codes.Unimplemented, "range deletes are not supported in transaction branches")
+			rangeEnd := string(v.RequestDeleteRange.RangeEnd)
+			if err := validateBranchDeleteRange(key, rangeEnd); err != nil {
+				return nil, err
 			}
-			result = append(result, t4.TxnOp{Type: t4.TxnDelete, Key: key})
+			result = append(result, t4.TxnOp{Type: t4.TxnDelete, Key: key, RangeEnd: rangeEnd})
 		case *etcdserverpb.RequestOp_RequestRange:
 			// Range ops are read-only; handled separately in buildTxnResponses.
 		case *etcdserverpb.RequestOp_RequestTxn:
-			return nil, status.Error(codes.Unimplemented, "nested transactions are not supported")
+			sub, err := convertTxn(v.RequestTxn, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, t4.TxnOp{Type: t4.TxnNested, Txn: sub})
 		}
 	}
 	return result, nil
+}
+
+// validateBranchDeleteRange refuses a range delete inside a transaction
+// branch whose range could reach T4's own keys.
+//
+// A standalone DeleteRange filters those out as it lists, but a branch's
+// range is resolved in the core, under the write lock, where the reserved
+// prefixes are not a concept — so the range is checked here instead. Both
+// reserved prefixes ("\x00t4/" and "\x00auth/") live in the NUL-prefixed
+// region, and a range starting at or below it would sweep them in. Refusing
+// is the loud answer; etcd has no such keys and would delete everything, so
+// a client that really wants the whole keyspace gone should call DeleteRange
+// on its own, which filters and commits in batches.
+func validateBranchDeleteRange(key, rangeEnd string) error {
+	if rangeEnd == "" {
+		return nil // single-key delete
+	}
+	if key == "" || key[0] == 0 {
+		return status.Error(codes.InvalidArgument,
+			"a range delete in a transaction branch must start above the reserved \x00 prefix")
+	}
+	return nil
+}
+
+// convertTxn converts a nested TxnRequest. Its conditions are evaluated in
+// the same atomic step as the enclosing transaction's; its leases are
+// validated and guarded at the top level, so the returned request carries no
+// Guards of its own.
+func convertTxn(r *etcdserverpb.TxnRequest, depth int) (*t4.TxnRequest, error) {
+	conds := make([]t4.TxnCondition, 0, len(r.Compare))
+	for _, cmp := range r.Compare {
+		cond, err := convertCompare(cmp)
+		if err != nil {
+			return nil, err
+		}
+		conds = append(conds, cond)
+	}
+	success, err := convertWriteOps(r.Success, depth)
+	if err != nil {
+		return nil, err
+	}
+	failure, err := convertWriteOps(r.Failure, depth)
+	if err != nil {
+		return nil, err
+	}
+	return &t4.TxnRequest{Conditions: conds, Success: success, Failure: failure}, nil
 }
 
 // buildTxnResponses builds the ResponseOp list for the selected transaction
@@ -569,54 +624,132 @@ func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.Requ
 	// writes of the ops executed so far; a txn that wrote nothing reports
 	// the snapshot's revision itself.
 	snapRev := commitRev
-	if len(deletedKeys) > 0 || branchHasPut(ops) {
+	if len(deletedKeys) > 0 || branchHasPut(ops, txnResp.Nested) {
 		snapRev = commitRev - 1
 	}
-	// written collects the keys written by the ops before the current one.
-	// A branch writes each key at most once (t4 rejects duplicates), so a
-	// written key's state as of the current op is its state at commitRev.
+	// written collects the keys written by the ops before the current one,
+	// nested transactions included. A branch writes each key at most once
+	// (t4 rejects duplicates), so a written key's state as of the current op
+	// is its state at commitRev.
 	var written []string
-	responses := make([]*etcdserverpb.ResponseOp, 0, len(ops))
 	hdr := s.headerAt(commitRev)
+	// nested is consumed in order: t4 reports one result per nested op in the
+	// branch it took, which is the order these ops are walked in.
+	nested := txnResp.Nested
+
+	var build func(ops []*etcdserverpb.RequestOp) ([]*etcdserverpb.ResponseOp, error)
+	build = func(ops []*etcdserverpb.RequestOp) ([]*etcdserverpb.ResponseOp, error) {
+		responses := make([]*etcdserverpb.ResponseOp, 0, len(ops))
+		for _, op := range ops {
+			switch v := op.GetRequest().(type) {
+			case *etcdserverpb.RequestOp_RequestPut:
+				written = append(written, string(v.RequestPut.Key))
+				responses = append(responses, &etcdserverpb.ResponseOp{
+					Response: &etcdserverpb.ResponseOp_ResponsePut{
+						ResponsePut: &etcdserverpb.PutResponse{Header: hdr},
+					},
+				})
+			case *etcdserverpb.RequestOp_RequestDeleteRange:
+				removed := deletedInRange(deletedKeys,
+					string(v.RequestDeleteRange.Key), string(v.RequestDeleteRange.RangeEnd))
+				// Every key this op removed, so a read later in the branch
+				// sees it gone rather than reading it from the snapshot the
+				// conditions were evaluated on.
+				written = append(written, removed...)
+				deleted := int64(len(removed))
+				responses = append(responses, &etcdserverpb.ResponseOp{
+					Response: &etcdserverpb.ResponseOp_ResponseDeleteRange{
+						ResponseDeleteRange: &etcdserverpb.DeleteRangeResponse{Header: hdr, Deleted: deleted},
+					},
+				})
+			case *etcdserverpb.RequestOp_RequestRange:
+				resp, err := s.txnRange(ctx, v.RequestRange, snapRev, commitRev, written)
+				if err != nil {
+					return nil, err
+				}
+				responses = append(responses, &etcdserverpb.ResponseOp{
+					Response: &etcdserverpb.ResponseOp_ResponseRange{ResponseRange: resp},
+				})
+			case *etcdserverpb.RequestOp_RequestTxn:
+				if len(nested) == 0 {
+					// The core reports a result for every nested op in the
+					// branch it took, so running out means the two walks
+					// disagree; answering with a guess would misreport
+					// whether a compare-and-set won.
+					return nil, fmt.Errorf("etcd: txn response is missing a nested result")
+				}
+				res := nested[0]
+				nested = nested[1:]
+				branch := v.RequestTxn.Failure
+				if res.Succeeded {
+					branch = v.RequestTxn.Success
+				}
+				outer := nested
+				nested = res.Nested
+				subResponses, err := build(branch)
+				if err != nil {
+					return nil, err
+				}
+				nested = outer
+				responses = append(responses, &etcdserverpb.ResponseOp{
+					Response: &etcdserverpb.ResponseOp_ResponseTxn{
+						ResponseTxn: &etcdserverpb.TxnResponse{
+							Header:    hdr,
+							Succeeded: res.Succeeded,
+							Responses: subResponses,
+						},
+					},
+				})
+			}
+		}
+		return responses, nil
+	}
+	return build(ops)
+}
+
+// deletedInRange names the keys the transaction removed within one delete
+// op's range, in order. For a range delete the count is what the response's
+// Deleted field reports, which a single-key lookup could not give.
+func deletedInRange(deletedKeys map[string]struct{}, key, rangeEnd string) []string {
+	if rangeEnd == "" {
+		if _, ok := deletedKeys[key]; ok {
+			return []string{key}
+		}
+		return nil
+	}
+	var names []string
+	for k := range deletedKeys {
+		if k >= key && (rangeEnd == "\x00" || k < rangeEnd) {
+			names = append(names, k)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// branchHasPut reports whether the branch the transaction actually took holds
+// a put, descending only into the nested branches that ran. results mirrors
+// the nested ops in order, as t4.TxnResponse.Nested does.
+func branchHasPut(ops []*etcdserverpb.RequestOp, results []t4.TxnResult) bool {
 	for _, op := range ops {
 		switch v := op.GetRequest().(type) {
 		case *etcdserverpb.RequestOp_RequestPut:
-			written = append(written, string(v.RequestPut.Key))
-			responses = append(responses, &etcdserverpb.ResponseOp{
-				Response: &etcdserverpb.ResponseOp_ResponsePut{
-					ResponsePut: &etcdserverpb.PutResponse{Header: hdr},
-				},
-			})
-		case *etcdserverpb.RequestOp_RequestDeleteRange:
-			written = append(written, string(v.RequestDeleteRange.Key))
-			var deleted int64
-			if _, ok := deletedKeys[string(v.RequestDeleteRange.Key)]; ok {
-				deleted = 1
-			}
-			responses = append(responses, &etcdserverpb.ResponseOp{
-				Response: &etcdserverpb.ResponseOp_ResponseDeleteRange{
-					ResponseDeleteRange: &etcdserverpb.DeleteRangeResponse{Header: hdr, Deleted: deleted},
-				},
-			})
-		case *etcdserverpb.RequestOp_RequestRange:
-			resp, err := s.txnRange(ctx, v.RequestRange, snapRev, commitRev, written)
-			if err != nil {
-				return nil, err
-			}
-			responses = append(responses, &etcdserverpb.ResponseOp{
-				Response: &etcdserverpb.ResponseOp_ResponseRange{ResponseRange: resp},
-			})
-		case *etcdserverpb.RequestOp_RequestTxn:
-			return nil, status.Error(codes.Unimplemented, "nested transactions are not supported")
-		}
-	}
-	return responses, nil
-}
-
-func branchHasPut(ops []*etcdserverpb.RequestOp) bool {
-	for _, op := range ops {
-		if op.GetRequestPut() != nil {
 			return true
+		case *etcdserverpb.RequestOp_RequestTxn:
+			if len(results) == 0 {
+				// Cannot tell which branch ran; assume it wrote, which keeps
+				// a read in this transaction on the pre-write snapshot.
+				return true
+			}
+			res := results[0]
+			results = results[1:]
+			branch := v.RequestTxn.Failure
+			if res.Succeeded {
+				branch = v.RequestTxn.Success
+			}
+			if branchHasPut(branch, res.Nested) {
+				return true
+			}
 		}
 	}
 	return false
@@ -757,6 +890,8 @@ func kvError(err error) error {
 		return rpctypes.ErrGRPCCompacted
 	case errors.Is(err, t4.ErrFutureRevision):
 		return rpctypes.ErrGRPCFutureRev
+	case errors.Is(err, t4.ErrTxnTooDeep):
+		return rpctypes.ErrGRPCTooManyOps
 	default:
 		return err
 	}
@@ -930,18 +1065,47 @@ func matchRange(kv *t4.KeyValue, key, rangeEnd string) bool {
 // validateTxnOpLeases checks that every Put op in ops that carries a non-zero
 // Lease ID refers to an existing lease.  This mirrors the check in standalone
 // Put and prevents phantom lease IDs from being written inside a transaction.
+// validateTxnOpLeases checks every lease a Put in these ops references, in
+// nested transactions too: a phantom lease must be refused whether or not the
+// branch holding it is the one that runs.
 func (s *Server) validateTxnOpLeases(ctx context.Context, ops []*etcdserverpb.RequestOp) error {
 	for _, op := range ops {
-		if p, ok := op.GetRequest().(*etcdserverpb.RequestOp_RequestPut); ok {
-			if p.RequestPut.Lease != 0 {
-				if _, err := s.getLease(ctx, p.RequestPut.Lease, true); err != nil {
+		switch v := op.GetRequest().(type) {
+		case *etcdserverpb.RequestOp_RequestPut:
+			if v.RequestPut.Lease != 0 {
+				if _, err := s.getLease(ctx, v.RequestPut.Lease, true); err != nil {
 					return err
 				}
-				if err := s.checkLeaseKeys(ctx, p.RequestPut.Lease, auth.WRITE); err != nil {
+				if err := s.checkLeaseKeys(ctx, v.RequestPut.Lease, auth.WRITE); err != nil {
 					return err
 				}
+			}
+		case *etcdserverpb.RequestOp_RequestTxn:
+			if err := s.validateTxnOpLeases(ctx, v.RequestTxn.Success); err != nil {
+				return err
+			}
+			if err := s.validateTxnOpLeases(ctx, v.RequestTxn.Failure); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
+}
+
+// txnOpLeases collects the leases every Put in ops references, nested
+// transactions included, so the guards cover each one.
+func txnOpLeases(ops []t4.TxnOp) []int64 {
+	var leases []int64
+	for _, op := range ops {
+		switch op.Type {
+		case t4.TxnPut:
+			leases = append(leases, op.Lease)
+		case t4.TxnNested:
+			if op.Txn != nil {
+				leases = append(leases, txnOpLeases(op.Txn.Success)...)
+				leases = append(leases, txnOpLeases(op.Txn.Failure)...)
+			}
+		}
+	}
+	return leases
 }
