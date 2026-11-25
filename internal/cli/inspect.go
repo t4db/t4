@@ -110,7 +110,7 @@ func inspectGetCmd() *cobra.Command {
 			}
 
 			if asJSON {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(kv)
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(newJSONKV(kv))
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Key:              %s\n", kv.Key)
@@ -158,7 +158,7 @@ func inspectListCmd() *cobra.Command {
 			}
 
 			if asJSON {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(kvs)
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(newJSONKVs(kvs))
 			}
 
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
@@ -243,7 +243,7 @@ func inspectHistoryCmd() *cobra.Command {
 			}
 
 			if asJSON {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(events)
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(newJSONEvents(events))
 			}
 
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
@@ -363,8 +363,83 @@ func formatValue(v []byte) string {
 	return "0x" + hex.EncodeToString(v)
 }
 
+// istore.KeyValue and istore.Event carry their key as a Go string and have no
+// JSON tags, so encoding/json renders them by field name and rewrites any key
+// that is not valid UTF-8, substituting U+FFFD for the offending bytes. The
+// printed key is then not the key in the store — and a binary-key incident is
+// exactly when an operator reaches for inspect.
+//
+// These projections keep the field names the command already emits, so
+// existing readers are unaffected, and add KeyHex with the exact bytes. KeyHex
+// appears only when Key cannot hold them, which is also the signal that Key
+// is approximate.
+type jsonKV struct {
+	Key            string `json:"Key"`
+	KeyHex         string `json:"KeyHex,omitempty"`
+	Value          []byte `json:"Value"`
+	Revision       int64  `json:"Revision"`
+	CreateRevision int64  `json:"CreateRevision"`
+	PrevRevision   int64  `json:"PrevRevision"`
+	Version        int64  `json:"Version"`
+	Lease          int64  `json:"Lease"`
+}
+
+func newJSONKV(kv *istore.KeyValue) *jsonKV {
+	if kv == nil {
+		return nil
+	}
+	return &jsonKV{
+		Key:            kv.Key,
+		KeyHex:         exactKeyHex(kv.Key),
+		Value:          kv.Value,
+		Revision:       kv.Revision,
+		CreateRevision: kv.CreateRevision,
+		PrevRevision:   kv.PrevRevision,
+		Version:        kv.Version,
+		Lease:          kv.Lease,
+	}
+}
+
+func newJSONKVs(kvs []*istore.KeyValue) []*jsonKV {
+	out := make([]*jsonKV, 0, len(kvs))
+	for _, kv := range kvs {
+		out = append(out, newJSONKV(kv))
+	}
+	return out
+}
+
+type jsonEvent struct {
+	Type     istore.EventType `json:"Type"`
+	KV       *jsonKV          `json:"KV"`
+	PrevKV   *jsonKV          `json:"PrevKV"`
+	Revision int64            `json:"Revision"`
+}
+
+func newJSONEvents(events []istore.Event) []jsonEvent {
+	out := make([]jsonEvent, 0, len(events))
+	for _, ev := range events {
+		out = append(out, jsonEvent{
+			Type:     ev.Type,
+			KV:       newJSONKV(ev.KV),
+			PrevKV:   newJSONKV(ev.PrevKV),
+			Revision: ev.Revision,
+		})
+	}
+	return out
+}
+
+// exactKeyHex returns the key's bytes as hex when a JSON string cannot carry
+// them, and "" when it can.
+func exactKeyHex(key string) string {
+	if utf8.ValidString(key) {
+		return ""
+	}
+	return hex.EncodeToString([]byte(key))
+}
+
 type inspectChange struct {
 	Key           string `json:"key"`
+	KeyHex        string `json:"key_hex,omitempty"`
 	Type          string `json:"type"`
 	FirstRevision int64  `json:"first_revision"`
 	LastRevision  int64  `json:"last_revision"`
@@ -389,6 +464,7 @@ func summarizeChanges(events []istore.Event) []inspectChange {
 			cur = &agg{
 				change: inspectChange{
 					Key:           key,
+					KeyHex:        exactKeyHex(key),
 					FirstRevision: ev.KV.Revision,
 					LastRevision:  ev.KV.Revision,
 					Operations:    0,

@@ -23,6 +23,13 @@ import (
 // startAuthServer serves an etcd endpoint with the auth API, as t4 run
 // --auth-enabled does, with user alice and role reader created. Auth itself
 // stays disabled.
+// clientv3.New performs the Authenticate RPC before it returns when a
+// password is set, and Authenticate is bcrypt-bound. Under -race, with a CI
+// runner's CPU contention, one verification can take seconds — so this
+// timeout has to cover that, not a healthy dial. It bounds how long a broken
+// endpoint takes to report, which no passing test waits on.
+const authDialTimeout = 30 * time.Second
+
 func startAuthServer(t *testing.T) (*clientv3.Client, string) {
 	t.Helper()
 	node, err := t4.Open(t4.Config{DataDir: t.TempDir()})
@@ -131,7 +138,7 @@ func TestUserWithFullReadCannotSeeTokens(t *testing.T) {
 	login := func(user, pass string) *clientv3.Client {
 		c, err := clientv3.New(clientv3.Config{
 			Endpoints:   []string{addr},
-			DialTimeout: 5 * time.Second,
+			DialTimeout: authDialTimeout,
 			DialOptions: []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
 			Username:    user,
 			Password:    pass,

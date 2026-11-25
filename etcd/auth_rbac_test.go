@@ -74,7 +74,7 @@ func newRBACCluster(t *testing.T) rbacCluster {
 		}
 	}
 	login := func(user, pw string) *clientv3.Client {
-		c, err := clientv3.New(clientv3.Config{Endpoints: []string{addr}, Username: user, Password: pw, DialTimeout: 5 * time.Second})
+		c, err := clientv3.New(clientv3.Config{Endpoints: []string{addr}, Username: user, Password: pw, DialTimeout: authDialTimeout})
 		if err != nil {
 			t.Fatal(err)
 		}
