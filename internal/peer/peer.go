@@ -96,7 +96,7 @@ func (Codec) Marshal(v interface{}) ([]byte, error) {
 		// Stamp a shallow copy: callers retain ownership of the request and
 		// nested slices; encoding never mutates them or copies key payloads.
 		stamped := *m
-		stamped.WireVersion = forwardWireVersion
+		stamped.WireVersion = m.requiredWireVersion()
 		return json.Marshal(&stamped)
 	case *WalEntryMsg:
 		return marshalWalEntryMsg(m)
@@ -351,7 +351,53 @@ func (k *WireKey) UnmarshalJSON(data []byte) error {
 
 // Independent of persisted WAL/checkpoint versions. Version 0 is legacy;
 // its strings may already have lost bytes before reaching the leader.
+//
+// A request is stamped with the lowest version that can represent it, not
+// with the newest this binary knows, because the leader's gate is an exact
+// match on the versions it understands: stamping every request with the
+// newest would make a leader one release behind refuse all of a new
+// follower's writes rather than only those using a feature it lacks. So a
+// forward carrying a feature added after version 2 stamps the version that
+// feature needs, and everything else keeps stamping 2.
 const forwardWireVersion uint8 = 2
+
+// forwardWireVersionNestedTxn is the version a forwarded txn needs when it
+// carries TxnNested ops. A leader that predates them would decode the op
+// type it does not know, so it must refuse the forward rather than apply a
+// transaction with a branch missing.
+const forwardWireVersionNestedTxn uint8 = 3
+
+// TxnOpNested mirrors t4.TxnNested. The wire carries op types as numbers, so
+// the two have to agree; peer cannot import the root package, hence the copy.
+// The root package asserts the two match at compile time.
+const TxnOpNested uint8 = 5
+
+// requiredWireVersion is the lowest version that can represent r.
+func (r *ForwardRequest) requiredWireVersion() uint8 {
+	if r.TxnReq != nil && r.TxnReq.hasNested() {
+		return forwardWireVersionNestedTxn
+	}
+	return forwardWireVersion
+}
+
+// wireVersionUnderstood reports whether this binary can interpret a forward
+// stamped v.
+func wireVersionUnderstood(v uint8) bool {
+	return v == forwardWireVersion || v == forwardWireVersionNestedTxn
+}
+
+// hasNested reports whether either branch holds a nested transaction. Nesting
+// is only reachable through a top-level nested op, so this need not recurse.
+func (m *TxnReqMsg) hasNested() bool {
+	for _, ops := range [][]TxnOpMsg{m.Success, m.Failure} {
+		for _, op := range ops {
+			if op.Type == TxnOpNested {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // KVMsg is the wire representation of a key-value record.
 type KVMsg struct {
@@ -378,10 +424,13 @@ type TxnCondMsg struct {
 
 // TxnOpMsg is the wire representation of a TxnOp (one branch operation).
 type TxnOpMsg struct {
-	Type  uint8   `json:"type"` // 0=put, 1=delete, 2=meta put, 3=meta delete, 4=delete lease keys
+	Type  uint8   `json:"type"` // 0=put, 1=delete, 2=meta put, 3=meta delete, 4=delete lease keys, 5=nested txn
 	Key   WireKey `json:"key"`
 	Value []byte  `json:"value,omitempty"`
 	Lease int64   `json:"lease,omitempty"`
+	// Txn is set only for type 5, and carries the nested transaction the
+	// leader evaluates in the same atomic step as the enclosing one.
+	Txn *TxnReqMsg `json:"txn,omitempty"`
 }
 
 // TxnReqMsg is the wire representation of a TxnRequest.
@@ -413,6 +462,15 @@ type ForwardResponse struct {
 	ErrMsg      string    `json:"err_msg,omitempty"`
 	DeletedKeys []WireKey `json:"deleted_keys,omitempty"` // ForwardTxn: keys actually removed
 	Ages        []int64   `json:"ages,omitempty"`         // ForwardLeaseRenewedAt: nanoseconds since each lease was renewed
+	// Nested reports one result per nested transaction in the branch the
+	// leader took, in order. ForwardTxn only.
+	Nested []TxnResultMsg `json:"nested,omitempty"`
+}
+
+// TxnResultMsg is the wire representation of a nested transaction's outcome.
+type TxnResultMsg struct {
+	Succeeded bool           `json:"succeeded"`
+	Nested    []TxnResultMsg `json:"nested,omitempty"`
 }
 
 // carriesKey reports whether req carries key bytes that a legacy sender could

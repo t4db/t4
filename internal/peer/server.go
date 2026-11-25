@@ -693,9 +693,13 @@ func (s *Server) Forward(ctx context.Context, req *ForwardRequest) (*ForwardResp
 	if req == nil {
 		return nil, status.Error(codes.FailedPrecondition, "forward_wire_version_unsupported: missing request")
 	}
-	if req.WireVersion != forwardWireVersion && req.carriesKey() {
+	// The stamp must be a version this binary understands and must be at
+	// least what the request's own contents need: a forward carrying nested
+	// txn ops under an older stamp would otherwise be applied with a branch
+	// missing.
+	if req.carriesKey() && (!wireVersionUnderstood(req.WireVersion) || req.WireVersion < req.requiredWireVersion()) {
 		s.warnForwardVersion(ctx, req.WireVersion)
-		return nil, status.Errorf(codes.FailedPrecondition, "forward_wire_version_unsupported: received %d, require %d", req.WireVersion, forwardWireVersion)
+		return nil, status.Errorf(codes.FailedPrecondition, "forward_wire_version_unsupported: received %d, require %d", req.WireVersion, req.requiredWireVersion())
 	}
 	s.mu.Lock()
 	h := s.forwardHandler
