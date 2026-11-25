@@ -777,10 +777,11 @@ func txnOpsToMsg(ops []TxnOp) []peer.TxnOpMsg {
 	msgs := make([]peer.TxnOpMsg, len(ops))
 	for i, op := range ops {
 		msgs[i] = peer.TxnOpMsg{
-			Type:  uint8(op.Type),
-			Key:   peer.WireKey(op.Key),
-			Value: op.Value,
-			Lease: op.Lease,
+			Type:     uint8(op.Type),
+			Key:      peer.WireKey(op.Key),
+			Value:    op.Value,
+			Lease:    op.Lease,
+			RangeEnd: peer.WireKey(op.RangeEnd),
 		}
 		if op.Txn != nil {
 			msgs[i].Txn = txnToMsg(*op.Txn)
@@ -826,10 +827,11 @@ func msgToTxnOps(msgs []peer.TxnOpMsg) []TxnOp {
 	ops := make([]TxnOp, len(msgs))
 	for i, m := range msgs {
 		ops[i] = TxnOp{
-			Type:  TxnOpType(m.Type),
-			Key:   string(m.Key),
-			Value: m.Value,
-			Lease: m.Lease,
+			Type:     TxnOpType(m.Type),
+			Key:      string(m.Key),
+			Value:    m.Value,
+			Lease:    m.Lease,
+			RangeEnd: string(m.RangeEnd),
 		}
 		if m.Txn != nil {
 			sub := forwardMsgToTxnRequest(m.Txn)
@@ -1007,6 +1009,10 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, txnEva
 		skip           bool // delete of a non-existent key
 	}
 	resolved := make([]resolvedOp, 0, len(ops))
+	ops, err = n.expandRangeDeletesLocked(ops, readKey)
+	if err != nil {
+		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
+	}
 	ops, err = n.expandLeaseDeletesLocked(ops, readKey)
 	if err != nil {
 		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, err
@@ -1086,8 +1092,8 @@ func (n *Node) prepareTxnEntry(req TxnRequest, internal bool) (wal.Entry, txnEva
 		return wal.Entry{}, eval, nil, observed, txnStats{}, nil
 	}
 
-	if len(active) > 65535 {
-		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is 65535", len(active))
+	if len(active) > maxTxnBranchOps {
+		return wal.Entry{}, txnEval{}, nil, txnObserved{}, txnStats{}, fmt.Errorf("txn: too many ops (%d), maximum is %d", len(active), maxTxnBranchOps)
 	}
 
 	// Data and meta keys live in separate keyspaces, so the same name may
@@ -1197,6 +1203,78 @@ func (n *Node) expandLeaseDeletesLocked(ops []TxnOp, readKey func(string) (*isto
 				return nil, err
 			}
 			if kv != nil && kv.Lease == op.Lease {
+				out = append(out, TxnOp{Type: TxnDelete, Key: key})
+			}
+		}
+	}
+	return out, nil
+}
+
+// maxTxnBranchOps is the most write ops one transaction branch may apply. It
+// also bounds how far a range delete scans: the scan stops one past the cap,
+// so a range over a large keyspace is refused without reading all of it.
+const maxTxnBranchOps = 65535
+
+// expandRangeDeletesLocked replaces each TxnDelete carrying a RangeEnd with
+// deletes of the keys in that range: those the store holds and those pending
+// writes add, kept only while readKey still shows them present. Must be
+// called under n.mu, which is what makes the set of keys atomic with the
+// transaction that deletes them. Must also be called before
+// expandLeaseDeletesLocked, whose output carries no RangeEnd.
+func (n *Node) expandRangeDeletesLocked(ops []TxnOp, readKey func(string) (*istore.KeyValue, error)) ([]TxnOp, error) {
+	isRange := func(op TxnOp) bool { return op.Type == TxnDelete && op.RangeEnd != "" }
+	if !slices.ContainsFunc(ops, isRange) {
+		return ops, nil
+	}
+	out := make([]TxnOp, 0, len(ops))
+	for _, op := range ops {
+		if !isRange(op) {
+			out = append(out, op)
+			continue
+		}
+		// "\x00" is etcd's "no upper bound"; any other end is exclusive, so
+		// an end at or below the start matches nothing.
+		unbounded := op.RangeEnd == "\x00"
+		if !unbounded && op.RangeEnd <= op.Key {
+			continue
+		}
+		inRange := func(key string) bool {
+			return key >= op.Key && (unbounded || key < op.RangeEnd)
+		}
+
+		// One past the cap: enough to tell "at the limit" from "over it"
+		// without scanning a keyspace this transaction cannot delete anyway.
+		kvs, err := n.db.Load().ListRange("", istore.ReadOptions{
+			FromKey:  op.Key,
+			Limit:    int64(maxTxnBranchOps) + 1,
+			KeysOnly: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		keys := make([]string, 0, len(kvs))
+		for _, kv := range kvs {
+			if inRange(kv.Key) {
+				keys = append(keys, kv.Key)
+			}
+		}
+		for key, p := range n.pending {
+			if !p.deleted && inRange(key) {
+				keys = append(keys, key)
+			}
+		}
+		slices.Sort(keys)
+		keys = slices.Compact(keys)
+		if len(keys) > maxTxnBranchOps {
+			return nil, fmt.Errorf("txn: range delete [%q, %q) matches more than %d keys",
+				op.Key, op.RangeEnd, maxTxnBranchOps)
+		}
+		for _, key := range keys {
+			kv, err := readKey(key)
+			if err != nil {
+				return nil, err
+			}
+			if kv != nil {
 				out = append(out, TxnOp{Type: TxnDelete, Key: key})
 			}
 		}

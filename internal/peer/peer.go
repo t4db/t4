@@ -361,11 +361,17 @@ func (k *WireKey) UnmarshalJSON(data []byte) error {
 // feature needs, and everything else keeps stamping 2.
 const forwardWireVersion uint8 = 2
 
-// forwardWireVersionNestedTxn is the version a forwarded txn needs when it
-// carries TxnNested ops. A leader that predates them would decode the op
-// type it does not know, so it must refuse the forward rather than apply a
-// transaction with a branch missing.
-const forwardWireVersionNestedTxn uint8 = 3
+// forwardWireVersionTxn3 is the version a forwarded txn needs when it carries
+// either of the two branch features added after version 2: a nested
+// transaction, or a delete carrying a range end.
+//
+// Both fail quietly on a leader that predates them, which is why they need a
+// version rather than just a new field. A nested op's type is unknown there,
+// so its branch would be dropped and the transaction would commit without it.
+// A range delete is worse: its op type is still an ordinary single-key
+// delete, so an older leader would decode the op, ignore RangeEnd and delete
+// exactly one key out of the range.
+const forwardWireVersionTxn3 uint8 = 3
 
 // TxnOpNested mirrors t4.TxnNested. The wire carries op types as numbers, so
 // the two have to agree; peer cannot import the root package, hence the copy.
@@ -374,8 +380,8 @@ const TxnOpNested uint8 = 5
 
 // requiredWireVersion is the lowest version that can represent r.
 func (r *ForwardRequest) requiredWireVersion() uint8 {
-	if r.TxnReq != nil && r.TxnReq.hasNested() {
-		return forwardWireVersionNestedTxn
+	if r.TxnReq != nil && r.TxnReq.needsTxn3() {
+		return forwardWireVersionTxn3
 	}
 	return forwardWireVersion
 }
@@ -383,15 +389,17 @@ func (r *ForwardRequest) requiredWireVersion() uint8 {
 // wireVersionUnderstood reports whether this binary can interpret a forward
 // stamped v.
 func wireVersionUnderstood(v uint8) bool {
-	return v == forwardWireVersion || v == forwardWireVersionNestedTxn
+	return v == forwardWireVersion || v == forwardWireVersionTxn3
 }
 
-// hasNested reports whether either branch holds a nested transaction. Nesting
-// is only reachable through a top-level nested op, so this need not recurse.
-func (m *TxnReqMsg) hasNested() bool {
+// needsTxn3 reports whether either branch holds a nested transaction or a
+// range delete. A nested transaction is only reachable through a top-level
+// nested op, and a range end inside one travels with it, so a nested op is
+// enough to answer for everything below it.
+func (m *TxnReqMsg) needsTxn3() bool {
 	for _, ops := range [][]TxnOpMsg{m.Success, m.Failure} {
 		for _, op := range ops {
-			if op.Type == TxnOpNested {
+			if op.Type == TxnOpNested || op.RangeEnd != "" {
 				return true
 			}
 		}
@@ -428,6 +436,9 @@ type TxnOpMsg struct {
 	Key   WireKey `json:"key"`
 	Value []byte  `json:"value,omitempty"`
 	Lease int64   `json:"lease,omitempty"`
+	// RangeEnd, on a delete, makes it delete [Key, RangeEnd) rather than Key
+	// alone. The leader resolves the range under its write lock.
+	RangeEnd WireKey `json:"range_end,omitempty"`
 	// Txn is set only for type 5, and carries the nested transaction the
 	// leader evaluates in the same atomic step as the enclosing one.
 	Txn *TxnReqMsg `json:"txn,omitempty"`

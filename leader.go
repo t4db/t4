@@ -493,11 +493,16 @@ func v1ForwardSupported(req *peer.ForwardRequest) error {
 	// Op types above TxnDelete cover every later addition, nested txns
 	// included: a v1.1 leader had no wire version gate, so it would accept
 	// one of those ops and silently drop it, which is exactly what this
-	// simulation exists to catch.
+	// simulation exists to catch. A range delete needs its own check, since
+	// its op type is an ordinary delete and only the range end is new — such
+	// a leader would delete one key instead of the range.
 	for _, ops := range [][]peer.TxnOpMsg{req.TxnReq.Success, req.TxnReq.Failure} {
 		for _, op := range ops {
 			if TxnOpType(op.Type) > TxnDelete {
 				return fmt.Errorf("t4: txn op type %d is unknown to a v1.1 leader", op.Type)
+			}
+			if op.RangeEnd != "" {
+				return fmt.Errorf("t4: txn range deletes are unknown to a v1.1 leader")
 			}
 		}
 	}
