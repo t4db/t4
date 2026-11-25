@@ -1,0 +1,3 @@
+2026-11-25 15:13:53.917 UTC [4008] LOG:  ending log output to stderr
+2026-11-25 15:13:53.917 UTC [4008] HINT:  Future log output will go to log destination "csvlog".
+2026-11-25 15:14:21.327 UTC [4009] DEBUG:  logger shutting down

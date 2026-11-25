@@ -95,6 +95,11 @@ type TxnOp struct {
     Key   string      // unused for TxnDeleteLease and TxnNested
     Value []byte      // used for TxnPut
     Lease int64       // used for TxnPut (must reference a live lease, or 0) and TxnDeleteLease
+    // RangeEnd, with TxnDelete, deletes [Key, RangeEnd) rather than Key
+    // alone; "\x00" means no upper bound, as in etcd. The keys are resolved
+    // under the write lock, so the set is atomic with the transaction, and a
+    // range matching more than 65535 keys is refused rather than held there.
+    RangeEnd string
     Txn   *TxnRequest // used for TxnNested
 }
 

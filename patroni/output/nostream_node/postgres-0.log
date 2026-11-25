@@ -1,0 +1,6 @@
+2026-11-25 15:11:00.992 UTC [2106] LOG:  ending log output to stderr
+2026-11-25 15:11:00.992 UTC [2106] HINT:  Future log output will go to log destination "csvlog".
+2026-11-25 15:11:09.088 UTC [2107] DEBUG:  logger shutting down
+2026-11-25 15:11:10.217 UTC [2214] LOG:  ending log output to stderr
+2026-11-25 15:11:10.217 UTC [2214] HINT:  Future log output will go to log destination "csvlog".
+2026-11-25 15:11:19.682 UTC [2215] DEBUG:  logger shutting down

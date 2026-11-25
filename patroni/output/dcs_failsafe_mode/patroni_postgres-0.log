@@ -1,0 +1,515 @@
+2026-11-25 15:08:53,403 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:08:53,407 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:08:53,496 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:08:53,497 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:08:53,545 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-0
+2026-11-25 15:08:53,652 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap a new cluster
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "C.UTF-8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+creating directory /patroni/data/postgres-0 ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /patroni/data/postgres-0 -l logfile start
+
+2026-11-25 15:08:54.674 UTC [1090] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:08:54.674 UTC [1090] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:08:54.675 UTC [1090] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:08:54.678 UTC [1090] LOG:  redirecting log output to logging collector process
+2026-11-25 15:08:54.678 UTC [1090] HINT:  Future log output will appear in directory "/patroni/features/output/dcs_failsafe_mode".
+2026-11-25 15:08:54,686 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=1090
+/tmp:5371 - accepting connections
+/tmp:5371 - accepting connections
+2026-11-25 15:08:54,697 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:08:54,796 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: running post_bootstrap
+ ?column? 
+----------
+        1
+(1 row)
+
+2026-11-25 15:08:55,057 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: initialized a new cluster
+2026-11-25 15:08:55,380 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:08:55,387 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:08:55,388 WARNING [/patroni/patroni/dcs/etcd3.py:881 - _cluster_from_nodes]: I am the leader but not owner of the lease
+2026-11-25 15:08:55,389 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:08:55,488 ERROR [/patroni/patroni/watchdog/base.py:229 - keepalive]: Error while sending keepalive: Setting timeout is not supported on NullWatchdog
+2026-11-25 15:08:55,537 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:08:56,484 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:08:56,485 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:08:56,486 INFO [/patroni/patroni/postgresql/config.py:1239 - reload_config]: Changed wal_level from 'replica' to 'logical' (restart might be required)
+2026-11-25 15:08:56,487 INFO [/patroni/patroni/postgresql/config.py:1301 - reload_config]: Reloading PostgreSQL configuration.
+server signaled
+server signaled
+2026-11-25 15:08:57,506 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:08:58,521 ERROR [/patroni/patroni/dcs/etcd.py:299 - _do_http_request]: Request to server http://localhost:2379 failed: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9998443750082515)")
+2026-11-25 15:08:58,522 INFO [/patroni/patroni/dcs/etcd.py:300 - _do_http_request]: Reconnection allowed, looking for another server.
+2026-11-25 15:08:59,537 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://127.0.0.1:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=2379): Read timed out. (read timeout=0.9982940839836374)")
+2026-11-25 15:09:00,544 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://[::1]:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='::1', port=2379): Read timed out. (read timeout=0.9982444159977604)")
+2026-11-25 15:09:01,555 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://localhost:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9989017090119887)")
+2026-11-25 15:09:01,556 ERROR [/patroni/patroni/ha.py:2342 - _run_cycle]: Error communicating with DCS
+2026-11-25 15:09:01,558 ERROR [/patroni/patroni/dcs/etcd3.py:654 - _build_cache]: watchprefix failed: ProtocolError('Response ended prematurely')
+2026-11-25 15:09:01,573 ERROR [/patroni/patroni/postgresql/slots.py:524 - _ensure_logical_slots_primary]: Failed to create logical replication slot 'dcs_slot_0' plugin='test_decoding': ObjectNotInPrerequisiteState('logical decoding requires "wal_level" >= "logical"\n')
+2026-11-25 15:09:01,573 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: continue to run as a leader because failsafe mode is enabled and all members are accessible
+2026-11-25 15:09:01,575 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:09:01,844 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:09:01,893 ERROR [/patroni/patroni/postgresql/slots.py:524 - _ensure_logical_slots_primary]: Failed to create logical replication slot 'dcs_slot_0' plugin='test_decoding': ObjectNotInPrerequisiteState('logical decoding requires "wal_level" >= "logical"\n')
+2026-11-25 15:09:01,941 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:09:06,963 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:09:06,968 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:09:07,053 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:09:07,055 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:09:07,060 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:09:07,060 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-0
+2026-11-25 15:09:07,060 INFO [/patroni/patroni/ha.py:647 - recover]: pg_controldata:
+  pg_control version number: 1700
+  Catalog version number: 202406281
+  Database system identifier: 7712126314251875385
+  Database cluster state: shut down
+  pg_control last modified: Wed Nov 25 15:09:02 2026
+  Latest checkpoint location: 0/3000028
+  Latest checkpoint's REDO location: 0/3000028
+  Latest checkpoint's REDO WAL file: 000000010000000000000003
+  Latest checkpoint's TimeLineID: 1
+  Latest checkpoint's PrevTimeLineID: 1
+  Latest checkpoint's full_page_writes: on
+  Latest checkpoint's NextXID: 0:746
+  Latest checkpoint's NextOID: 16386
+  Latest checkpoint's NextMultiXactId: 1
+  Latest checkpoint's NextMultiOffset: 0
+  Latest checkpoint's oldestXID: 731
+  Latest checkpoint's oldestXID's DB: 1
+  Latest checkpoint's oldestActiveXID: 0
+  Latest checkpoint's oldestMultiXid: 1
+  Latest checkpoint's oldestMulti's DB: 1
+  Latest checkpoint's oldestCommitTsXid: 0
+  Latest checkpoint's newestCommitTsXid: 0
+  Time of latest checkpoint: Wed Nov 25 15:09:02 2026
+  Fake LSN counter for unlogged rels: 0/3E8
+  Minimum recovery ending location: 0/0
+  Min recovery ending loc's timeline: 0
+  Backup start location: 0/0
+  Backup end location: 0/0
+  End-of-backup record required: no
+  wal_level setting: replica
+  wal_log_hints setting: on
+  max_connections setting: 100
+  max_worker_processes setting: 8
+  max_wal_senders setting: 10
+  max_prepared_xacts setting: 0
+  max_locks_per_xact setting: 64
+  track_commit_timestamp setting: off
+  Maximum data alignment: 8
+  Database block size: 8192
+  Blocks per segment of large relation: 131072
+  WAL block size: 8192
+  Bytes per WAL segment: 16777216
+  Maximum length of identifiers: 64
+  Maximum columns in an index: 32
+  Maximum size of a TOAST chunk: 1996
+  Size of a large-object chunk: 2048
+  Date/time type storage: 64-bit integers
+  Float8 argument passing: by value
+  Data page checksum version: 1
+  Mock authentication nonce: b3ff1da43825e3f1587358f30c4140ee9682a2ecb5f1311b4920582bc6ae936a
+
+2026-11-25 15:09:07,063 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-0
+2026-11-25 15:09:07,110 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: starting as a secondary
+2026-11-25 15:09:07.273 UTC [1213] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:09:07.273 UTC [1213] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:09:07.274 UTC [1213] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:09:07.277 UTC [1213] LOG:  redirecting log output to logging collector process
+2026-11-25 15:09:07.277 UTC [1213] HINT:  Future log output will appear in directory "/patroni/features/output/dcs_failsafe_mode".
+2026-11-25 15:09:07,284 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=1213
+/tmp:5371 - rejecting connections
+/tmp:5371 - rejecting connections
+/tmp:5371 - accepting connections
+2026-11-25 15:09:08,300 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:09:08,351 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-1 https://127.0.0.1:8009/patroni: {"state": "running", "postmaster_start_time": "2026-11-25 15:09:05.438309+00:00", "role": "replica", "server_version": 170012, "xlog": {"received_location": 50331648, "replayed_location": 50331648, "replayed_timestamp": null, "paused": false}, "timeline": 1, "replication_state": "in archive recovery", "cluster_unlocked": true, "dcs_last_seen": 1795619346, "database_system_identifier": "7712126314251875385", "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-1"}}
+2026-11-25 15:09:08,517 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: promoted self to leader by acquiring session lock
+server promoting
+2026-11-25 15:09:08,518 DEBUG [/patroni/patroni/postgresql/__init__.py:1265 - promote]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-0', '5371', on_role_change, primary, 'batman'])
+2026-11-25 15:09:09,808 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:09:11,708 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:09:13,667 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:09:15,619 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:09:16,028 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:09:17,558 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:09:18,576 ERROR [/patroni/patroni/dcs/etcd.py:299 - _do_http_request]: Request to server http://localhost:2379 failed: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9996954999805894)")
+2026-11-25 15:09:18,576 INFO [/patroni/patroni/dcs/etcd.py:300 - _do_http_request]: Reconnection allowed, looking for another server.
+2026-11-25 15:09:19,593 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://localhost:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9986960829992313)")
+2026-11-25 15:09:20,600 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://127.0.0.1:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=2379): Read timed out. (read timeout=0.9987300829961896)")
+2026-11-25 15:09:21,608 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://[::1]:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='::1', port=2379): Read timed out. (read timeout=0.9980946249852423)")
+2026-11-25 15:09:21,609 ERROR [/patroni/patroni/ha.py:2342 - _run_cycle]: Error communicating with DCS
+2026-11-25 15:09:21,610 ERROR [/patroni/patroni/dcs/etcd3.py:654 - _build_cache]: watchprefix failed: ProtocolError('Response ended prematurely')
+2026-11-25 15:09:21,671 INFO [/patroni/patroni/ha.py:1220 - call_failsafe_member]: Got response from postgres-1 https://127.0.0.1:8009/failsafe: Accepted
+2026-11-25 15:09:21,673 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: continue to run as a leader because failsafe mode is enabled and all members are accessible
+2026-11-25 15:09:21,674 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:09:22,625 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://localhost:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9963602499919944)")
+2026-11-25 15:09:23,636 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://127.0.0.1:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=2379): Read timed out. (read timeout=0.9994932920089923)")
+2026-11-25 15:09:24,641 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://[::1]:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='::1', port=2379): Read timed out. (read timeout=0.998333833005745)")
+2026-11-25 15:09:24,641 ERROR [/patroni/patroni/dcs/etcd3.py:668 - run]: KVCache.run EtcdConnectionFailed('No more machines in the cluster')
+2026-11-25 15:09:24,675 ERROR [/patroni/patroni/log.py:95 - error_exception]: get_cluster
+Traceback (most recent call last):
+  File "/patroni/patroni/dcs/etcd3.py", line 938, in _load_cluster
+    cluster = loader(path)
+  File "/patroni/patroni/dcs/etcd3.py", line 914, in _postgresql_cluster_loader
+    for node in self._client.get_cluster(path)
+                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/patroni/patroni/dcs/etcd3.py", line 736, in get_cluster
+    self._wait_cache(self.read_timeout)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/dcs/etcd3.py", line 730, in _wait_cache
+    raise RetryFailedError('Exceeded retry deadline')
+patroni.utils.RetryFailedError: Exceeded retry deadline
+2026-11-25 15:09:24,677 ERROR [/patroni/patroni/ha.py:2342 - _run_cycle]: Error communicating with DCS
+2026-11-25 15:09:24,724 INFO [/patroni/patroni/ha.py:1220 - call_failsafe_member]: Got response from postgres-1 https://127.0.0.1:8009/failsafe: Accepted
+2026-11-25 15:09:24,725 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: continue to run as a leader because failsafe mode is enabled and all members are accessible
+2026-11-25 15:09:24,726 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:09:26,668 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://localhost:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9990150830126368)")
+2026-11-25 15:09:27,674 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://127.0.0.1:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=2379): Read timed out. (read timeout=0.9990668749960605)")
+2026-11-25 15:09:27,735 ERROR [/patroni/patroni/dcs/etcd.py:560 - _handle_exception]: Exceeded retry deadline
+2026-11-25 15:09:27,738 ERROR [/patroni/patroni/ha.py:2342 - _run_cycle]: Error communicating with DCS
+2026-11-25 15:09:27,740 WARNING [/venv/lib/python3.13/site-packages/urllib3/connectionpool.py:874 - urlopen]: Retrying (Retry(total=0, connect=None, read=None, redirect=0, status=None)) after connection broken by 'NewConnectionError("HTTPSConnection(host='127.0.0.1', port=8009): Failed to establish a new connection: [Errno 111] Connection refused")': /failsafe
+2026-11-25 15:09:27,741 WARNING [/patroni/patroni/ha.py:1225 - call_failsafe_member]: Request failed to postgres-1: POST https://127.0.0.1:8009/failsafe (HTTPSConnectionPool(host='127.0.0.1', port=8009): Max retries exceeded with url: /failsafe (Caused by NewConnectionError("HTTPSConnection(host='127.0.0.1', port=8009): Failed to establish a new connection: [Errno 111] Connection refused")))
+2026-11-25 15:09:27,742 INFO [/patroni/patroni/ha.py:2362 - _handle_dcs_error]: demoting self because DCS is not accessible and I was a leader
+2026-11-25 15:09:27,742 INFO [/patroni/patroni/ha.py:1607 - demote]: Demoting self (offline)
+2026-11-25 15:09:28,689 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://[::1]:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='::1', port=2379): Read timed out. (read timeout=0.9990845840075053)")
+2026-11-25 15:09:28,690 ERROR [/patroni/patroni/dcs/etcd3.py:668 - run]: KVCache.run EtcdConnectionFailed('No more machines in the cluster')
+2026-11-25 15:09:28,782 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:09:28.968 UTC [1326] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:09:28.968 UTC [1326] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:09:28.969 UTC [1326] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:09:28.972 UTC [1326] LOG:  redirecting log output to logging collector process
+2026-11-25 15:09:28.972 UTC [1326] HINT:  Future log output will appear in directory "/patroni/features/output/dcs_failsafe_mode".
+2026-11-25 15:09:28,981 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=1326
+/tmp:5371 - rejecting connections
+/tmp:5371 - rejecting connections
+2026-11-25 15:09:52,365 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:09:52,369 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:09:52,449 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:09:52,451 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:09:52,499 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:09:52,499 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:52,500 INFO [/patroni/patroni/ha.py:647 - recover]: pg_controldata:
+  pg_control version number: 1700
+  Catalog version number: 202406281
+  Database system identifier: 7712126314251875385
+  Database cluster state: shut down in recovery
+  pg_control last modified: Wed Nov 25 15:09:30 2026
+  Latest checkpoint location: 0/4000028
+  Latest checkpoint's REDO location: 0/4000028
+  Latest checkpoint's REDO WAL file: 000000020000000000000004
+  Latest checkpoint's TimeLineID: 2
+  Latest checkpoint's PrevTimeLineID: 2
+  Latest checkpoint's full_page_writes: on
+  Latest checkpoint's NextXID: 0:747
+  Latest checkpoint's NextOID: 16389
+  Latest checkpoint's NextMultiXactId: 1
+  Latest checkpoint's NextMultiOffset: 0
+  Latest checkpoint's oldestXID: 731
+  Latest checkpoint's oldestXID's DB: 1
+  Latest checkpoint's oldestActiveXID: 0
+  Latest checkpoint's oldestMultiXid: 1
+  Latest checkpoint's oldestMulti's DB: 1
+  Latest checkpoint's oldestCommitTsXid: 0
+  Latest checkpoint's newestCommitTsXid: 0
+  Time of latest checkpoint: Wed Nov 25 15:09:27 2026
+  Fake LSN counter for unlogged rels: 0/3E8
+  Minimum recovery ending location: 0/40000A0
+  Min recovery ending loc's timeline: 2
+  Backup start location: 0/0
+  Backup end location: 0/0
+  End-of-backup record required: no
+  wal_level setting: logical
+  wal_log_hints setting: on
+  max_connections setting: 100
+  max_worker_processes setting: 8
+  max_wal_senders setting: 10
+  max_prepared_xacts setting: 0
+  max_locks_per_xact setting: 64
+  track_commit_timestamp setting: off
+  Maximum data alignment: 8
+  Database block size: 8192
+  Blocks per segment of large relation: 131072
+  WAL block size: 8192
+  Bytes per WAL segment: 16777216
+  Maximum length of identifiers: 64
+  Maximum columns in an index: 32
+  Maximum size of a TOAST chunk: 1996
+  Size of a large-object chunk: 2048
+  Date/time type storage: 64-bit integers
+  Float8 argument passing: by value
+  Data page checksum version: 1
+  Mock authentication nonce: b3ff1da43825e3f1587358f30c4140ee9682a2ecb5f1311b4920582bc6ae936a
+
+2026-11-25 15:09:52,500 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:52,505 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=2 lsn=0/40000A0
+2026-11-25 15:09:52,505 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:52,505 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: starting as a secondary
+2026-11-25 15:09:52.667 UTC [1478] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:09:52.667 UTC [1478] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:09:52.668 UTC [1478] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:09:52.672 UTC [1478] LOG:  redirecting log output to logging collector process
+2026-11-25 15:09:52.672 UTC [1478] HINT:  Future log output will appear in directory "/patroni/features/output/dcs_failsafe_mode".
+2026-11-25 15:09:52,681 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=1478
+/tmp:5371 - rejecting connections
+/tmp:5371 - rejecting connections
+2026-11-25 15:09:52,850 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:52,939 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: restarting after failure in progress
+/tmp:5371 - no response
+2026-11-25 15:09:54,863 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:09:54,864 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:54,867 INFO [/patroni/patroni/ha.py:647 - recover]: pg_controldata:
+  pg_control version number: 1700
+  Catalog version number: 202406281
+  Database system identifier: 7712126314251875385
+  Database cluster state: shut down in recovery
+  pg_control last modified: Wed Nov 25 15:09:30 2026
+  Latest checkpoint location: 0/4000028
+  Latest checkpoint's REDO location: 0/4000028
+  Latest checkpoint's REDO WAL file: 000000020000000000000004
+  Latest checkpoint's TimeLineID: 2
+  Latest checkpoint's PrevTimeLineID: 2
+  Latest checkpoint's full_page_writes: on
+  Latest checkpoint's NextXID: 0:747
+  Latest checkpoint's NextOID: 16389
+  Latest checkpoint's NextMultiXactId: 1
+  Latest checkpoint's NextMultiOffset: 0
+  Latest checkpoint's oldestXID: 731
+  Latest checkpoint's oldestXID's DB: 1
+  Latest checkpoint's oldestActiveXID: 0
+  Latest checkpoint's oldestMultiXid: 1
+  Latest checkpoint's oldestMulti's DB: 1
+  Latest checkpoint's oldestCommitTsXid: 0
+  Latest checkpoint's newestCommitTsXid: 0
+  Time of latest checkpoint: Wed Nov 25 15:09:27 2026
+  Fake LSN counter for unlogged rels: 0/3E8
+  Minimum recovery ending location: 0/40000A0
+  Min recovery ending loc's timeline: 2
+  Backup start location: 0/0
+  Backup end location: 0/0
+  End-of-backup record required: no
+  wal_level setting: logical
+  wal_log_hints setting: on
+  max_connections setting: 100
+  max_worker_processes setting: 8
+  max_wal_senders setting: 10
+  max_prepared_xacts setting: 0
+  max_locks_per_xact setting: 64
+  track_commit_timestamp setting: off
+  Maximum data alignment: 8
+  Database block size: 8192
+  Blocks per segment of large relation: 131072
+  WAL block size: 8192
+  Bytes per WAL segment: 16777216
+  Maximum length of identifiers: 64
+  Maximum columns in an index: 32
+  Maximum size of a TOAST chunk: 1996
+  Size of a large-object chunk: 2048
+  Date/time type storage: 64-bit integers
+  Float8 argument passing: by value
+  Data page checksum version: 1
+  Mock authentication nonce: b3ff1da43825e3f1587358f30c4140ee9682a2ecb5f1311b4920582bc6ae936a
+
+2026-11-25 15:09:54,868 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:54,876 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=2 lsn=0/40000A0
+2026-11-25 15:09:54,900 INFO [/patroni/patroni/postgresql/rewind.py:258 - _check_timeline_and_lsn]: primary_timeline=3
+2026-11-25 15:09:54,900 INFO [/patroni/patroni/postgresql/rewind.py:219 - _log_primary_history]: primary: history=1	0/30000A0	no recovery target specified
+2	0/4000000	no recovery target specified
+2026-11-25 15:09:55,002 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: running pg_rewind from postgres-1
+2026-11-25 15:09:55,030 INFO [/patroni/patroni/postgresql/rewind.py:459 - pg_rewind]: running pg_rewind from dbname=postgres user=rewind_user host=127.0.0.1 port=5372 sslmode=verify-ca sslcert=/patroni/features/output/patroni.crt sslkey=/patroni/features/output/patroni.key sslrootcert=/patroni/features/output/patroni.crt target_session_attrs=read-write
+2026-11-25 15:09:55,561 INFO [/patroni/patroni/postgresql/rewind.py:483 - pg_rewind]: pg_rewind exit code=0
+2026-11-25 15:09:55,561 INFO [/patroni/patroni/postgresql/rewind.py:487 - pg_rewind]:  stdout=
+2026-11-25 15:09:55,561 INFO [/patroni/patroni/postgresql/rewind.py:488 - pg_rewind]:  stderr=pg_rewind: servers diverged at WAL location 0/4000000 on timeline 2
+pg_rewind: rewinding from last common checkpoint at 0/3000168 on timeline 2
+pg_rewind: Done!
+
+2026-11-25 15:09:55,562 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:09:55,562 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:55,563 INFO [/patroni/patroni/ha.py:647 - recover]: pg_controldata:
+  pg_control version number: 1700
+  Catalog version number: 202406281
+  Database system identifier: 7712126314251875385
+  Database cluster state: in archive recovery
+  pg_control last modified: Wed Nov 25 15:09:55 2026
+  Latest checkpoint location: 0/40000F0
+  Latest checkpoint's REDO location: 0/4000060
+  Latest checkpoint's REDO WAL file: 000000030000000000000004
+  Latest checkpoint's TimeLineID: 3
+  Latest checkpoint's PrevTimeLineID: 3
+  Latest checkpoint's full_page_writes: on
+  Latest checkpoint's NextXID: 0:747
+  Latest checkpoint's NextOID: 24578
+  Latest checkpoint's NextMultiXactId: 1
+  Latest checkpoint's NextMultiOffset: 0
+  Latest checkpoint's oldestXID: 731
+  Latest checkpoint's oldestXID's DB: 1
+  Latest checkpoint's oldestActiveXID: 747
+  Latest checkpoint's oldestMultiXid: 1
+  Latest checkpoint's oldestMulti's DB: 1
+  Latest checkpoint's oldestCommitTsXid: 0
+  Latest checkpoint's newestCommitTsXid: 0
+  Time of latest checkpoint: Wed Nov 25 15:09:51 2026
+  Fake LSN counter for unlogged rels: 0/3E8
+  Minimum recovery ending location: 0/4003D20
+  Min recovery ending loc's timeline: 3
+  Backup start location: 0/0
+  Backup end location: 0/0
+  End-of-backup record required: no
+  wal_level setting: logical
+  wal_log_hints setting: on
+  max_connections setting: 100
+  max_worker_processes setting: 8
+  max_wal_senders setting: 10
+  max_prepared_xacts setting: 0
+  max_locks_per_xact setting: 64
+  track_commit_timestamp setting: off
+  Maximum data alignment: 8
+  Database block size: 8192
+  Blocks per segment of large relation: 131072
+  WAL block size: 8192
+  Bytes per WAL segment: 16777216
+  Maximum length of identifiers: 64
+  Maximum columns in an index: 32
+  Maximum size of a TOAST chunk: 1996
+  Size of a large-object chunk: 2048
+  Date/time type storage: 64-bit integers
+  Float8 argument passing: by value
+  Data page checksum version: 1
+  Mock authentication nonce: b3ff1da43825e3f1587358f30c4140ee9682a2ecb5f1311b4920582bc6ae936a
+
+2026-11-25 15:09:55,563 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:55,605 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: starting as a secondary
+2026-11-25 15:09:55.765 UTC [1524] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:09:55.765 UTC [1524] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:09:55.767 UTC [1524] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:09:55.770 UTC [1524] LOG:  redirecting log output to logging collector process
+2026-11-25 15:09:55.770 UTC [1524] HINT:  Future log output will appear in directory "/patroni/features/output/dcs_failsafe_mode".
+2026-11-25 15:09:55,777 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=1524
+/tmp:5371 - rejecting connections
+/tmp:5371 - rejecting connections
+/tmp:5371 - accepting connections
+2026-11-25 15:09:56,796 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:56,796 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:09:56,927 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: Copying logical slots ['dcs_slot_0'] from the primary
+2026-11-25 15:09:56,928 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:56,969 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: copy_logical_slots in progress
+2026-11-25 15:09:57,973 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:09:58.140 UTC [1616] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:09:58.141 UTC [1616] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:09:58.142 UTC [1616] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:09:58.145 UTC [1616] LOG:  redirecting log output to logging collector process
+2026-11-25 15:09:58.145 UTC [1616] HINT:  Future log output will appear in directory "/patroni/features/output/dcs_failsafe_mode".
+2026-11-25 15:09:58,152 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=1616
+/tmp:5371 - rejecting connections
+/tmp:5371 - rejecting connections
+2026-11-25 15:09:58,865 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:09:58,961 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: copy_logical_slots in progress
+/tmp:5371 - accepting connections
+2026-11-25 15:10:00,869 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:10:00,869 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:10:00,897 INFO [/patroni/patroni/postgresql/slots.py:727 - _ready_logical_slots]: Logical slot dcs_slot_0 is safe to be used after a failover
+2026-11-25 15:10:00,993 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:10:03,463 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:10:04,981 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:10:05,397 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:10:05,399 INFO [/patroni/patroni/postgresql/slots.py:405 - _drop_incorrect_slots]: Trying to drop unknown replication slot 'dcs_slot_0'
+2026-11-25 15:10:05,404 INFO [/patroni/patroni/postgresql/slots.py:370 - _drop_replication_slot]: Dropped replication slot 'dcs_slot_0'
+2026-11-25 15:10:05,446 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:10:05,450 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:10:05,541 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:10:07,608 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:10:09,520 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:10:09,618 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: Copying logical slots ['dcs_slot_2'] from the primary
+2026-11-25 15:10:10,654 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:10:10.835 UTC [1704] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:10:10.835 UTC [1704] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:10:10.836 UTC [1704] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:10:10.840 UTC [1704] LOG:  redirecting log output to logging collector process
+2026-11-25 15:10:10.840 UTC [1704] HINT:  Future log output will appear in directory "/patroni/features/output/dcs_failsafe_mode".
+2026-11-25 15:10:10,852 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=1704
+/tmp:5371 - rejecting connections
+/tmp:5371 - rejecting connections
+2026-11-25 15:10:11,509 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:10:11,601 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: copy_logical_slots in progress
+/tmp:5371 - accepting connections
+2026-11-25 15:10:13,509 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:10:13,509 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:10:13,534 INFO [/patroni/patroni/postgresql/slots.py:727 - _ready_logical_slots]: Logical slot dcs_slot_2 is safe to be used after a failover
+2026-11-25 15:10:13,634 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:10:16,022 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:10:17,031 ERROR [/patroni/patroni/dcs/etcd.py:299 - _do_http_request]: Request to server http://localhost:2379 failed: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9997048329969402)")
+2026-11-25 15:10:17,031 INFO [/patroni/patroni/dcs/etcd.py:300 - _do_http_request]: Reconnection allowed, looking for another server.
+2026-11-25 15:10:18,044 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://127.0.0.1:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=2379): Read timed out. (read timeout=0.998490166006377)")
+2026-11-25 15:10:19,055 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://localhost:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9985056660079863)")
+2026-11-25 15:10:20,067 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://[::1]:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='::1', port=2379): Read timed out. (read timeout=0.9983802080096211)")
+2026-11-25 15:10:20,068 ERROR [/patroni/patroni/log.py:95 - error_exception]: 
+Traceback (most recent call last):
+  File "/patroni/patroni/dcs/etcd.py", line 569, in handle_etcd_exceptions
+    retval = func(self, *args, **kwargs)
+  File "/patroni/patroni/dcs/etcd3.py", line 951, in touch_member
+    self.refresh_lease()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "/patroni/patroni/dcs/etcd3.py", line 833, in refresh_lease
+    return self.retry(self._do_refresh_lease)
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/dcs/etcd.py", line 553, in retry
+    return retry(method, *args, **kwargs)
+  File "/patroni/patroni/utils.py", line 763, in __call__
+    return func(*args, **kwargs)
+  File "/patroni/patroni/dcs/etcd3.py", line 821, in _do_refresh_lease
+    if self._lease and not self._client.lease_keepalive(self._lease, retry=retry):
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/dcs/etcd3.py", line 218, in wrapper
+    return self.handle_auth_errors(func, *args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/dcs/etcd3.py", line 431, in handle_auth_errors
+    return func(self, *args, retry=retry, **kwargs)
+  File "/patroni/patroni/dcs/etcd3.py", line 468, in lease_keepalive
+    return self.call_rpc('/lease/keepalive', {'ID': ID}, retry).get('result', {}).get('TTL')
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/dcs/etcd3.py", line 748, in call_rpc
+    ret = super(PatroniEtcd3Client, self).call_rpc(method, fields, retry)
+  File "/patroni/patroni/dcs/etcd3.py", line 376, in call_rpc
+    return self.api_execute(self.version_prefix + method, self._MPOST, fields)
+           ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/dcs/etcd.py", line 353, in api_execute
+    raise ex
+  File "/patroni/patroni/dcs/etcd.py", line 335, in api_execute
+    return self._do_http_request(retry, machines_cache, request_executor, method, path, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/dcs/etcd.py", line 305, in _do_http_request
+    raise etcd.EtcdConnectionFailed('No more machines in the cluster')
+etcd.EtcdConnectionFailed: No more machines in the cluster
+2026-11-25 15:10:20,069 ERROR [/patroni/patroni/dcs/etcd3.py:654 - _build_cache]: watchprefix failed: ProtocolError('Response ended prematurely')
+2026-11-25 15:10:20,075 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:10:20,078 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:10:21,085 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://127.0.0.1:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=2379): Read timed out. (read timeout=0.9991480419994332)")
+2026-11-25 15:10:22,092 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://localhost:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9992467499978375)")
+2026-11-25 15:10:23,088 ERROR [/patroni/patroni/dcs/etcd.py:560 - _handle_exception]: Exceeded retry deadline
+2026-11-25 15:10:23,090 ERROR [/patroni/patroni/ha.py:2342 - _run_cycle]: Error communicating with DCS
+2026-11-25 15:10:23,091 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: DCS is not accessible
+2026-11-25 15:10:23,092 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:10:23,096 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://[::1]:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='::1', port=2379): Read timed out. (read timeout=0.9997230409935582)")
+2026-11-25 15:10:23,096 ERROR [/patroni/patroni/dcs/etcd3.py:668 - run]: KVCache.run EtcdConnectionFailed('No more machines in the cluster')
+2026-11-25 15:10:25,107 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://127.0.0.1:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=2379): Read timed out. (read timeout=0.9991834160173312)")
+2026-11-25 15:10:26,094 ERROR [/patroni/patroni/dcs/etcd.py:560 - _handle_exception]: Exceeded retry deadline
+2026-11-25 15:10:26,098 ERROR [/patroni/patroni/ha.py:2342 - _run_cycle]: Error communicating with DCS
+2026-11-25 15:10:26,101 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: DCS is not accessible
+2026-11-25 15:10:26,102 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:10:26,110 ERROR [/patroni/patroni/dcs/etcd.py:246 - _get_machines_list]: Failed to get list of machines from http://localhost:2379/v3: ReadTimeoutError("HTTPConnectionPool(host='localhost', port=2379): Read timed out. (read timeout=0.9989212499931455)")

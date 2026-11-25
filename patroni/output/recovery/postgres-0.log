@@ -1,0 +1,108 @@
+2026-11-25 15:15:18.281 UTC [4769] LOG:  ending log output to stderr
+2026-11-25 15:15:18.281 UTC [4769] HINT:  Future log output will go to log destination "csvlog".
+2026-11-25 15:15:25.831 UTC [4770] DEBUG:  logger shutting down
+2026-11-25 15:15:26.699 UTC [4871] LOG:  ending log output to stderr
+2026-11-25 15:15:26.699 UTC [4871] HINT:  Future log output will go to log destination "csvlog".
+2026-11-25 15:15:31.196 UTC [4872] DEBUG:  logger shutting down
+2026-11-25 15:15:38.461 UTC [4939] LOG:  ending log output to stderr
+2026-11-25 15:15:38.461 UTC [4939] HINT:  Future log output will go to log destination "csvlog".
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/00000003.history'
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/000000020000000000000005'
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/000000010000000000000005'
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/00000003.history'
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/000000020000000000000005'
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/00000003.history'
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/000000020000000000000005'
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/000000020000000000000005'
+Traceback (most recent call last):
+  File "/patroni/features/archive-restore.py", line 21, in <module>
+    shutil.copy(full_filename, args.pathname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 428, in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/shutil.py", line 260, in copyfile
+    with open(src, 'rb') as fsrc:
+         ~~~~^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/patroni/data/wal_archive/00000003.history'
+2026-11-25 15:15:41.212 UTC [4940] DEBUG:  logger shutting down

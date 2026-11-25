@@ -1,0 +1,124 @@
+2026-11-25 15:13:15,690 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:13:15,694 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:13:15,782 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:13:15,783 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:13:15,830 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-0
+2026-11-25 15:13:15,927 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap a new cluster
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "C.UTF-8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+creating directory /patroni/data/postgres-0 ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /patroni/data/postgres-0 -l logfile start
+
+2026-11-25 15:13:17.035 UTC [3339] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:13:17.035 UTC [3339] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:13:17.037 UTC [3339] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:13:17.040 UTC [3339] LOG:  redirecting log output to logging collector process
+2026-11-25 15:13:17.040 UTC [3339] HINT:  Future log output will appear in directory "/patroni/features/output/priority_replication".
+2026-11-25 15:13:17,048 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=3339
+/tmp:5385 - accepting connections
+/tmp:5385 - accepting connections
+2026-11-25 15:13:17,058 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:13:17,156 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: running post_bootstrap
+ ?column? 
+----------
+        1
+(1 row)
+
+2026-11-25 15:13:17,403 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: initialized a new cluster
+2026-11-25 15:13:19,342 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:13:21,338 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:13:23,230 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:13:28,869 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:13:28,873 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:13:28,955 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:13:28,957 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:13:28,962 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:13:28,962 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-0
+2026-11-25 15:13:28,962 INFO [/patroni/patroni/ha.py:647 - recover]: pg_controldata:
+  pg_control version number: 1700
+  Catalog version number: 202406281
+  Database system identifier: 7712127440656129282
+  Database cluster state: shut down
+  pg_control last modified: Wed Nov 25 15:13:24 2026
+  Latest checkpoint location: 0/4000028
+  Latest checkpoint's REDO location: 0/4000028
+  Latest checkpoint's REDO WAL file: 000000010000000000000004
+  Latest checkpoint's TimeLineID: 1
+  Latest checkpoint's PrevTimeLineID: 1
+  Latest checkpoint's full_page_writes: on
+  Latest checkpoint's NextXID: 0:747
+  Latest checkpoint's NextOID: 16389
+  Latest checkpoint's NextMultiXactId: 1
+  Latest checkpoint's NextMultiOffset: 0
+  Latest checkpoint's oldestXID: 731
+  Latest checkpoint's oldestXID's DB: 1
+  Latest checkpoint's oldestActiveXID: 0
+  Latest checkpoint's oldestMultiXid: 1
+  Latest checkpoint's oldestMulti's DB: 1
+  Latest checkpoint's oldestCommitTsXid: 0
+  Latest checkpoint's newestCommitTsXid: 0
+  Time of latest checkpoint: Wed Nov 25 15:13:24 2026
+  Fake LSN counter for unlogged rels: 0/3E8
+  Minimum recovery ending location: 0/0
+  Min recovery ending loc's timeline: 0
+  Backup start location: 0/0
+  Backup end location: 0/0
+  End-of-backup record required: no
+  wal_level setting: replica
+  wal_log_hints setting: on
+  max_connections setting: 100
+  max_worker_processes setting: 8
+  max_wal_senders setting: 10
+  max_prepared_xacts setting: 0
+  max_locks_per_xact setting: 64
+  track_commit_timestamp setting: off
+  Maximum data alignment: 8
+  Database block size: 8192
+  Blocks per segment of large relation: 131072
+  WAL block size: 8192
+  Bytes per WAL segment: 16777216
+  Maximum length of identifiers: 64
+  Maximum columns in an index: 32
+  Maximum size of a TOAST chunk: 1996
+  Size of a large-object chunk: 2048
+  Date/time type storage: 64-bit integers
+  Float8 argument passing: by value
+  Data page checksum version: 1
+  Mock authentication nonce: a8d2345ed0320d6bcb86d0640453140ba1bcb62bb3f2514e039668c191a981db
+
+2026-11-25 15:13:28,966 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-0
+2026-11-25 15:13:29,010 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: starting as a secondary
+2026-11-25 15:13:29.172 UTC [3476] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:13:29.172 UTC [3476] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:13:29.173 UTC [3476] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:13:29.177 UTC [3476] LOG:  redirecting log output to logging collector process
+2026-11-25 15:13:29.177 UTC [3476] HINT:  Future log output will appear in directory "/patroni/features/output/priority_replication".
+2026-11-25 15:13:29,185 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=3476
+/tmp:5385 - rejecting connections
+/tmp:5385 - rejecting connections
+/tmp:5385 - accepting connections
+2026-11-25 15:13:30,207 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:13:30,360 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: promoted self to leader by acquiring session lock
+server promoting
+2026-11-25 15:13:30,363 DEBUG [/patroni/patroni/postgresql/__init__.py:1265 - promote]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-0', '5385', on_role_change, primary, 'batman'])
+2026-11-25 15:13:31,549 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:13:33,507 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:13:35,526 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock

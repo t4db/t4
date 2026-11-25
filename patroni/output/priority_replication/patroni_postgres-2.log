@@ -1,0 +1,184 @@
+2026-11-25 15:13:30,897 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:13:30,902 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:13:30,989 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:13:30,990 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:13:31,041 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:13:31,084 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap from leader 'postgres-0'
+2026-11-25 15:13:31,456 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:13:31,542 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: bootstrap from leader 'postgres-0' in progress
+2026-11-25 15:13:31,838 INFO [/patroni/patroni/postgresql/bootstrap.py:285 - create_replica]: replica has been created using basebackup
+2026-11-25 15:13:31,838 INFO [/patroni/patroni/ha.py:523 - clone]: bootstrapped from leader 'postgres-0'
+2026-11-25 15:13:31.994 UTC [3557] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:13:31.994 UTC [3557] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:13:31.995 UTC [3557] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:13:31.998 UTC [3557] LOG:  redirecting log output to logging collector process
+2026-11-25 15:13:31.998 UTC [3557] HINT:  Future log output will appear in directory "/patroni/features/output/priority_replication".
+2026-11-25 15:13:32,006 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=3557
+/tmp:5387 - rejecting connections
+/tmp:5387 - rejecting connections
+/tmp:5387 - accepting connections
+2026-11-25 15:13:33,020 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:13:33,020 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:13:33,124 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:13:33,551 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:13:35,581 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:13:38,087 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:13:38,192 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:13:38,211 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:13:38,252 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-3 https://127.0.0.1:8011/patroni: {"state": "running", "postmaster_start_time": "2026-11-25 15:13:34.079364+00:00", "role": "replica", "server_version": 170012, "xlog": {"received_location": 150995104, "replayed_location": 150995104, "replayed_timestamp": "2026-11-25 15:13:35.692061+00:00", "paused": false}, "timeline": 2, "replication_state": "in archive recovery", "cluster_unlocked": true, "dcs_last_seen": 1795619618, "tags": {"failover_priority": "2"}, "database_system_identifier": "7712127440656129282", "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-3"}}
+2026-11-25 15:13:38,302 WARNING [/patroni/patroni/ha.py:1181 - fetch_node_status]: Request failed to postgres-0: GET https://127.0.0.1:8008/patroni (HTTPSConnectionPool(host='127.0.0.1', port=8008): Max retries exceeded with url: /patroni (Caused by ProtocolError('Connection aborted.', OSError(9, 'Bad file descriptor'))))
+2026-11-25 15:13:38,303 INFO [/patroni/patroni/ha.py:1373 - _is_healthiest_node]: postgres-3 has equally tolerable WAL position and priority 2, while this node has priority 1
+server signaled
+2026-11-25 15:13:38,352 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: following a different leader because i am not the healthiest node
+2026-11-25 15:13:38,389 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-3; I am postgres-2
+2026-11-25 15:13:38,392 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=2 lsn=0/90000A0
+server signaled
+2026-11-25 15:13:38,440 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-3)
+2026-11-25 15:13:39,560 WARNING [/patroni/patroni/config.py:833 - validate_tag]: Conflicting configuration between nofailover: True and failover_priority: 1. Defaulting to nofailover: True
+2026-11-25 15:13:39,564 INFO [/patroni/patroni/postgresql/config.py:1301 - reload_config]: Reloading PostgreSQL configuration.
+server signaled
+2026-11-25 15:13:40,580 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-3; I am postgres-2
+2026-11-25 15:13:40,585 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=3 lsn=0/9000680
+2026-11-25 15:13:40,606 INFO [/patroni/patroni/postgresql/rewind.py:258 - _check_timeline_and_lsn]: primary_timeline=3
+2026-11-25 15:13:40,614 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=3 lsn=0/9000680
+2026-11-25 15:13:40,625 INFO [/patroni/patroni/postgresql/rewind.py:258 - _check_timeline_and_lsn]: primary_timeline=3
+2026-11-25 15:13:40,626 INFO [/patroni/patroni/postgresql/slots.py:405 - _drop_incorrect_slots]: Trying to drop unknown replication slot 'postgres_0'
+2026-11-25 15:13:40,627 INFO [/patroni/patroni/postgresql/slots.py:370 - _drop_replication_slot]: Dropped replication slot 'postgres_0'
+2026-11-25 15:13:40,628 INFO [/patroni/patroni/postgresql/slots.py:405 - _drop_incorrect_slots]: Trying to drop unknown replication slot 'postgres_1'
+2026-11-25 15:13:40,629 INFO [/patroni/patroni/postgresql/slots.py:370 - _drop_replication_slot]: Dropped replication slot 'postgres_1'
+2026-11-25 15:13:40,629 INFO [/patroni/patroni/postgresql/slots.py:405 - _drop_incorrect_slots]: Trying to drop unknown replication slot 'postgres_3'
+2026-11-25 15:13:40,629 INFO [/patroni/patroni/postgresql/slots.py:370 - _drop_replication_slot]: Dropped replication slot 'postgres_3'
+2026-11-25 15:13:40,726 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-3)
+2026-11-25 15:13:40,839 INFO [/patroni/patroni/api.py:1201 - do_POST_failover]: received failover request with leader=None candidate=postgres-2 scheduled_at=None
+2026-11-25 15:13:40,890 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-2 https://127.0.0.1:8010/patroni: {"state": "running", "postmaster_start_time": "2026-11-25 15:13:32.000743+00:00", "role": "replica", "server_version": 170012, "xlog": {"received_location": 150996608, "replayed_location": 150996608, "replayed_timestamp": "2026-11-25 15:13:35.692061+00:00", "paused": false}, "timeline": 3, "replication_state": "streaming", "dcs_last_seen": 1795619620, "tags": {"failover_priority": "1", "nofailover": true}, "database_system_identifier": "7712127440656129282", "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-2"}}
+2026-11-25 15:13:41,604 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-3)
+2026-11-25 15:13:44,184 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-3)
+2026-11-25 15:13:44,785 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-3)
+2026-11-25 15:13:46,811 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=3 lsn=0/A0000A0
+2026-11-25 15:13:46,812 ERROR [/patroni/patroni/log.py:95 - error_exception]: Exception when working with leader
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/rewind.py", line 83, in check_leader_is_not_in_recovery
+    with get_connection_cursor(**conn_kwargs) as cur:
+         ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/patroni/patroni/postgresql/connection.py", line 164, in get_connection_cursor
+    conn = psycopg.connect(**conn_kwargs)
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "127.0.0.1", port 5386 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+
+server signaled
+2026-11-25 15:13:46,870 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: following a different leader because I am not allowed to promote
+2026-11-25 15:13:46,871 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:13:46,872 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-2
+2026-11-25 15:13:46,874 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=3 lsn=0/A0000A0
+2026-11-25 15:13:46,875 ERROR [/patroni/patroni/log.py:95 - error_exception]: Exception when working with leader
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/rewind.py", line 83, in check_leader_is_not_in_recovery
+    with get_connection_cursor(**conn_kwargs) as cur:
+         ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/patroni/patroni/postgresql/connection.py", line 164, in get_connection_cursor
+    conn = psycopg.connect(**conn_kwargs)
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "127.0.0.1", port 5386 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+
+2026-11-25 15:13:46,881 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=3 lsn=0/A0000A0
+2026-11-25 15:13:46,881 ERROR [/patroni/patroni/log.py:95 - error_exception]: Exception when working with leader
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/rewind.py", line 83, in check_leader_is_not_in_recovery
+    with get_connection_cursor(**conn_kwargs) as cur:
+         ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/patroni/patroni/postgresql/connection.py", line 164, in get_connection_cursor
+    conn = psycopg.connect(**conn_kwargs)
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "127.0.0.1", port 5386 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+
+2026-11-25 15:13:46,883 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-1)
+2026-11-25 15:13:46,884 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-2
+2026-11-25 15:13:46,886 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=3 lsn=0/A0000A0
+2026-11-25 15:13:46,886 ERROR [/patroni/patroni/log.py:95 - error_exception]: Exception when working with leader
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/rewind.py", line 83, in check_leader_is_not_in_recovery
+    with get_connection_cursor(**conn_kwargs) as cur:
+         ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/patroni/patroni/postgresql/connection.py", line 164, in get_connection_cursor
+    conn = psycopg.connect(**conn_kwargs)
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "127.0.0.1", port 5386 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+
+2026-11-25 15:13:46,891 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=3 lsn=0/A0000A0
+2026-11-25 15:13:46,891 ERROR [/patroni/patroni/log.py:95 - error_exception]: Exception when working with leader
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/rewind.py", line 83, in check_leader_is_not_in_recovery
+    with get_connection_cursor(**conn_kwargs) as cur:
+         ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/patroni/patroni/postgresql/connection.py", line 164, in get_connection_cursor
+    conn = psycopg.connect(**conn_kwargs)
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "127.0.0.1", port 5386 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+
+2026-11-25 15:13:46,935 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-1)
+2026-11-25 15:13:47,629 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-2
+2026-11-25 15:13:47,633 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=4 lsn=0/B000000
+2026-11-25 15:13:47,633 ERROR [/patroni/patroni/log.py:95 - error_exception]: Exception when working with leader
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/rewind.py", line 83, in check_leader_is_not_in_recovery
+    with get_connection_cursor(**conn_kwargs) as cur:
+         ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/patroni/patroni/postgresql/connection.py", line 164, in get_connection_cursor
+    conn = psycopg.connect(**conn_kwargs)
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "127.0.0.1", port 5386 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+
+2026-11-25 15:13:47,641 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=4 lsn=0/B000000
+2026-11-25 15:13:47,642 ERROR [/patroni/patroni/log.py:95 - error_exception]: Exception when working with leader
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/rewind.py", line 83, in check_leader_is_not_in_recovery
+    with get_connection_cursor(**conn_kwargs) as cur:
+         ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/patroni/patroni/postgresql/connection.py", line 164, in get_connection_cursor
+    conn = psycopg.connect(**conn_kwargs)
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "127.0.0.1", port 5386 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+
+2026-11-25 15:13:47,730 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-1)

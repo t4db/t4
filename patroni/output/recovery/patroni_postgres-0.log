@@ -1,0 +1,237 @@
+2026-11-25 15:15:16,998 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:15:17,002 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:15:17,090 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:15:17,091 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:15:17,143 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-0
+2026-11-25 15:15:17,241 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap a new cluster
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "C.UTF-8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+creating directory /patroni/data/postgres-0 ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /patroni/data/postgres-0 -l logfile start
+
+2026-11-25 15:15:18.277 UTC [4769] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:15:18.277 UTC [4769] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:15:18.278 UTC [4769] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:15:18.281 UTC [4769] LOG:  redirecting log output to logging collector process
+2026-11-25 15:15:18.281 UTC [4769] HINT:  Future log output will appear in directory "/patroni/features/output/recovery".
+2026-11-25 15:15:18,293 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=4769
+/tmp:5396 - accepting connections
+/tmp:5396 - accepting connections
+2026-11-25 15:15:18,306 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:15:18,405 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: running post_bootstrap
+ ?column? 
+----------
+        1
+(1 row)
+
+2026-11-25 15:15:18,656 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: initialized a new cluster
+2026-11-25 15:15:20,589 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:15:22,591 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:15:24,494 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:15:26,422 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:15:26,422 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:15:26,470 INFO [/patroni/patroni/ha.py:647 - recover]: pg_controldata:
+  pg_control version number: 1700
+  Catalog version number: 202406281
+  Database system identifier: 7712127961836384920
+  Database cluster state: in production
+  pg_control last modified: Wed Nov 25 15:15:19 2026
+  Latest checkpoint location: 0/2000080
+  Latest checkpoint's REDO location: 0/2000028
+  Latest checkpoint's REDO WAL file: 000000010000000000000002
+  Latest checkpoint's TimeLineID: 1
+  Latest checkpoint's PrevTimeLineID: 1
+  Latest checkpoint's full_page_writes: on
+  Latest checkpoint's NextXID: 0:746
+  Latest checkpoint's NextOID: 24576
+  Latest checkpoint's NextMultiXactId: 1
+  Latest checkpoint's NextMultiOffset: 0
+  Latest checkpoint's oldestXID: 731
+  Latest checkpoint's oldestXID's DB: 1
+  Latest checkpoint's oldestActiveXID: 746
+  Latest checkpoint's oldestMultiXid: 1
+  Latest checkpoint's oldestMulti's DB: 1
+  Latest checkpoint's oldestCommitTsXid: 0
+  Latest checkpoint's newestCommitTsXid: 0
+  Time of latest checkpoint: Wed Nov 25 15:15:19 2026
+  Fake LSN counter for unlogged rels: 0/3E8
+  Minimum recovery ending location: 0/0
+  Min recovery ending loc's timeline: 0
+  Backup start location: 0/0
+  Backup end location: 0/0
+  End-of-backup record required: no
+  wal_level setting: replica
+  wal_log_hints setting: on
+  max_connections setting: 100
+  max_worker_processes setting: 8
+  max_wal_senders setting: 10
+  max_prepared_xacts setting: 0
+  max_locks_per_xact setting: 64
+  track_commit_timestamp setting: off
+  Maximum data alignment: 8
+  Database block size: 8192
+  Blocks per segment of large relation: 131072
+  WAL block size: 8192
+  Bytes per WAL segment: 16777216
+  Maximum length of identifiers: 64
+  Maximum columns in an index: 32
+  Maximum size of a TOAST chunk: 1996
+  Size of a large-object chunk: 2048
+  Date/time type storage: 64-bit integers
+  Float8 argument passing: by value
+  Data page checksum version: 1
+  Mock authentication nonce: b78f0c9510f3594d1b6b39d0aa6effd5d4ddce551a52550498ff4324789f7953
+
+2026-11-25 15:15:26,517 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: starting primary after failure
+2026-11-25 15:15:26,517 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:15:26.695 UTC [4871] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:15:26.695 UTC [4871] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:15:26.696 UTC [4871] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:15:26.699 UTC [4871] LOG:  redirecting log output to logging collector process
+2026-11-25 15:15:26.699 UTC [4871] HINT:  Future log output will appear in directory "/patroni/features/output/recovery".
+2026-11-25 15:15:26,707 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=4871
+/tmp:5396 - rejecting connections
+/tmp:5396 - rejecting connections
+2026-11-25 15:15:26,956 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:15:26,959 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+/tmp:5396 - accepting connections
+2026-11-25 15:15:27,880 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:15:29,903 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:15:31,229 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:15:31,230 INFO [/patroni/patroni/postgresql/connection.py:101 - close]: closed patroni heartbeat connection to postgres
+2026-11-25 15:15:31,597 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:15:32,489 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:15:33,424 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:15:34,735 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:15:35,985 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:15:35,986 WARNING [/patroni/patroni/utils.py:775 - __call__]: Retry got exception: connection problems
+2026-11-25 15:15:35,987 ERROR [/patroni/patroni/log.py:95 - error_exception]: Failed to reload config_file=/patroni/features/output/recovery/postgres-0.yml
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/connection.py", line 76, in query
+    with self.get().cursor() as cursor:
+         ~~~~~~~~^^
+  File "/patroni/patroni/postgresql/connection.py", line 58, in get
+    self._connection = psycopg.connect(**self._conn_kwargs)
+                       ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server on socket "/tmp/.s.PGSQL.5396" failed: No such file or directory
+	Is the server running locally and accepting connections on that socket?
+
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/patroni/patroni/utils.py", line 763, in __call__
+    return func(*args, **kwargs)
+  File "/patroni/patroni/postgresql/__init__.py", line 398, in _query
+    return self._connection.query(sql, *params)
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/patroni/patroni/postgresql/connection.py", line 88, in query
+    raise PostgresConnectionException('connection problems') from exc
+patroni.exceptions.PostgresConnectionException: connection problems
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/__init__.py", line 423, in query
+    return self.retry(self._query, sql, *params)
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/utils.py", line 776, in __call__
+    raise RetryFailedError("Exceeded retry deadline")
+patroni.utils.RetryFailedError: Exceeded retry deadline
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/patroni/patroni/__main__.py", line 183, in reload_config
+    self.postgresql.reload_config(self.config['postgresql'], sighup)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/postgresql/__init__.py", line 339, in reload_config
+    self.config.reload_config(config, sighup)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/postgresql/config.py", line 1226, in reload_config
+    old_values = self._get_pg_settings(changes.keys())
+  File "/patroni/patroni/postgresql/config.py", line 1183, in _get_pg_settings
+    return {r[0]: r for r in self._postgresql.query(('SELECT name, setting, unit, vartype, context, sourcefile'
+                             ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                                     + ' FROM pg_catalog.pg_settings '
+                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                                     + ' WHERE pg_catalog.lower(name) = ANY(%s)'),
+                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                                    [n.lower() for n in names])}
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/patroni/patroni/postgresql/__init__.py", line 425, in query
+    raise PostgresConnectionException(str(exc)) from exc
+patroni.exceptions.PostgresConnectionException: Exceeded retry deadline
+2026-11-25 15:15:36,001 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:15:36,002 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:15:36,114 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-1 https://127.0.0.1:8009/patroni: {"state": "running", "postmaster_start_time": "2026-11-25 15:15:20.101607+00:00", "role": "replica", "server_version": 170012, "xlog": {"received_location": 50331648, "replayed_location": 83886080, "replayed_timestamp": "2026-11-25 15:15:28.016958+00:00", "paused": false}, "timeline": 1, "replication_state": "in archive recovery", "dcs_last_seen": 1795619735, "database_system_identifier": "7712127961836384920", "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-1"}}
+2026-11-25 15:15:36,002 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:15:36,114 INFO [/patroni/patroni/ha.py:640 - recover]: Primary crashed. Failing over.
+2026-11-25 15:15:36,114 INFO [/patroni/patroni/ha.py:1607 - demote]: Demoting self (immediate)
+2026-11-25 15:15:36,232 INFO [/patroni/patroni/ha.py:1583 - release_leader_key_voluntarily]: Leader key released
+2026-11-25 15:15:38,289 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: stopped PostgreSQL to fail over after a crash
+2026-11-25 15:15:38,290 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:15:38,291 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:15:38,292 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:15:38,292 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:15:38,335 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: starting after demotion in progress
+2026-11-25 15:15:38,335 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:15:38,377 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: starting after demotion in progress
+2026-11-25 15:15:38.456 UTC [4939] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:15:38.456 UTC [4939] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:15:38.458 UTC [4939] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:15:38.461 UTC [4939] LOG:  redirecting log output to logging collector process
+2026-11-25 15:15:38.461 UTC [4939] HINT:  Future log output will appear in directory "/patroni/features/output/recovery".
+2026-11-25 15:15:38,469 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=4939
+/tmp:5396 - rejecting connections
+/tmp:5396 - rejecting connections
+/tmp:5396 - accepting connections
+2026-11-25 15:15:39,481 DEBUG [/patroni/patroni/postgresql/__init__.py:1198 - follow]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-0', '5396', on_role_change, replica, 'batman'])
+2026-11-25 15:15:39,482 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:15:39,482 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:15:39,486 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=2 lsn=0/5000660
+2026-11-25 15:15:39,487 ERROR [/patroni/patroni/log.py:95 - error_exception]: Exception when working with leader
+Traceback (most recent call last):
+  File "/patroni/patroni/postgresql/rewind.py", line 83, in check_leader_is_not_in_recovery
+    with get_connection_cursor(**conn_kwargs) as cur:
+         ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/patroni/patroni/postgresql/connection.py", line 164, in get_connection_cursor
+    conn = psycopg.connect(**conn_kwargs)
+  File "/patroni/patroni/psycopg.py", line 150, in connect
+    ret = _connect(*args, **kwargs)
+  File "/venv/lib/python3.13/site-packages/psycopg2/__init__.py", line 122, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "127.0.0.1", port 5397 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+
+2026-11-25 15:15:39,578 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:15:39,986 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-1 https://127.0.0.1:8009/patroni: {"state": "start failed", "role": "demoted", "cluster_unlocked": true, "dcs_last_seen": 1795619739, "database_system_identifier": "7712127961836384920", "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-1"}}
+2026-11-25 15:15:39,987 WARNING [/patroni/patroni/ha.py:1181 - fetch_node_status]: Request failed to postgres-1: GET https://127.0.0.1:8009/patroni ('xlog')
+2026-11-25 15:15:40,128 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: promoted self to leader by acquiring session lock
+server promoting
+2026-11-25 15:15:40,130 DEBUG [/patroni/patroni/postgresql/__init__.py:1265 - promote]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-0', '5396', on_role_change, primary, 'batman'])
+2026-11-25 15:15:40,727 WARNING [/patroni/patroni/async_executor.py:213 - cancel]: Cancelling long running task promote

@@ -123,6 +123,16 @@ type TxnOp struct {
 	Key   string
 	Value []byte
 	Lease int64
+	// RangeEnd, with Type TxnDelete, deletes every key in [Key, RangeEnd)
+	// instead of the single key Key. A RangeEnd of "\x00" means no upper
+	// bound, as in etcd. Empty is a single-key delete.
+	//
+	// The keys are found under the write lock, like TxnDeleteLease's, so a
+	// key a concurrent write adds to the range is deleted with the others
+	// and one it removes is not. A range matching more than 65535 keys is
+	// refused rather than held under that lock: use Node.Delete range by
+	// range, or DeleteRange on the etcd API, which commits in batches.
+	RangeEnd string
 	// Txn is the nested transaction evaluated when Type is TxnNested, and is
 	// nil for every other type.
 	Txn *TxnRequest

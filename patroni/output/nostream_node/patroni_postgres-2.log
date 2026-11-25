@@ -1,0 +1,33 @@
+2026-11-25 15:11:11,639 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:11:11,643 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:11:11,732 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:11:11,733 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:11:11,780 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:11:11,834 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap from leader 'postgres-0'
+2026-11-25 15:11:12,322 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:11:12,405 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: bootstrap from leader 'postgres-0' in progress
+2026-11-25 15:11:12,560 INFO [/patroni/patroni/postgresql/bootstrap.py:285 - create_replica]: replica has been created using basebackup
+2026-11-25 15:11:12,561 INFO [/patroni/patroni/ha.py:523 - clone]: bootstrapped from leader 'postgres-0'
+2026-11-25 15:11:12.721 UTC [2262] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:11:12.721 UTC [2262] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:11:12.722 UTC [2262] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:11:12.725 UTC [2262] LOG:  redirecting log output to logging collector process
+2026-11-25 15:11:12.725 UTC [2262] HINT:  Future log output will appear in directory "/patroni/features/output/nostream_node".
+2026-11-25 15:11:12,733 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=2262
+/tmp:5378 - rejecting connections
+/tmp:5378 - rejecting connections
+/tmp:5378 - accepting connections
+2026-11-25 15:11:13,746 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:11:13,746 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:11:13,844 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:14,407 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:16,408 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:18,955 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:20,757 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:20,777 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:11:20,819 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-1 https://127.0.0.1:8009/patroni: {"state": "running", "postmaster_start_time": "2026-11-25 15:11:02.836861+00:00", "role": "replica", "server_version": 170012, "xlog": {"received_location": 117440512, "replayed_location": 117440512, "replayed_timestamp": "2026-11-25 15:11:04.454111+00:00", "paused": false}, "timeline": 1, "replication_state": "in archive recovery", "replication": [{"usename": "replicator", "application_name": "postgres-2", "client_addr": "127.0.0.1", "state": "streaming", "sync_state": "async", "sync_priority": 0}], "cluster_unlocked": true, "dcs_last_seen": 1795619480, "tags": {"nostream": "true"}, "database_system_identifier": "7712126856363755569", "pending_restart": true, "pending_restart_reason": {"wal_level": {"old_value": "replica", "new_value": "logical"}}, "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-1"}}
+2026-11-25 15:11:20,866 WARNING [/patroni/patroni/ha.py:1181 - fetch_node_status]: Request failed to postgres-0: GET https://127.0.0.1:8008/patroni (HTTPSConnectionPool(host='127.0.0.1', port=8008): Max retries exceeded with url: /patroni (Caused by ProtocolError('Connection aborted.', OSError(9, 'Bad file descriptor'))))
+2026-11-25 15:11:21,006 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: promoted self to leader by acquiring session lock
+server promoting
+2026-11-25 15:11:21,007 DEBUG [/patroni/patroni/postgresql/__init__.py:1265 - promote]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-2', '5378', on_role_change, primary, 'batman'])
+2026-11-25 15:11:22,242 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), the leader with the lock

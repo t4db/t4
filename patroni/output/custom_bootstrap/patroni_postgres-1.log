@@ -1,0 +1,33 @@
+2026-11-25 15:08:38,385 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:08:38,389 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:08:38,470 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:08:38,471 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:08:38,517 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-1
+2026-11-25 15:08:38,616 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap a new cluster
+2026-11-25 15:08:38,617 INFO [/patroni/patroni/postgresql/bootstrap.py:198 - _custom_bootstrap]: Running custom bootstrap script: /venv/bin/python3 features/backup_create.py --walmethod=stream --dbname="password=rep-pass sslmode=verify-ca sslrootcert=/patroni/features/output/patroni.crt sslcert=/patroni/features/output/patroni.crt sslkey=/patroni/features/output/patroni.key host=127.0.0.1 port=5368 user=replicator" --sleep 0
+2026-11-25 15:08:39.560 UTC [928] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:08:39.560 UTC [928] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:08:39.561 UTC [928] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:08:39.564 UTC [928] LOG:  redirecting log output to logging collector process
+2026-11-25 15:08:39.564 UTC [928] HINT:  Future log output will appear in directory "/patroni/features/output/custom_bootstrap".
+2026-11-25 15:08:39,572 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=928
+/tmp:5369 - rejecting connections
+/tmp:5369 - rejecting connections
+2026-11-25 15:08:40,487 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-1
+2026-11-25 15:08:40,487 INFO [/patroni/patroni/ha.py:2057 - handle_long_action_in_progress]: not healthy enough for leader race
+2026-11-25 15:08:40,588 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: bootstrap in progress
+/tmp:5369 - accepting connections
+2026-11-25 15:08:40,596 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:08:40,698 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: running post_bootstrap
+ ?column? 
+----------
+        1
+(1 row)
+
+server signaled
+2026-11-25 15:08:41,733 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:08:41,984 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: initialized a new cluster
+2026-11-25 15:08:42,132 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), the leader with the lock
+2026-11-25 15:08:44,111 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), the leader with the lock
+2026-11-25 15:08:46,031 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), the leader with the lock
+2026-11-25 15:08:48,052 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), the leader with the lock

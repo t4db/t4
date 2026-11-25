@@ -1,0 +1,33 @@
+2026-11-25 15:16:10,251 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:16:10,256 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:16:10,338 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:16:10,339 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:16:10,430 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-2
+2026-11-25 15:16:10,476 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap from leader 'postgres-1'
+2026-11-25 15:16:10,561 INFO [/patroni/patroni/postgresql/bootstrap.py:318 - create_replica]: replica has been created using backup_restore
+2026-11-25 15:16:10,562 INFO [/patroni/patroni/ha.py:523 - clone]: bootstrapped from leader 'postgres-1'
+2026-11-25 15:16:10,477 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-2
+2026-11-25 15:16:10,565 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: bootstrap from leader 'postgres-1' in progress
+2026-11-25 15:16:10.730 UTC [5346] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:16:10.730 UTC [5346] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:16:10.731 UTC [5346] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:16:10.734 UTC [5346] LOG:  redirecting log output to logging collector process
+2026-11-25 15:16:10.734 UTC [5346] HINT:  Future log output will appear in directory "/patroni/features/output/standby_cluster".
+2026-11-25 15:16:10,741 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=5346
+/tmp:5400 - rejecting connections
+/tmp:5400 - rejecting connections
+/tmp:5400 - accepting connections
+2026-11-25 15:16:11,765 DEBUG [/patroni/patroni/postgresql/__init__.py:1022 - check_startup_state_changed]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-2', on_start, replica, 'batman1'])
+2026-11-25 15:16:11,767 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-2
+2026-11-25 15:16:11,767 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:16:11,876 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a standby leader (postgres-1)
+2026-11-25 15:16:11,968 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:16:12,637 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a standby leader (postgres-1)
+2026-11-25 15:16:14,016 INFO [/patroni/patroni/ha.py:1785 - process_unhealthy_cluster]: Cleaning up failover key after acquiring leader lock...
+server signaled
+2026-11-25 15:16:14,066 DEBUG [/patroni/patroni/postgresql/__init__.py:1198 - follow]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-2', '5400', on_role_change, standby_leader, 'batman1'])
+2026-11-25 15:16:14,119 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: promoted self to a standby leader by acquiring session lock
+2026-11-25 15:16:15,921 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-2; I am postgres-2
+2026-11-25 15:16:15,984 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=2 lsn=0/8000000
+2026-11-25 15:16:16,009 INFO [/patroni/patroni/postgresql/rewind.py:258 - _check_timeline_and_lsn]: primary_timeline=2
+2026-11-25 15:16:16,053 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), the standby leader with the lock

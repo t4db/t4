@@ -1,0 +1,10 @@
+time="2026-11-25T15:06:58Z" level=info msg="starting t4 server" advertise_peer_addr=disabled auth=disabled auto_compact_interval=0s auto_compact_mode=auto auto_compact_retain_revisions=0 auto_compact_retention=0s auto_compact_sample_interval=0s client_tls=disabled data_dir=/tmp/tmpb03mjg90 follower_max_retries=5 gomaxprocs=10 leader_watch_interval_sec=20 listen_addr="0.0.0.0:2379" log_level=info metrics_addr="0.0.0.0:9090" mode=single-node node_id="e5aebe03a586 (auto)" object_store=disabled object_store_encryption=false peer_listen_addr=disabled peer_tls=disabled pprof=false read_consistency=linearizable s3_credentials=default-chain s3_endpoint=aws-default s3_region=aws-default wal_sync_upload=true
+time="2026-11-25T15:06:58Z" level=warning msg="no object store configured — durability is local-only"
+time="2026-11-25T15:06:58Z" level=info msg="t4: new database created with the meta keyspace (WAL format 3)"
+time="2026-11-25T15:06:58Z" level=info msg="t4 node opened" listen_addr="0.0.0.0:2379" mode=single-node node_id="e5aebe03a586 (auto)" revision=0
+time="2026-11-25T15:06:58Z" level=info msg="t4: metrics listening on 0.0.0.0:9090"
+time="2026-11-25T15:06:58Z" level=info msg="etcd gRPC server listening" auth=false client_tls=disabled gateway=true listen_addr="0.0.0.0:2379"
+time="2026-11-25T15:17:34Z" level=info msg="shutdown signal received" signal=terminated
+time="2026-11-25T15:17:34Z" level=error msg="gRPC serve: mux: server closed"
+time="2026-11-25T15:17:34Z" level=info msg="gateway stopped"
+time="2026-11-25T15:17:34Z" level=info msg="gRPC server stopped"

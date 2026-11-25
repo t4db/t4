@@ -1,0 +1,34 @@
+2026-11-25 15:12:46,450 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:12:46,455 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:12:46,537 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:12:46,538 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:12:46,586 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:12:46,638 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap from leader 'postgres-0'
+2026-11-25 15:12:47,364 INFO [/patroni/patroni/postgresql/bootstrap.py:285 - create_replica]: replica has been created using basebackup
+2026-11-25 15:12:47,364 INFO [/patroni/patroni/ha.py:523 - clone]: bootstrapped from leader 'postgres-0'
+2026-11-25 15:12:47.535 UTC [3002] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:12:47.535 UTC [3002] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:12:47.536 UTC [3002] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:12:47.539 UTC [3002] LOG:  redirecting log output to logging collector process
+2026-11-25 15:12:47.539 UTC [3002] HINT:  Future log output will appear in directory "/patroni/features/output/permanent_slots".
+2026-11-25 15:12:47,547 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=3002
+/tmp:5383 - rejecting connections
+/tmp:5383 - rejecting connections
+2026-11-25 15:12:48,145 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:12:48,231 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: bootstrap from leader 'postgres-0' in progress
+/tmp:5383 - accepting connections
+2026-11-25 15:12:48,565 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-2
+2026-11-25 15:12:48,565 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:12:48,663 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:12:50,204 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+server signaled
+2026-11-25 15:12:51,935 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:12:51,938 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:12:52,037 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:12:52,161 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:12:54,213 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:12:56,158 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:12:58,680 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:13:00,217 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:13:02,683 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)
+2026-11-25 15:13:04,166 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), a secondary, and following a leader (postgres-0)

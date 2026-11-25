@@ -1,0 +1,372 @@
+2026-11-25 15:11:25,807 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:11:25,812 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:11:25,895 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:11:25,896 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:11:25,942 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-0
+2026-11-25 15:11:26,047 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap a new cluster
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "C.UTF-8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+creating directory /patroni/data/postgres-0 ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /patroni/data/postgres-0 -l logfile start
+
+2026-11-25 15:11:27.152 UTC [2385] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:11:27.152 UTC [2385] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:11:27.153 UTC [2385] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:11:27.156 UTC [2385] LOG:  redirecting log output to logging collector process
+2026-11-25 15:11:27.156 UTC [2385] HINT:  Future log output will appear in directory "/patroni/features/output/patroni_api".
+2026-11-25 15:11:27,163 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=2385
+/tmp:5379 - accepting connections
+/tmp:5379 - accepting connections
+2026-11-25 15:11:27,173 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:11:27,272 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: running post_bootstrap
+ ?column? 
+----------
+        1
+(1 row)
+
+2026-11-25 15:11:27,519 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: initialized a new cluster
+2026-11-25 15:11:27,531 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:11:28,280 INFO [/patroni/patroni/api.py:1201 - do_POST_failover]: received switchover request with leader=postgres-0 candidate=None scheduled_at=None
+2026-11-25 15:11:28,335 ERROR [/patroni/patroni/log.py:95 - error_exception]: Bad request
+Traceback (most recent call last):
+  File "/patroni/patroni/api.py", line 771, in _read_json_content
+    request = json.loads(self.rfile.read(content_length).decode('utf-8'))
+  File "/usr/lib/python3.13/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+2026-11-25 15:11:28,391 INFO [/patroni/patroni/api.py:1201 - do_POST_failover]: received failover request with leader=None candidate=None scheduled_at=None
+2026-11-25 15:11:28,564 INFO [/patroni/patroni/postgresql/config.py:1301 - reload_config]: Reloading PostgreSQL configuration.
+server signaled
+2026-11-25 15:11:29,732 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:29,733 WARNING [/patroni/patroni/config.py:315 - _validate_and_adjust_timeouts]: Violated the rule "loop_wait + 2*retry_timeout <= ttl", where ttl=20. Adjusting loop_wait from 2 to 1 and retry_timeout from 10 to 9
+2026-11-25 15:11:29,738 INFO [/patroni/patroni/postgresql/config.py:1239 - reload_config]: Changed max_connections from '100' to '101' (restart might be required)
+2026-11-25 15:11:29,740 INFO [/patroni/patroni/postgresql/config.py:1301 - reload_config]: Reloading PostgreSQL configuration.
+server signaled
+2026-11-25 15:11:30,762 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:11:30,763 WARNING [/patroni/patroni/dcs/etcd3.py:881 - _cluster_from_nodes]: I am the leader but not owner of the lease
+2026-11-25 15:11:30,763 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:30,879 ERROR [/patroni/patroni/watchdog/base.py:229 - keepalive]: Error while sending keepalive: Setting timeout is not supported on NullWatchdog
+2026-11-25 15:11:30,934 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:30,984 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:32,002 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:33,004 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:34,001 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:34,997 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:35,994 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:36,466 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:36,466 WARNING [/patroni/patroni/config.py:315 - _validate_and_adjust_timeouts]: Violated the rule "loop_wait + 2*retry_timeout <= ttl", where ttl=20. Adjusting loop_wait from 2 to 1 and retry_timeout from 10 to 9
+2026-11-25 15:11:36,467 INFO [/patroni/patroni/postgresql/config.py:1239 - reload_config]: Changed max_connections from '100' to '101' (restart might be required)
+2026-11-25 15:11:36,468 INFO [/patroni/patroni/postgresql/config.py:1239 - reload_config]: Changed superuser_reserved_connections from '3' to '6' (restart might be required)
+2026-11-25 15:11:36,469 INFO [/patroni/patroni/postgresql/config.py:1301 - reload_config]: Reloading PostgreSQL configuration.
+server signaled
+2026-11-25 15:11:37,506 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:11:37,507 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:37,552 INFO [/patroni/patroni/ha.py:1713 - should_run_scheduled_action]: Awaiting restart at 2026-11-25T15:11:41.510475+00:00 (in 4 seconds)
+2026-11-25 15:11:37,609 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:38,519 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:38,575 INFO [/patroni/patroni/ha.py:1713 - should_run_scheduled_action]: Awaiting restart at 2026-11-25T15:11:41.510475+00:00 (in 3 seconds)
+2026-11-25 15:11:38,576 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:39,520 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:39,569 INFO [/patroni/patroni/ha.py:1713 - should_run_scheduled_action]: Awaiting restart at 2026-11-25T15:11:41.510475+00:00 (in 2 seconds)
+2026-11-25 15:11:39,570 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:40,519 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:41,521 INFO [/patroni/patroni/ha.py:1727 - should_run_scheduled_action]: Manual scheduled restart at 2026-11-25T15:11:41.510475+00:00
+2026-11-25 15:11:41,521 INFO [/patroni/patroni/ha.py:1913 - restart_matches]: not proceeding with the restart: host role mismatch
+2026-11-25 15:11:41,522 WARNING [/patroni/patroni/ha.py:1891 - evaluate_scheduled_restart]: Scheduled restart: restart conditions are not satisfied
+2026-11-25 15:11:41,677 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:41,679 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:11:41,732 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:42,741 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:43,748 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:44,747 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:44,798 INFO [/patroni/patroni/ha.py:1713 - should_run_scheduled_action]: Awaiting restart at 2026-11-25T15:11:49.630808+00:00 (in 5 seconds)
+2026-11-25 15:11:44,798 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:45,687 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:45,748 INFO [/patroni/patroni/ha.py:1713 - should_run_scheduled_action]: Awaiting restart at 2026-11-25T15:11:49.630808+00:00 (in 4 seconds)
+2026-11-25 15:11:45,749 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:46,687 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:46,749 INFO [/patroni/patroni/ha.py:1713 - should_run_scheduled_action]: Awaiting restart at 2026-11-25T15:11:49.630808+00:00 (in 3 seconds)
+2026-11-25 15:11:46,750 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:47,692 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:47,793 INFO [/patroni/patroni/ha.py:1713 - should_run_scheduled_action]: Awaiting restart at 2026-11-25T15:11:49.630808+00:00 (in 2 seconds)
+2026-11-25 15:11:47,849 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:48,692 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:49,635 INFO [/patroni/patroni/ha.py:1727 - should_run_scheduled_action]: Manual scheduled restart at 2026-11-25T15:11:49.630808+00:00
+2026-11-25 15:11:49,636 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:49,757 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: restart initiated
+2026-11-25 15:11:49,759 WARNING [/patroni/patroni/__main__.py:207 - schedule_next_run]: Loop time exceeded, rescheduling immediately.
+2026-11-25 15:11:49,761 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:49,846 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: updated leader lock during restart
+2026-11-25 15:11:50,787 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:11:50,768 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:50,854 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: updated leader lock during restart
+2026-11-25 15:11:50.977 UTC [2422] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:11:50.977 UTC [2422] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:11:50.978 UTC [2422] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:11:50.981 UTC [2422] LOG:  redirecting log output to logging collector process
+2026-11-25 15:11:50.981 UTC [2422] HINT:  Future log output will appear in directory "/patroni/features/output/patroni_api".
+2026-11-25 15:11:50,989 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=2422
+/tmp:5379 - accepting connections
+/tmp:5379 - accepting connections
+2026-11-25 15:11:50,998 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:11:50,998 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:11:51,130 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:11:51,132 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:52,063 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:53,134 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:54,107 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:55,176 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:55,795 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:55,795 WARNING [/patroni/patroni/config.py:315 - _validate_and_adjust_timeouts]: Violated the rule "loop_wait + 2*retry_timeout <= ttl", where ttl=20. Adjusting loop_wait from 2 to 1 and retry_timeout from 10 to 9
+2026-11-25 15:11:55,798 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:11:56,764 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:57,773 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:58,774 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:11:59,771 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:00,753 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:01,851 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:02,823 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:03,764 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:04,760 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:05,777 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:06,837 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:07,832 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:08,756 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:09,769 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:10,868 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:11,721 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:12:11,814 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: updated leader lock during restart
+2026-11-25 15:12:12,301 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:12:12.487 UTC [2595] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:12:12.487 UTC [2595] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:12:12.489 UTC [2595] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:12:12.492 UTC [2595] LOG:  redirecting log output to logging collector process
+2026-11-25 15:12:12.492 UTC [2595] HINT:  Future log output will appear in directory "/patroni/features/output/patroni_api".
+2026-11-25 15:12:12,500 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=2595
+/tmp:5379 - accepting connections
+/tmp:5379 - accepting connections
+2026-11-25 15:12:12,510 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:12:12,511 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:12:12,653 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:13,587 INFO [/patroni/patroni/api.py:1201 - do_POST_failover]: received switchover request with leader=postgres-0 candidate=postgres-1 scheduled_at=None
+2026-11-25 15:12:13,639 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-1 https://127.0.0.1:8009/patroni: {"state": "running", "postmaster_start_time": "2026-11-25 15:12:07.207512+00:00", "role": "replica", "server_version": 170012, "xlog": {"received_location": 150995104, "replayed_location": 150995104, "replayed_timestamp": "2026-11-25 15:12:09.805571+00:00", "paused": false}, "timeline": 1, "replication_state": "in archive recovery", "pause": true, "dcs_last_seen": 1795619532, "database_system_identifier": "7712126968908826952", "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-1"}}
+2026-11-25 15:12:13,663 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:13,764 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-1 https://127.0.0.1:8009/patroni: {"state": "running", "postmaster_start_time": "2026-11-25 15:12:07.207512+00:00", "role": "replica", "server_version": 170012, "xlog": {"received_location": 150995104, "replayed_location": 150995104, "replayed_timestamp": "2026-11-25 15:12:09.805571+00:00", "paused": false}, "timeline": 1, "replication_state": "in archive recovery", "pause": true, "dcs_last_seen": 1795619533, "database_system_identifier": "7712126968908826952", "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-1"}}
+2026-11-25 15:12:13,664 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:12:13,813 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: switchover: demoting myself
+2026-11-25 15:12:13,814 INFO [/patroni/patroni/ha.py:1607 - demote]: Demoting self (graceful)
+2026-11-25 15:12:14,676 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:12:14,783 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: updated leader lock during switchover: demote
+2026-11-25 15:12:15,056 INFO [/patroni/patroni/ha.py:1583 - release_leader_key_voluntarily]: Leader key released
+2026-11-25 15:12:15,058 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:15,058 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: switchover: demote in progress
+2026-11-25 15:12:16,071 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:16,128 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: switchover: demote in progress
+2026-11-25 15:12:17,067 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=1 lsn=0/A000028
+2026-11-25 15:12:17,068 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:12:17,063 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:17,106 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: switchover: demote in progress
+2026-11-25 15:12:17.250 UTC [2649] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:12:17.250 UTC [2649] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:12:17.251 UTC [2649] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:12:17.254 UTC [2649] LOG:  redirecting log output to logging collector process
+2026-11-25 15:12:17.254 UTC [2649] HINT:  Future log output will appear in directory "/patroni/features/output/patroni_api".
+2026-11-25 15:12:17,263 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=2649
+/tmp:5379 - rejecting connections
+/tmp:5379 - rejecting connections
+2026-11-25 15:12:17,256 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:17,340 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: switchover: demote in progress
+2026-11-25 15:12:17,485 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:17,534 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: switchover: demote in progress
+/tmp:5379 - no response
+2026-11-25 15:12:18,273 DEBUG [/patroni/patroni/postgresql/__init__.py:1198 - follow]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-0', '5379', on_role_change, replica, 'batman'])
+2026-11-25 15:12:18,487 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:12:18,497 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:18,499 INFO [/patroni/patroni/ha.py:647 - recover]: pg_controldata:
+  pg_control version number: 1700
+  Catalog version number: 202406281
+  Database system identifier: 7712126968908826952
+  Database cluster state: shut down
+  pg_control last modified: Wed Nov 25 15:12:13 2026
+  Latest checkpoint location: 0/A000028
+  Latest checkpoint's REDO location: 0/A000028
+  Latest checkpoint's REDO WAL file: 00000001000000000000000A
+  Latest checkpoint's TimeLineID: 1
+  Latest checkpoint's PrevTimeLineID: 1
+  Latest checkpoint's full_page_writes: on
+  Latest checkpoint's NextXID: 0:749
+  Latest checkpoint's NextOID: 16395
+  Latest checkpoint's NextMultiXactId: 1
+  Latest checkpoint's NextMultiOffset: 0
+  Latest checkpoint's oldestXID: 731
+  Latest checkpoint's oldestXID's DB: 1
+  Latest checkpoint's oldestActiveXID: 0
+  Latest checkpoint's oldestMultiXid: 1
+  Latest checkpoint's oldestMulti's DB: 1
+  Latest checkpoint's oldestCommitTsXid: 0
+  Latest checkpoint's newestCommitTsXid: 0
+  Time of latest checkpoint: Wed Nov 25 15:12:13 2026
+  Fake LSN counter for unlogged rels: 0/3E8
+  Minimum recovery ending location: 0/0
+  Min recovery ending loc's timeline: 0
+  Backup start location: 0/0
+  Backup end location: 0/0
+  End-of-backup record required: no
+  wal_level setting: replica
+  wal_log_hints setting: on
+  max_connections setting: 101
+  max_worker_processes setting: 8
+  max_wal_senders setting: 10
+  max_prepared_xacts setting: 0
+  max_locks_per_xact setting: 64
+  track_commit_timestamp setting: off
+  Maximum data alignment: 8
+  Database block size: 8192
+  Blocks per segment of large relation: 131072
+  WAL block size: 8192
+  Bytes per WAL segment: 16777216
+  Maximum length of identifiers: 64
+  Maximum columns in an index: 32
+  Maximum size of a TOAST chunk: 1996
+  Size of a large-object chunk: 2048
+  Date/time type storage: 64-bit integers
+  Float8 argument passing: by value
+  Data page checksum version: 1
+  Mock authentication nonce: 897d6d4dbbd2b3327c882f2f88ef454b8353fa723a389d7530ff48286d8d2b5d
+
+2026-11-25 15:12:18,499 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:18,506 INFO [/patroni/patroni/postgresql/rewind.py:199 - _get_local_timeline_lsn]: Local timeline=1 lsn=0/A000028
+2026-11-25 15:12:18,529 INFO [/patroni/patroni/postgresql/rewind.py:258 - _check_timeline_and_lsn]: primary_timeline=2
+2026-11-25 15:12:18,529 INFO [/patroni/patroni/postgresql/rewind.py:219 - _log_primary_history]: primary: history=1	0/A000000	no recovery target specified
+2026-11-25 15:12:18,631 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: running pg_rewind from postgres-1
+2026-11-25 15:12:18,658 INFO [/patroni/patroni/postgresql/rewind.py:459 - pg_rewind]: running pg_rewind from dbname=postgres user=rewind_user host=127.0.0.1 port=5380 sslmode=verify-ca sslcert=/patroni/features/output/patroni.crt sslkey=/patroni/features/output/patroni.key sslrootcert=/patroni/features/output/patroni.crt target_session_attrs=read-write
+2026-11-25 15:12:19,226 INFO [/patroni/patroni/postgresql/rewind.py:483 - pg_rewind]: pg_rewind exit code=0
+2026-11-25 15:12:19,226 INFO [/patroni/patroni/postgresql/rewind.py:487 - pg_rewind]:  stdout=
+2026-11-25 15:12:19,226 INFO [/patroni/patroni/postgresql/rewind.py:488 - pg_rewind]:  stderr=pg_rewind: servers diverged at WAL location 0/A000000 on timeline 1
+pg_rewind: rewinding from last common checkpoint at 0/90025F0 on timeline 1
+pg_rewind: Done!
+
+2026-11-25 15:12:19,227 WARNING [/patroni/patroni/postgresql/__init__.py:1065 - is_healthy]: Postgresql is not running.
+2026-11-25 15:12:19,227 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:19,228 INFO [/patroni/patroni/ha.py:647 - recover]: pg_controldata:
+  pg_control version number: 1700
+  Catalog version number: 202406281
+  Database system identifier: 7712126968908826952
+  Database cluster state: in archive recovery
+  pg_control last modified: Wed Nov 25 15:12:18 2026
+  Latest checkpoint location: 0/A000188
+  Latest checkpoint's REDO location: 0/A000130
+  Latest checkpoint's REDO WAL file: 00000002000000000000000A
+  Latest checkpoint's TimeLineID: 2
+  Latest checkpoint's PrevTimeLineID: 2
+  Latest checkpoint's full_page_writes: on
+  Latest checkpoint's NextXID: 0:749
+  Latest checkpoint's NextOID: 16395
+  Latest checkpoint's NextMultiXactId: 1
+  Latest checkpoint's NextMultiOffset: 0
+  Latest checkpoint's oldestXID: 731
+  Latest checkpoint's oldestXID's DB: 1
+  Latest checkpoint's oldestActiveXID: 749
+  Latest checkpoint's oldestMultiXid: 1
+  Latest checkpoint's oldestMulti's DB: 1
+  Latest checkpoint's oldestCommitTsXid: 0
+  Latest checkpoint's newestCommitTsXid: 0
+  Time of latest checkpoint: Wed Nov 25 15:12:17 2026
+  Fake LSN counter for unlogged rels: 0/3E8
+  Minimum recovery ending location: 0/A003DB8
+  Min recovery ending loc's timeline: 2
+  Backup start location: 0/0
+  Backup end location: 0/0
+  End-of-backup record required: no
+  wal_level setting: replica
+  wal_log_hints setting: on
+  max_connections setting: 101
+  max_worker_processes setting: 8
+  max_wal_senders setting: 10
+  max_prepared_xacts setting: 0
+  max_locks_per_xact setting: 64
+  track_commit_timestamp setting: off
+  Maximum data alignment: 8
+  Database block size: 8192
+  Blocks per segment of large relation: 131072
+  WAL block size: 8192
+  Bytes per WAL segment: 16777216
+  Maximum length of identifiers: 64
+  Maximum columns in an index: 32
+  Maximum size of a TOAST chunk: 1996
+  Size of a large-object chunk: 2048
+  Date/time type storage: 64-bit integers
+  Float8 argument passing: by value
+  Data page checksum version: 1
+  Mock authentication nonce: 897d6d4dbbd2b3327c882f2f88ef454b8353fa723a389d7530ff48286d8d2b5d
+
+2026-11-25 15:12:19,228 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:19,270 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: starting as a secondary
+2026-11-25 15:12:19.438 UTC [2698] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:12:19.438 UTC [2698] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:12:19.439 UTC [2698] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:12:19.442 UTC [2698] LOG:  redirecting log output to logging collector process
+2026-11-25 15:12:19.442 UTC [2698] HINT:  Future log output will appear in directory "/patroni/features/output/patroni_api".
+2026-11-25 15:12:19,451 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=2698
+/tmp:5379 - rejecting connections
+/tmp:5379 - rejecting connections
+2026-11-25 15:12:19,470 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:19,554 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: restarting after failure in progress
+/tmp:5379 - accepting connections
+2026-11-25 15:12:20,471 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:20,515 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: restarting after failure in progress
+2026-11-25 15:12:20,517 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-1; I am postgres-0
+2026-11-25 15:12:20,517 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:12:20,633 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:20,682 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: PAUSE: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:20,733 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:12:21,948 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:21,949 WARNING [/patroni/patroni/config.py:315 - _validate_and_adjust_timeouts]: Violated the rule "loop_wait + 2*retry_timeout <= ttl", where ttl=20. Adjusting loop_wait from 2 to 1 and retry_timeout from 10 to 9
+2026-11-25 15:12:21,951 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:12:22,548 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:24,031 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:25,033 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:26,027 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:27,012 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:28,031 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:29,028 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:30,031 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:31,016 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:32,016 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:33,072 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:33,169 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), a secondary, and following a leader (postgres-1)
+2026-11-25 15:12:33,269 INFO [/patroni/patroni/ha.py:1785 - process_unhealthy_cluster]: Cleaning up failover key after acquiring leader lock...
+2026-11-25 15:12:33,375 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: promoted self to leader by acquiring session lock
+server promoting
+2026-11-25 15:12:33,378 DEBUG [/patroni/patroni/postgresql/__init__.py:1265 - promote]: CallbackExecutor.call(['/venv/bin/python3', 'features/callback2.py', 'postgres-0', '5379', on_role_change, primary, 'batman'])
+2026-11-25 15:12:33,377 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:12:33,461 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: updated leader lock during promote
+2026-11-25 15:12:34,379 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-0
+2026-11-25 15:12:34,481 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: updated leader lock during promote
+2026-11-25 15:12:35,547 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:36,523 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock
+2026-11-25 15:12:37,430 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-0), the leader with the lock

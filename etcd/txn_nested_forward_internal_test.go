@@ -23,6 +23,17 @@ import (
 // than apply a transaction with a branch missing, while the follower's
 // ordinary writes keep working against it.
 func TestNestedTxnForwardedToLeader(t *testing.T) {
+	_, srv := twoNodeFollower(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	runNestedForwardChecks(t, ctx, srv)
+}
+
+// twoNodeFollower brings up a two-node cluster over a shared in-memory object
+// store and returns the follower together with an etcd Server in front of it,
+// so every write it takes is forwarded to the leader.
+func twoNodeFollower(t *testing.T) (*t4.Node, *Server) {
+	t.Helper()
 	shared := object.NewMem()
 	nodes := make([]*t4.Node, 2)
 	for i := range nodes {
@@ -53,9 +64,11 @@ func TestNestedTxnForwardedToLeader(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	srv := New(follower, nil, nil)
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
+	return follower, New(follower, nil, nil)
+}
+
+func runNestedForwardChecks(t *testing.T, ctx context.Context, srv *Server) {
+	t.Helper()
 
 	const key = "/service/pg/leader"
 	txn := func(value string) *etcdserverpb.TxnRequest {
@@ -130,5 +143,55 @@ func TestNestedTxnForwardedToLeader(t *testing.T) {
 		Key: []byte("/plain"), Value: []byte("v"),
 	}); err != nil {
 		t.Errorf("a plain write to a v1 leader must still work, got %v", err)
+	}
+}
+
+// TestBranchRangeDeleteForwardedToLeader is the same contract for the other
+// feature wire version 3 carries. It matters more than nesting does for a
+// leader that predates it: a range delete's op type is an ordinary single-key
+// delete, so such a leader would decode the op, ignore the range end, and
+// delete one key where the branch asked for a range.
+func TestBranchRangeDeleteForwardedToLeader(t *testing.T) {
+	follower, srv := twoNodeFollower(t)
+	_ = follower
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	for _, k := range []string{"/r/1", "/r/2", "/keep"} {
+		if _, err := srv.Put(ctx, &etcdserverpb.PutRequest{Key: []byte(k), Value: []byte("v")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	del := &etcdserverpb.TxnRequest{
+		Success: []*etcdserverpb.RequestOp{{
+			Request: &etcdserverpb.RequestOp_RequestDeleteRange{
+				RequestDeleteRange: &etcdserverpb.DeleteRangeRequest{
+					Key: []byte("/r/"), RangeEnd: []byte("/r0"),
+				},
+			},
+		}},
+	}
+	resp, err := srv.Txn(ctx, del)
+	if err != nil {
+		t.Fatalf("forwarded range delete: %v", err)
+	}
+	if got := resp.Responses[0].GetResponseDeleteRange().GetDeleted(); got != 2 {
+		t.Errorf("deleted = %d, want 2", got)
+	}
+	got, err := srv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/keep")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Kvs) != 1 {
+		t.Errorf("/keep was removed by a range that excludes it")
+	}
+
+	testhook.V1Leader.Store(true)
+	t.Cleanup(func() { testhook.V1Leader.Store(false) })
+	if _, err := srv.Txn(ctx, del); err == nil {
+		t.Fatal("a v1 leader accepted a branch range delete")
+	} else if !strings.Contains(err.Error(), "unknown to a v1.1 leader") {
+		t.Errorf("want a version rejection, got %v", err)
 	}
 }

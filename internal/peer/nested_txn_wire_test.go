@@ -32,6 +32,14 @@ func TestForwardWireVersionIsPerRequest(t *testing.T) {
 				Txn:  &peer.TxnReqMsg{Success: []peer.TxnOpMsg{put}},
 			}}},
 		}, 3},
+		{"range delete", &peer.ForwardRequest{
+			Op: peer.ForwardTxn,
+			TxnReq: &peer.TxnReqMsg{Success: []peer.TxnOpMsg{
+				// An ordinary delete op type: only the range end is new, so
+				// an older leader would delete one key out of the range.
+				{Type: 1, Key: "/a/", RangeEnd: "/a0"},
+			}},
+		}, 3},
 		{"nested in failure", &peer.ForwardRequest{
 			Op: peer.ForwardTxn,
 			TxnReq: &peer.TxnReqMsg{
@@ -73,6 +81,7 @@ func TestNestedTxnRoundTrip(t *testing.T) {
 					Conditions: []peer.TxnCondMsg{{Key: "/leader", Target: 2}},
 					Success: []peer.TxnOpMsg{
 						{Type: 0, Key: "/leader", Value: []byte("node1"), Lease: 7},
+						{Type: 1, Key: "/stale/", RangeEnd: "/stale0"},
 					},
 				},
 			}},
@@ -93,7 +102,10 @@ func TestNestedTxnRoundTrip(t *testing.T) {
 	if len(inner.Conditions) != 1 || string(inner.Conditions[0].Key) != "/leader" {
 		t.Fatalf("nested conditions = %+v", inner.Conditions)
 	}
-	if len(inner.Success) != 1 || inner.Success[0].Lease != 7 {
+	if len(inner.Success) != 2 || inner.Success[0].Lease != 7 {
 		t.Fatalf("nested ops = %+v", inner.Success)
+	}
+	if end := inner.Success[1].RangeEnd; string(end) != "/stale0" {
+		t.Fatalf("nested range end = %q, want /stale0", end)
 	}
 }

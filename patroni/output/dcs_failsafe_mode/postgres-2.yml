@@ -1,0 +1,89 @@
+bootstrap:
+  dcs:
+    loop_wait: 2
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      parameters:
+        archive_command: /venv/bin/python3 /patroni/features/archive-restore.py --mode
+          archive --dirname /patroni/data/wal_archive --filename %f --pathname %p
+        archive_mode: 'on'
+        restore_command: /venv/bin/python3 /patroni/features/archive-restore.py --mode
+          restore --dirname /patroni/data/wal_archive --filename %f --pathname %p
+        wal_keep_segments: 100
+      pg_hba:
+      - host replication replicator 127.0.0.1/32 md5
+      - host all all 0.0.0.0/0 md5
+      use_pg_rewind: true
+    retry_timeout: 10
+    ttl: 30
+  initdb:
+  - encoding: UTF8
+  - data-checksums
+  - auth: md5
+  - auth-host: md5
+  post_bootstrap: psql -w -c "SELECT 1"
+log:
+  format: '%(asctime)s %(levelname)s [%(pathname)s:%(lineno)d - %(funcName)s]: %(message)s'
+  loggers:
+    patroni.postgresql.callback_executor: DEBUG
+name: postgres-2
+postgresql:
+  authentication:
+    replication:
+      password: rep-pass
+      sslcert: /patroni/features/output/patroni.crt
+      sslkey: /patroni/features/output/patroni.key
+      sslmode: verify-ca
+      sslrootcert: /patroni/features/output/patroni.crt
+      username: replicator
+    rewind:
+      password: rewind_password
+      sslcert: /patroni/features/output/patroni.crt
+      sslkey: /patroni/features/output/patroni.key
+      sslmode: verify-ca
+      sslrootcert: /patroni/features/output/patroni.crt
+      username: rewind_user
+    superuser:
+      password: patroni
+      sslcert: /patroni/features/output/patroni.crt
+      sslkey: /patroni/features/output/patroni.key
+      sslmode: verify-ca
+      sslrootcert: /patroni/features/output/patroni.crt
+      username: postgres
+  basebackup:
+  - checkpoint: fast
+  callbacks:
+    on_role_change: /venv/bin/python3 features/callback2.py postgres-2 5373
+  connect_address: 127.0.0.1:5373
+  data_dir: /patroni/data/postgres-2
+  listen: 127.0.0.1:5373
+  parameters:
+    log_destination: csvlog
+    log_directory: /patroni/features/output/dcs_failsafe_mode
+    log_filename: postgres-2.log
+    log_min_messages: debug1
+    log_statement: all
+    logging_collector: 'on'
+    shared_buffers: 1MB
+    ssl: 'on'
+    ssl_ca_file: /patroni/features/output/patroni.crt
+    ssl_cert_file: /patroni/features/output/patroni.crt
+    ssl_key_file: /patroni/features/output/patroni.key
+    unix_socket_directories: /tmp
+  pg_hba:
+  - local all all trust
+  - local replication all trust
+  - hostssl replication replicator all md5 clientcert=verify-ca
+  - hostssl all all all md5 clientcert=verify-ca
+  pgpass: /tmp/pgpass_postgres-2
+  use_unix_socket: true
+  use_unix_socket_repl: true
+restapi:
+  connect_address: 127.0.0.1:8010
+  listen: 127.0.0.1:8010
+scope: batman
+tags:
+  clonefrom: false
+  noloadbalance: false
+  nostream: false
+  replicatefrom: postgres-0

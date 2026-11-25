@@ -1,0 +1,41 @@
+2026-11-25 15:11:01,704 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:11:01,708 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:11:01,793 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:11:01,794 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:11:01,843 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-1
+2026-11-25 15:11:01,888 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap from leader 'postgres-0'
+2026-11-25 15:11:02,667 INFO [/patroni/patroni/postgresql/bootstrap.py:285 - create_replica]: replica has been created using basebackup
+2026-11-25 15:11:02,668 INFO [/patroni/patroni/ha.py:523 - clone]: bootstrapped from leader 'postgres-0'
+2026-11-25 15:11:02.830 UTC [2157] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:11:02.830 UTC [2157] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:11:02.832 UTC [2157] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:11:02.835 UTC [2157] LOG:  redirecting log output to logging collector process
+2026-11-25 15:11:02.835 UTC [2157] HINT:  Future log output will appear in directory "/patroni/features/output/nostream_node".
+2026-11-25 15:11:02,839 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=2157
+/tmp:5377 - rejecting connections
+/tmp:5377 - rejecting connections
+2026-11-25 15:11:03,236 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-1
+2026-11-25 15:11:03,336 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: bootstrap from leader 'postgres-0' in progress
+/tmp:5377 - accepting connections
+2026-11-25 15:11:03,864 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: postgres-0; I am postgres-1
+2026-11-25 15:11:03,864 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:11:03,986 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:05,292 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:07,800 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:08,664 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:08,666 INFO [/patroni/patroni/postgresql/config.py:1239 - reload_config]: Changed wal_level from 'replica' to 'logical' (restart might be required)
+2026-11-25 15:11:08,667 INFO [/patroni/patroni/postgresql/config.py:1301 - reload_config]: Reloading PostgreSQL configuration.
+server signaled
+2026-11-25 15:11:10,422 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:12,373 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:14,456 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:16,407 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:18,904 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:20,757 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-0)
+2026-11-25 15:11:20,777 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni restapi connection to postgres
+2026-11-25 15:11:20,819 INFO [/patroni/patroni/ha.py:1178 - fetch_node_status]: Got response from postgres-2 https://127.0.0.1:8010/patroni: {"state": "running", "postmaster_start_time": "2026-11-25 15:11:12.727742+00:00", "role": "replica", "server_version": 170012, "xlog": {"received_location": 117440512, "replayed_location": 117440512, "replayed_timestamp": null, "paused": false}, "timeline": 1, "replication_state": "streaming", "cluster_unlocked": true, "dcs_last_seen": 1795619480, "tags": {"replicatefrom": "postgres-1"}, "database_system_identifier": "7712126856363755569", "patroni": {"version": "4.1.5", "scope": "batman", "name": "postgres-2"}}
+2026-11-25 15:11:20,866 WARNING [/patroni/patroni/ha.py:1181 - fetch_node_status]: Request failed to postgres-0: GET https://127.0.0.1:8008/patroni (HTTPSConnectionPool(host='127.0.0.1', port=8008): Max retries exceeded with url: /patroni (Caused by ProtocolError('Connection aborted.', OSError(9, 'Bad file descriptor'))))
+2026-11-25 15:11:20,963 INFO [/patroni/patroni/dcs/etcd3.py:1007 - attempt_to_acquire_leader]: Could not take out TTL lock
+2026-11-25 15:11:20,963 ERROR [/patroni/patroni/dcs/etcd3.py:654 - _build_cache]: watchprefix failed: ProtocolError("Connection broken: ConnectionResetError(104, 'Connection reset by peer')", ConnectionResetError(104, 'Connection reset by peer'))
+2026-11-25 15:11:20,968 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: following new leader after trying and failing to obtain lock
+2026-11-25 15:11:21,012 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-1), a secondary, and following a leader (postgres-2)

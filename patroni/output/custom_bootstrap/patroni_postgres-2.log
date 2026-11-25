@@ -1,0 +1,37 @@
+2026-11-25 15:08:43,219 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:08:43,223 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:08:43,312 INFO [/patroni/patroni/postgresql/config.py:1324 - reload_config]: No PostgreSQL configuration items changed, nothing to reload.
+2026-11-25 15:08:43,313 INFO [/patroni/patroni/api.py:1499 - __init__]: REST API thread_pool_size = 5
+2026-11-25 15:08:43,360 INFO [/patroni/patroni/ha.py:407 - has_lock]: Lock owner: None; I am postgres-2
+2026-11-25 15:08:43,448 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: trying to bootstrap a new cluster
+2026-11-25 15:08:43,449 INFO [/patroni/patroni/postgresql/bootstrap.py:198 - _custom_bootstrap]: Running custom bootstrap script: /venv/bin/python3 /patroni/features/backup_restore.py --sourcedir=/patroni/data/basebackup --sleep 0
+2026-11-25 15:08:43,539 INFO [/patroni/patroni/postgresql/config.py:1380 - effective_configuration]: max_connections value in pg_controldata: 101, in the global configuration: 100. pg_controldata value will be used. Setting 'Pending restart' flag
+2026-11-25 15:08:43.698 UTC [986] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:08:43.698 UTC [986] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:08:43.699 UTC [986] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:08:43.702 UTC [986] LOG:  redirecting log output to logging collector process
+2026-11-25 15:08:43.702 UTC [986] HINT:  Future log output will appear in directory "/patroni/features/output/custom_bootstrap".
+2026-11-25 15:08:43,709 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=986
+/tmp:5370 - rejecting connections
+/tmp:5370 - rejecting connections
+/tmp:5370 - accepting connections
+2026-11-25 15:08:44,733 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:08:44,834 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: running post_bootstrap
+ ?column? 
+----------
+        1
+(1 row)
+
+2026-11-25 15:08:45,879 INFO [/patroni/patroni/postgresql/connection.py:158 - close]: closed patroni connections to postgres
+2026-11-25 15:08:46.069 UTC [1028] DEBUG:  using armv8 crc32 hardware = 1
+2026-11-25 15:08:46.069 UTC [1028] DEBUG:  registering background worker "logical replication launcher"
+2026-11-25 15:08:46.070 UTC [1028] DEBUG:  mmap(10485760) with MAP_HUGETLB failed, huge pages disabled: Cannot allocate memory
+2026-11-25 15:08:46.073 UTC [1028] LOG:  redirecting log output to logging collector process
+2026-11-25 15:08:46.073 UTC [1028] HINT:  Future log output will appear in directory "/patroni/features/output/custom_bootstrap".
+2026-11-25 15:08:46,081 INFO [/patroni/patroni/postgresql/postmaster.py:273 - start]: postmaster pid=1028
+/tmp:5370 - accepting connections
+/tmp:5370 - accepting connections
+2026-11-25 15:08:46,091 INFO [/patroni/patroni/postgresql/connection.py:57 - get]: establishing a new patroni heartbeat connection to postgres
+2026-11-25 15:08:46,343 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: initialized a new cluster
+2026-11-25 15:08:48,285 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), the leader with the lock
+2026-11-25 15:08:50,143 INFO [/patroni/patroni/__main__.py:229 - _run_cycle]: no action. I am (postgres-2), the leader with the lock

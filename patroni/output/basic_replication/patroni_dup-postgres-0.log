@@ -1,0 +1,3 @@
+2026-11-25 15:08:10,815 INFO [/patroni/patroni/daemon.py:232 - abstract_main]: Using default value thread_stack_size = 524288
+2026-11-25 15:08:10,820 INFO [/patroni/patroni/__main__.py:70 - __init__]: Patroni global thread_pool_size = 5
+2026-11-25 15:08:10,955 CRITICAL [/patroni/patroni/__main__.py:149 - ensure_unique_name]: Can't start; there is already a node named 'postgres-0' running

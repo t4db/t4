@@ -545,11 +545,11 @@ func convertWriteOps(ops []*etcdserverpb.RequestOp, depth int) ([]t4.TxnOp, erro
 			if err := validateUserKey(key); err != nil {
 				return nil, err
 			}
-			// Only single-key deletes are supported in atomic txn branches.
-			if len(v.RequestDeleteRange.RangeEnd) > 0 {
-				return nil, status.Error(codes.Unimplemented, "range deletes are not supported in transaction branches")
+			rangeEnd := string(v.RequestDeleteRange.RangeEnd)
+			if err := validateBranchDeleteRange(key, rangeEnd); err != nil {
+				return nil, err
 			}
-			result = append(result, t4.TxnOp{Type: t4.TxnDelete, Key: key})
+			result = append(result, t4.TxnOp{Type: t4.TxnDelete, Key: key, RangeEnd: rangeEnd})
 		case *etcdserverpb.RequestOp_RequestRange:
 			// Range ops are read-only; handled separately in buildTxnResponses.
 		case *etcdserverpb.RequestOp_RequestTxn:
@@ -561,6 +561,28 @@ func convertWriteOps(ops []*etcdserverpb.RequestOp, depth int) ([]t4.TxnOp, erro
 		}
 	}
 	return result, nil
+}
+
+// validateBranchDeleteRange refuses a range delete inside a transaction
+// branch whose range could reach T4's own keys.
+//
+// A standalone DeleteRange filters those out as it lists, but a branch's
+// range is resolved in the core, under the write lock, where the reserved
+// prefixes are not a concept — so the range is checked here instead. Both
+// reserved prefixes ("\x00t4/" and "\x00auth/") live in the NUL-prefixed
+// region, and a range starting at or below it would sweep them in. Refusing
+// is the loud answer; etcd has no such keys and would delete everything, so
+// a client that really wants the whole keyspace gone should call DeleteRange
+// on its own, which filters and commits in batches.
+func validateBranchDeleteRange(key, rangeEnd string) error {
+	if rangeEnd == "" {
+		return nil // single-key delete
+	}
+	if key == "" || key[0] == 0 {
+		return status.Error(codes.InvalidArgument,
+			"a range delete in a transaction branch must start above the reserved \x00 prefix")
+	}
+	return nil
 }
 
 // convertTxn converts a nested TxnRequest. Its conditions are evaluated in
@@ -628,11 +650,13 @@ func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.Requ
 					},
 				})
 			case *etcdserverpb.RequestOp_RequestDeleteRange:
-				written = append(written, string(v.RequestDeleteRange.Key))
-				var deleted int64
-				if _, ok := deletedKeys[string(v.RequestDeleteRange.Key)]; ok {
-					deleted = 1
-				}
+				removed := deletedInRange(deletedKeys,
+					string(v.RequestDeleteRange.Key), string(v.RequestDeleteRange.RangeEnd))
+				// Every key this op removed, so a read later in the branch
+				// sees it gone rather than reading it from the snapshot the
+				// conditions were evaluated on.
+				written = append(written, removed...)
+				deleted := int64(len(removed))
 				responses = append(responses, &etcdserverpb.ResponseOp{
 					Response: &etcdserverpb.ResponseOp_ResponseDeleteRange{
 						ResponseDeleteRange: &etcdserverpb.DeleteRangeResponse{Header: hdr, Deleted: deleted},
@@ -681,6 +705,26 @@ func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.Requ
 		return responses, nil
 	}
 	return build(ops)
+}
+
+// deletedInRange names the keys the transaction removed within one delete
+// op's range, in order. For a range delete the count is what the response's
+// Deleted field reports, which a single-key lookup could not give.
+func deletedInRange(deletedKeys map[string]struct{}, key, rangeEnd string) []string {
+	if rangeEnd == "" {
+		if _, ok := deletedKeys[key]; ok {
+			return []string{key}
+		}
+		return nil
+	}
+	var names []string
+	for k := range deletedKeys {
+		if k >= key && (rangeEnd == "\x00" || k < rangeEnd) {
+			names = append(names, k)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 // branchHasPut reports whether the branch the transaction actually took holds
