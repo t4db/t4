@@ -22,6 +22,7 @@ These are the failure modes the binary refuses rather than silently corrupting s
 | Follower on an earlier release connecting to the leader of a database created with the meta keyspace | The leader refuses the stream with `wal_format_unsupported`. Upgrade the follower. |
 | Follower forwarding a write on an earlier peer forward wire version | The leader refuses it with `forward_wire_version_unsupported` rather than committing a key whose bytes the sender may already have replaced. Keyless forwards (read index, compaction, lease renewal) are unaffected. Upgrade the follower. |
 | Follower forwarding a transaction with nested ops or a branch range delete to a leader from before they existed | The leader refuses it with `forward_wire_version_unsupported` rather than applying the transaction with a branch missing, or deleting one key where a range was asked for. Only those transactions are refused; the follower's other writes still go through. Upgrade the leader. |
+| RBAC permission range that is not valid UTF-8, read by a release from before those were stored intact | The auth store refuses to load the role rather than enforce a different range: such a range is stored as a `{"base64": "..."}` object, and an earlier binary's string decoder rejects it. Roll the binary forward. Ranges that are valid UTF-8 — all of them in practice — are stored as before and read by either. |
 | WAL entry with an op code this binary does not know (local replay, S3 replay, or the leader's peer stream) | Replay or apply is refused. A follower stops replicating and logs an error instead of retrying or attempting a leader takeover; it does not apply the entry. Same remedy. |
 | Object store does not enforce the conditional PUTs leader election needs, and `--peer-listen` is set | Startup refuses with `ErrConditionalWritesIgnored`. Use a store that enforces them — on GCS that means `--gcs-bucket` rather than the S3-compatible endpoint — or run a single node. A single node starts with a warning. |
 | `--gateway-addr` names an address T4 cannot listen on | Startup refuses with the listen error. An address T4 derived on its own — the port below `--listen` when client TLS is on — is deliberately not fail-closed: T4 warns, falls back to sharing `--listen`, and keeps serving. |
@@ -212,7 +213,15 @@ Check these before downgrading:
    aws s3 ls s3://your-bucket/your-prefix/branches/
    ```
    Active branches pin their ancestor checkpoint format, so downgrading past that version is unsafe even if the latest checkpoint is older.
-3. Has any newly-added `t4.Config` field been used at runtime?
+3. Has any RBAC permission been granted over a key range that is not valid UTF-8? Only such a range is stored
+   differently by this release, and only then does an older binary refuse the role — it fails to decode it rather
+   than enforce a different range. Nothing else about auth changes, so a deployment whose permission ranges are
+   ordinary text can skip this.
+
+   Whoever granted the permission is the one who knows: ranges like these come from clients that use binary keys,
+   such as kine or juicefs, not from `etcdctl`. There is no offline check today — roles live in the meta keyspace,
+   which `t4 inspect` cannot list — so read them from a running node with `etcdctl role get`.
+4. Has any newly-added `t4.Config` field been used at runtime?
    See `git diff` of `config.go` between the two versions. Embedders relying on a newer field will get a compile error against the older library; the standalone binary silently ignores unknown CLI flags from a newer env-var set, which is a recipe for silent misconfiguration.
 
 If all three answers are "no", the downgrade is safe. If any answer is "yes", **roll forward to a release without the regression instead** — moving forward with a fix is always safer than moving backward.
