@@ -97,8 +97,16 @@ jobs:
 
       - name: Test (unit)
         shell: bash
+        # -timeout is per test binary, and the root package's -short suite
+        # measures 380-387 s on its own, so the 360 s this used to allow on
+        # Linux and macOS was below what it needs. When it tripped it did so
+        # as a timeout with no failing assertion, which reads like a flake or
+        # like the contributor's change broke something — it cost an outside
+        # contributor a round of that on #401. One value for every OS now,
+        # with room for the suite to grow; it only bounds how long a hung
+        # test takes to report.
         run: |
-          go test -short -timeout ${{ matrix.os == 'windows-latest' && '15m' || '360s' }} -count=1 \
+          go test -short -timeout 15m -count=1 \
             . \
             ./cmd/t4 \
             ./etcd \
