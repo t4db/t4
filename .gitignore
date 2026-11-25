@@ -1,3 +1,6 @@
 .idea
 .tmp
 bench/kwok/results/
+
+# Output of the Patroni acceptance suite (patroni/run.sh).
+/patroni/output/
