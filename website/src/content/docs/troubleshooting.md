@@ -9,7 +9,7 @@ description: Common T4 errors, diagnostics, and fixes — WAL issues, S3 problem
 
 ```bash
 curl http://localhost:9090/healthz   # 200 = started
-curl http://localhost:9090/readyz    # 200 = ready to serve reads
+curl http://localhost:9090/readyz    # 200 = can complete a linearizable read
 ```
 
 ### Inspect Prometheus metrics
@@ -101,12 +101,15 @@ rm -rf /var/lib/t4/  # wipe and restore from S3 on next start
 
 ### Node starts but never becomes ready (`/readyz` returns 503)
 
-The node is stuck in WAL replay or waiting for leader election.
+`/readyz` passes only once the node can complete a linearizable read within 2 seconds, so a 503 means the node is still starting, or that it cannot reach a leader and catch up to it.
 
 **Check:**
-- S3 connectivity (WAL replay reads old segments from S3)
-- If multi-node: are other nodes running? A follower won't become ready until it can sync with the leader.
+- S3 connectivity (WAL replay reads old segments from S3, and a leader needs S3 to keep its lease)
+- If multi-node: is there a leader, and can this node reach it on the peer port (default 3380)? A follower is not ready until it can.
+- Whether the follower is still catching up after a restart or a long disconnection
 - Disk space: WAL replay writes to local Pebble; if disk is full, replay will fail.
+
+If `/healthz` is 200 while `/readyz` is 503, the process is fine and the problem is reaching the leader; restarting the node will not help.
 
 ---
 

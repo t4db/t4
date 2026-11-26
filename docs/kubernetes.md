@@ -466,10 +466,12 @@ garbage collector works harder as memory fills instead of letting the container 
 | Endpoint | Meaning |
 |---|---|
 | `GET /healthz` | Node has started and is reachable; 503 once it has stopped on its own and must be restarted (`t4 run` also exits) |
-| `GET /readyz` | Node is ready to serve reads |
+| `GET /readyz` | Node can complete a linearizable read within 2 s: a leader holds its lease, a follower reaches the leader and has applied up to it. 503 otherwise, and once the node has stopped |
 | `GET /healthz/leader` | Returns 200 only if this pod is the current leader (useful for proxy routing) |
 
 Configure probes with a longer `initialDelaySeconds` on multi-node deployments to allow checkpoint restore and WAL replay to complete before the pod is declared ready.
+
+Readiness depends on the leader, as etcd's does, so a follower cut off from it drops out of the Service endpoints instead of taking requests it cannot answer. The flip side is that a leader outage longer than the probe's failure budget (3 × 5 s in the chart) takes every replica out at once. With `config.readConsistency: serializable` you may prefer to keep serving possibly stale reads through that: point the readiness probe at `/readyz?exclude=linearizable_read`, which etcd accepts too, and readiness only fails once the node has stopped.
 
 ---
 
