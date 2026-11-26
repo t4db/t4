@@ -20,7 +20,7 @@ This document describes how T4 behaves under various failure conditions, what da
 - No data is lost because nothing was durably stored.
 
 **Recovery:**
-- A follower wins election in ~7–10 s (it waits 7 s after it last heard the leader, and until its reconnect attempts are exhausted; ~0.3 s with a graceful shutdown broadcast).
+- A follower wins election in ~7 s (it may take over 7 s after it last heard the leader, and attempts it then; ~0.3 s with a graceful shutdown broadcast).
 - The new leader loads the latest S3 checkpoint and replays any WAL segments ahead of it.
 - Clients retry against the new leader.
 
@@ -137,7 +137,7 @@ A restart during the outage is also safe: with local data present, the node star
 
 **Scenario:** a follower cannot reach the leader or S3, but the leader can still reach S3 and the other followers.
 
-1. Follower exhausts `--follower-max-retries` reconnect attempts.
+1. Follower has not heard the leader for 7 s (or exhausts `--follower-max-retries` reconnect attempts, if it never heard it).
 2. Follower reads the S3 lock. The leader noticed the silence through missed heartbeats and renews the lock every 2 s, so the follower finds it fresh and **does not promote**.
 3. Leader continues writing with the remaining nodes.
 4. When the partition heals, the follower reconnects and resyncs from the leader's ring buffer.
@@ -223,7 +223,7 @@ T4_CHAOS_ROUNDS=100 go test -run TestChaos -timeout 600s
 |---|---|
 | Graceful leader shutdown (broadcast) | ~12 ms |
 | Graceful leader shutdown, follower missed the broadcast | next takeover attempt (the released lock carries no liveness to wait out) |
-| Crash failover (default settings) | ~7–10 s (7 s after followers last heard the leader, and their reconnect attempts exhausted) |
+| Crash failover (default settings) | ~7 s (7 s after followers last heard the leader) |
 | Follower reconnect after network heal | < 1 s |
 
 Tested by `TestFailoverTime`.

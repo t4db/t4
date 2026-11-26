@@ -29,9 +29,15 @@ func (n *Node) followLoop(bgCtx context.Context) {
 	// seq/rev split, Compact entries consume sequences but not revisions),
 	// so seed from LastSequence rather than CurrentRevision.
 	fromRev := n.db.Load().LastSequence() + 1
+	// lastTakeover is when the last non-graceful takeover attempt began.
+	var lastTakeover time.Time
 
 	for {
 		cli.SetLeaderGoneCheck(func(ctx context.Context) bool { return n.lockReleased(ctx, lock) })
+		// A follower that heard the leader may take over knownTakeoverDelay
+		// after it last did (see mayTakeOver); try then, not only once
+		// FollowerMaxRetries reconnects have failed.
+		cli.SetTakeoverAfter(knownTakeoverDelay)
 		err := cli.Follow(
 			bgCtx,
 			fromRev,
@@ -127,6 +133,17 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			if peer.IsLeaderShutdown(err) {
 				n.log.Infof("t4: leader shut down gracefully — attempting immediate election takeover")
 			} else {
+				// A refused attempt hands back a client that may give up on
+				// its first failed dial, so space attempts out: each one
+				// reads the lock from object storage.
+				if wait := peer.FollowerRetryInterval - time.Since(lastTakeover); wait > 0 {
+					select {
+					case <-time.After(wait):
+					case <-bgCtx.Done():
+						return
+					}
+				}
+				lastTakeover = time.Now()
 				n.log.Warnf("t4: leader unreachable — attempting election takeover")
 			}
 			newCli, promoted := n.attemptPromotion(bgCtx, lock, peer.IsLeaderShutdown(err))

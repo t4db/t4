@@ -180,9 +180,10 @@ t4 run \
   local reads.
 - Leader and followers exchange heartbeats on the WAL stream every 500 ms; either side drops a stream it has not heard
   from for 2 s.
-- A follower that observes `--follower-max-retries` consecutive stream failures checks the lock. If it heard the
-  leader until recently, it may take over once it has not heard it for 7 s and the lock has not been renewed for 6 s;
-  any other node waits until the lock's validity has passed. The takeover uses `If-Match: <etag>` — only the candidate
+- A follower whose stream fails checks the lock once it has not heard the leader for 7 s, or after
+  `--follower-max-retries` consecutive stream failures if it never heard it. If it heard the leader until recently, it
+  may take over once it has not heard it for 7 s and the lock has not been renewed for 6 s; any other node waits until
+  the lock's validity has passed. The takeover uses `If-Match: <etag>` — only the candidate
   that read the same ETag wins the race, and the check is made on that same record.
 - The leader renews the lock by reading it **with its ETag** and — if still the owner — rewriting it with
   `If-Match: <etag>`. If the renewal is rejected (`ErrPreconditionFailed`), a new leader has taken over: the old leader

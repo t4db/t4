@@ -237,7 +237,9 @@ type Config struct {
 	LeaderWatchInterval time.Duration
 
 	// FollowerMaxRetries is the number of consecutive stream failures a follower
-	// tolerates before attempting a TakeOver election.
+	// that never heard the leader's heartbeats tolerates before attempting a
+	// TakeOver election. One that heard them attempts it once it has not heard
+	// the leader for 7 seconds, the earliest a takeover may succeed.
 	// Default: 5.
 	FollowerMaxRetries int
 
