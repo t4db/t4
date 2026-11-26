@@ -93,6 +93,19 @@ endpoints, the websocket watch, and why grpc-web cannot work.
 
 To keep exactly the pre-upgrade surface — one port, gRPC only — start with `--enable-grpc-gateway=false`.
 
+## `/readyz` requires a linearizable read
+
+`/readyz` used to return 200 whenever the node had a local revision, which is true from the moment it opens — so it
+never failed, not even once the node had stopped. It now returns 200 only when the node can complete a linearizable read
+within 2 seconds: a leader must hold its lease, and a follower must reach the leader and apply up to it. This is what
+etcd's `/readyz` checks.
+
+A follower cut off from its leader now leaves the Kubernetes Service endpoints instead of accepting requests it cannot
+answer. The flip side is that a leader outage longer than the probe's failure budget takes every replica out at once.
+Deployments that read with `--read-consistency=serializable` and would rather keep serving possibly stale reads through
+that can point the probe at `/readyz?exclude=linearizable_read`, as on etcd. `/healthz`, the liveness endpoint, is
+unchanged.
+
 ## Transaction branches: nesting and range deletes
 
 `Txn` branches gained two things this release, and both are resolved on the

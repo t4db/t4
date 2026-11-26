@@ -242,4 +242,4 @@ t4:
 ```
 
 - `/healthz` — returns 200 once the node has started
-- `/readyz` — returns 200 when the node is ready to serve reads (after WAL replay and election)
+- `/readyz` — returns 200 when the node can complete a linearizable read: after WAL replay and election, and only while it can reach the leader

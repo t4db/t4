@@ -271,6 +271,10 @@ livenessProbe:
   timeoutSeconds: 5
   failureThreshold: 3
 
+# /readyz requires a linearizable read, so a follower that cannot reach the
+# leader leaves the Service endpoints. With config.readConsistency:
+# serializable, /readyz?exclude=linearizable_read keeps replicas in through a
+# leader outage, serving possibly stale reads.
 readinessProbe:
   httpGet:
     path: /readyz

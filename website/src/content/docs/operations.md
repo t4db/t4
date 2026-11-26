@@ -522,7 +522,7 @@ t4 run --metrics-addr 0.0.0.0:9090 ...
 |----------------|------------------------------------------------------------------------------|
 | `GET /metrics` | Prometheus metrics                                                           |
 | `GET /healthz` | 200 once the node has started; 503 once it has stopped and must be restarted |
-| `GET /readyz`  | 200 when the node is ready to serve reads                                    |
+| `GET /readyz`  | 200 when the node can complete a linearizable read within 2 s; `?exclude=linearizable_read` skips that check |
 
 A node stops on its own when it cannot go on without a restart: a leader whose
 lock another node took over, or a follower that cannot catch up with its

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -987,6 +988,11 @@ func splitCommaList(v string) []string {
 	return out
 }
 
+// readinessTimeout bounds the linearizable read behind /readyz. It sits below
+// the Helm chart's 3 s probe timeout, so a stalled read reports 503 rather
+// than leaving the kubelet to time the probe out.
+const readinessTimeout = 2 * time.Second
+
 func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled bool) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Gatherer(), promhttp.HandlerOpts{}))
@@ -1012,12 +1018,42 @@ func serveMetrics(ctx context.Context, addr string, node *t4.Node, pprofEnabled 
 		}
 		http.Error(w, "not leader", http.StatusServiceUnavailable)
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if node.CurrentRevision() >= 0 {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		stopped := func() bool {
+			select {
+			case <-node.Done():
+				return true
+			default:
+				return false
+			}
 		}
+		if stopped() {
+			http.Error(w, "not ready: node stopped", http.StatusServiceUnavailable)
+			return
+		}
+		// Ready means able to serve a linearizable read, as on etcd, whose
+		// /readyz runs a linearizable_read check: a leader proves its lease,
+		// a follower completes one read index with the leader and applies up
+		// to it. A local revision alone says nothing — a follower cut off from
+		// its leader still has one, and would stay in the Service endpoints.
+		//
+		// etcd's exclude=linearizable_read skips it, for deployments that
+		// would rather keep serving possibly stale reads through a leader
+		// outage than drop every replica out of the endpoints at once.
+		if !slices.Contains(r.URL.Query()["exclude"], "linearizable_read") {
+			ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
+			defer cancel()
+			if _, err := node.LinearizableRevision(ctx); err != nil {
+				http.Error(w, "not ready: linearizable read failed", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		// The read can race a shutdown; a node that stopped meanwhile is not ready.
+		if stopped() {
+			http.Error(w, "not ready: node stopped", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	})
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
