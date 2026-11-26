@@ -23,14 +23,14 @@ func BenchmarkSegmentCommit(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				defer os.RemoveAll(d)
+				defer func() { _ = os.RemoveAll(d) }()
 				dir = d
 			}
 			sw, err := OpenSegmentWriter(dir, 1, 1)
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer sw.Close()
+			defer func() { _ = sw.Close() }()
 			if prealloc {
 				sw.Preallocate()
 			}
