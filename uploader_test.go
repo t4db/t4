@@ -213,3 +213,47 @@ func TestUploaderFallsBackToPlainPut(t *testing.T) {
 		t.Fatalf("object content = %q, want %q", got, "entries")
 	}
 }
+
+// A segment that was not sealed, such as one left by a crash, a sync upload's
+// or a follower's, can end in a preallocated zero-filled tail. Only its
+// entries reach object storage, and comparing it with a published copy
+// ignores the tail.
+func TestUploaderSkipsPreallocatedTail(t *testing.T) {
+	dir := t.TempDir()
+	sw, err := wal.OpenSegmentWriter(dir, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sw.Preallocate()
+	for i := range 5 {
+		if err := sw.Append(&wal.Entry{Revision: int64(1 + i), Term: 1, Op: wal.OpCreate, Key: "k", Value: []byte("v")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dataLen := sw.Size()
+	if err := sw.Close(); err != nil { // not sealed: the tail stays
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(sw.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) <= dataLen {
+		t.Fatalf("segment is %d bytes for %d of entries: nothing preallocated", len(raw), dataLen)
+	}
+
+	store := object.NewMem()
+	ctx := context.Background()
+	if err := makeUploader(store, NoopLogger)(ctx, sw.Path(), "wal/1/1"); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if got := readObject(t, store, "wal/1/1"); got != string(raw[:dataLen]) {
+		t.Fatalf("object is %d bytes, want the %d bytes of entries", len(got), dataLen)
+	}
+
+	// The same entries published by another writer: a conflict that succeeds.
+	again := writeSegment(t, dir, filepath.Base(sw.Path()), string(raw))
+	if err := makeUploader(store, NoopLogger)(ctx, again, "wal/1/1"); err != nil {
+		t.Fatalf("re-upload of a published segment with a zero-filled tail: %v", err)
+	}
+}

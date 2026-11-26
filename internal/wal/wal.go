@@ -208,6 +208,11 @@ func (w *WAL) ensureActiveLocked(firstSeq int64) error {
 	if err != nil {
 		return err
 	}
+	// A sync-upload segment holds one batch and is sealed right after it, so
+	// preallocating it would only write zeros.
+	if !(w.syncUpload && w.uploader != nil) {
+		sw.Preallocate()
+	}
 	w.active = sw
 	return nil
 }

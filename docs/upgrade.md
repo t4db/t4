@@ -231,10 +231,14 @@ Check these before downgrading:
    Whoever granted the permission is the one who knows: ranges like these come from clients that use binary keys,
    such as kine or juicefs, not from `etcdctl`. There is no offline check today — roles live in the meta keyspace,
    which `t4 inspect` cannot list — so read them from a running node with `etcdctl role get`.
-4. Has any newly-added `t4.Config` field been used at runtime?
+4. Did a node crash while running this release? The WAL segment it was writing then ends in a preallocated
+   zero-filled tail. An older binary still replays its entries, but logs `partial local segment` and would upload the
+   tail with them. Start this release on that node once and stop it cleanly before downgrading: startup uploads the
+   leftover segment without its tail, and a clean stop seals the active segment, which trims it.
+5. Has any newly-added `t4.Config` field been used at runtime?
    See `git diff` of `config.go` between the two versions. Embedders relying on a newer field will get a compile error against the older library; the standalone binary silently ignores unknown CLI flags from a newer env-var set, which is a recipe for silent misconfiguration.
 
-If all three answers are "no", the downgrade is safe. If any answer is "yes", **roll forward to a release without the regression instead** — moving forward with a fix is always safer than moving backward.
+If every answer is "no", the downgrade is safe. If any answer is "yes", **roll forward to a release without the regression instead** — moving forward with a fix is always safer than moving backward.
 
 ## What to do when fail-closed fires
 

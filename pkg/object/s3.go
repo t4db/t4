@@ -238,12 +238,18 @@ func (s *S3Store) Put(ctx context.Context, key string, r io.Reader) error {
 }
 
 // sniffReaderSize returns the remaining byte count of r when it exposes a
-// cheap length (Len()-style readers and *os.File). Otherwise -1, which makes
-// minio-go fall back to multipart-streaming PutObject.
+// cheap length (Len()-style readers, *io.SectionReader and *os.File).
+// Otherwise -1, which makes minio-go fall back to multipart-streaming
+// PutObject.
 func sniffReaderSize(r io.Reader) int64 {
 	type lenReader interface{ Len() int }
 	if lr, ok := r.(lenReader); ok {
 		return int64(lr.Len())
+	}
+	if sr, ok := r.(*io.SectionReader); ok {
+		if cur, err := sr.Seek(0, io.SeekCurrent); err == nil {
+			return sr.Size() - cur
+		}
 	}
 	if f, ok := r.(*os.File); ok {
 		if fi, err := f.Stat(); err == nil {

@@ -56,6 +56,12 @@ func segMagic(version int) string {
 }
 
 // SegmentWriter appends entries to a local WAL segment file.
+//
+// With preallocation on, the file grows in zero-filled steps ahead of the
+// entries, and each step is fsynced once. An append then overwrites blocks
+// that are already allocated, and its sync can skip the metadata update that
+// growing the file costs on every append otherwise. Readers stop at the
+// zero-filled tail (see ReadEntryVersion), and DataLen finds where it starts.
 type SegmentWriter struct {
 	f          *os.File
 	path       string
@@ -63,11 +69,23 @@ type SegmentWriter struct {
 	firstRev   int64
 	version    int // format written in the header
 	size       int64
+	alloc      int64 // file length: size plus any zero-filled tail
+	prealloc   bool
 	entryCount int
 	sealed     bool // true once Seal() has been called successfully
 	// buf is scratch space for encoding frames, reused across appends.
 	buf []byte
 }
+
+// Preallocation grows a segment by its current length, between these bounds:
+// small segments, such as those of a mostly idle node, stay small, and a busy
+// one fsyncs a growth step once per 4 MiB of entries.
+const (
+	minPreallocStep = 64 << 10
+	maxPreallocStep = 4 << 20
+)
+
+var zeroBlock [minPreallocStep]byte
 
 // maxRetainedFrameBuf caps the scratch buffer a SegmentWriter keeps between
 // appends, so one large value doesn't pin its size for the segment's life.
@@ -112,6 +130,45 @@ func (sw *SegmentWriter) writeHeader() error {
 		return fmt.Errorf("wal: write segment header: %w", err)
 	}
 	sw.size = segHeaderLen
+	sw.alloc = segHeaderLen
+	return nil
+}
+
+// Preallocate makes later appends grow the file in zero-filled steps.
+func (sw *SegmentWriter) Preallocate() { sw.prealloc = true }
+
+// write writes a frame at the end of the entries, growing the file first if
+// preallocation is on and the frame does not fit.
+func (sw *SegmentWriter) write(b []byte) error {
+	if sw.prealloc && sw.size+int64(len(b)) > sw.alloc {
+		if err := sw.grow(int64(len(b))); err != nil {
+			return err
+		}
+	}
+	if _, err := sw.f.WriteAt(b, sw.size); err != nil {
+		return err
+	}
+	sw.size += int64(len(b))
+	sw.alloc = max(sw.alloc, sw.size)
+	return nil
+}
+
+// grow zero-fills the file so that at least need more bytes fit, and fsyncs
+// the new length.
+func (sw *SegmentWriter) grow(need int64) error {
+	step := min(max(sw.alloc, minPreallocStep), maxPreallocStep)
+	end := max(sw.size+need, sw.alloc+step)
+	for off := sw.alloc; off < end; {
+		n := min(int64(len(zeroBlock)), end-off)
+		if _, err := sw.f.WriteAt(zeroBlock[:n], off); err != nil {
+			return fmt.Errorf("wal: preallocate segment %q: %w", sw.path, err)
+		}
+		off += n
+	}
+	if err := sw.f.Sync(); err != nil {
+		return fmt.Errorf("wal: fsync preallocated segment %q: %w", sw.path, err)
+	}
+	sw.alloc = end
 	return nil
 }
 
@@ -138,14 +195,12 @@ func (sw *SegmentWriter) Append(e *Entry) error {
 	if err := sw.ensureFormat(e); err != nil {
 		return err
 	}
-	b := sw.encode(e)
-	if _, err := sw.f.Write(b); err != nil {
+	if err := sw.write(sw.encode(e)); err != nil {
 		return fmt.Errorf("wal: write entry rev=%d: %w", e.Revision, err)
 	}
-	if err := sw.f.Sync(); err != nil {
+	if err := osfile.Datasync(sw.f); err != nil {
 		return fmt.Errorf("wal: fsync rev=%d: %w", e.Revision, err)
 	}
-	sw.size += int64(len(b))
 	sw.entryCount++
 	return nil
 }
@@ -156,18 +211,17 @@ func (sw *SegmentWriter) AppendNoSync(e *Entry) error {
 	if err := sw.ensureFormat(e); err != nil {
 		return err
 	}
-	b := sw.encode(e)
-	if _, err := sw.f.Write(b); err != nil {
+	if err := sw.write(sw.encode(e)); err != nil {
 		return fmt.Errorf("wal: write entry rev=%d: %w", e.Revision, err)
 	}
-	sw.size += int64(len(b))
 	sw.entryCount++
 	return nil
 }
 
-// Sync fsyncs the segment file.
+// Sync makes the appended entries durable. fdatasync is enough: it also
+// flushes a length change, which reading the entries back depends on.
 func (sw *SegmentWriter) Sync() error {
-	return sw.f.Sync()
+	return osfile.Datasync(sw.f)
 }
 
 // segMark is a point in a segment that rollback returns it to.
@@ -201,6 +255,7 @@ func (sw *SegmentWriter) rollback(m segMark) error {
 		return fmt.Errorf("wal: fsync segment rollback: %w", err)
 	}
 	sw.size = m.size
+	sw.alloc = m.size
 	sw.entryCount = m.entryCount
 	sw.version = m.version
 	return nil
@@ -215,6 +270,14 @@ func (sw *SegmentWriter) Close() error { return sw.f.Close() }
 func (sw *SegmentWriter) Seal() error {
 	if sw.sealed {
 		return nil
+	}
+	// A sealed segment holds its entries only. Without the fsync a crash can
+	// leave the zero-filled tail, which readers and DataLen skip.
+	if sw.alloc > sw.size {
+		if err := sw.f.Truncate(sw.size); err != nil {
+			return fmt.Errorf("wal: trim segment %q: %w", sw.path, err)
+		}
+		sw.alloc = sw.size
 	}
 	if err := sw.f.Close(); err != nil {
 		return err
@@ -259,6 +322,25 @@ func ParseSegmentName(name string) (term uint64, firstRev int64, ok bool) {
 		return 0, 0, false
 	}
 	return t, r, true
+}
+
+// DataLen returns the length of a segment's header and entry frames: the
+// segment's size, less a zero-filled preallocated tail. Uploads and byte
+// comparisons use it so that the tail never reaches object storage.
+func DataLen(r io.ReaderAt, size int64) (int64, error) {
+	off := int64(segHeaderLen)
+	var hdr [8]byte
+	for off+int64(len(hdr)) <= size {
+		if _, err := r.ReadAt(hdr[:], off); err != nil {
+			return 0, fmt.Errorf("wal: read frame header at %d: %w", off, err)
+		}
+		n := binary.BigEndian.Uint32(hdr[0:4])
+		if n == 0 {
+			return off, nil
+		}
+		off += int64(len(hdr)) + int64(n)
+	}
+	return size, nil
 }
 
 // ── SegmentReader ──────────────────────────────────────────────────────────────

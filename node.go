@@ -1966,11 +1966,20 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 			log.Errorf("uploader: local file %q is gone AND %q is not in S3 — segment data is lost", localPath, objectKey)
 			return fmt.Errorf("uploader: open %q: %w", localPath, err)
 		}
+		// Upload the entries only: a segment that was not sealed (a crash
+		// leftover, a sync upload, a follower's) may end in a preallocated
+		// zero-filled tail.
+		body, err := segmentBody(f)
+		if err != nil {
+			_ = f.Close()
+			metrics.WALUploadErrors.Inc()
+			return fmt.Errorf("uploader: %q: %w", localPath, err)
+		}
 		start := time.Now()
 		if cond != nil {
-			err = cond.PutIfAbsent(ctx, objectKey, f)
+			err = cond.PutIfAbsent(ctx, objectKey, body)
 		} else {
-			err = obj.Put(ctx, objectKey, f)
+			err = obj.Put(ctx, objectKey, body)
 		}
 		// Closed before the file is removed: Windows refuses to remove an
 		// open file.
@@ -1997,6 +2006,19 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 	}
 }
 
+// segmentBody returns the header and entry frames of the segment open in f.
+func segmentBody(f *os.File) (*io.SectionReader, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	n, err := wal.DataLen(f, fi.Size())
+	if err != nil {
+		return nil, err
+	}
+	return io.NewSectionReader(f, 0, n), nil
+}
+
 // segmentPublished reports whether the object at objectKey already holds every
 // entry of the local segment at localPath, i.e. the local bytes are a prefix of
 // (or equal to) the object's. It returns a wal.ErrSegmentConflict error if not.
@@ -2005,6 +2027,11 @@ func segmentPublished(ctx context.Context, obj object.Store, localPath, objectKe
 	if err != nil {
 		return fmt.Errorf("read %q to compare with existing %q: %w", localPath, objectKey, err)
 	}
+	n, err := wal.DataLen(bytes.NewReader(local), int64(len(local)))
+	if err != nil {
+		return fmt.Errorf("read %q to compare with existing %q: %w", localPath, objectKey, err)
+	}
+	local = local[:n]
 	rc, err := obj.Get(ctx, objectKey)
 	if err != nil {
 		return fmt.Errorf("read existing %q to compare with %q: %w", objectKey, localPath, err)
