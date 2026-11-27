@@ -825,9 +825,10 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 	hi := logKey(compactRev + 1)
 
 	// Walk the compacted history backwards. The first record seen for a key is
-	// its newest version at or before compactRev and must be retained as the
-	// anchor for historical reads at and immediately after the watermark. Any
-	// earlier record for the same key can be removed.
+	// its newest version at or before compactRev and is retained as the anchor
+	// for historical reads at and immediately after the watermark, unless it is
+	// a deletion the watermark has passed, which anchors nothing. Any earlier
+	// record for the same key can be removed.
 	//
 	// This is deliberately a single O(entries) pass. The old implementation
 	// scanned the remaining history for every entry to find a later version,
@@ -863,7 +864,12 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 		// Looking a []byte up in a map does not allocate; only the insert
 		// does.
 		_, seen := link[string(r.key)]
-		keep := !seen
+		// A deletion strictly below the watermark anchors nothing: the key is
+		// absent at the watermark, so no read or watch there can reach it, and
+		// keeping it grew the log for every key a create/delete workload
+		// churned through. At the watermark itself the record stays, because
+		// that revision is still watchable.
+		keep := !seen && (!r.delete || entryRev == compactRev)
 		// The record that links below the window is the key's oldest one here,
 		// and a chain of versions is contiguous, so exactly one record per key
 		// has a PrevRevision under lo. Writing the link only for that one, and
