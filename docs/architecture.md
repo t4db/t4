@@ -96,6 +96,8 @@ Every write goes through the WAL before it touches the database:
 
 In single-node mode (no peers configured) steps 3–5 are skipped.
 
+A segment uploaded in the background is preallocated: it grows in zero-filled steps (64 KiB, doubling up to 4 MiB) ahead of its entries, each step fsynced once, so an append overwrites allocated blocks and its sync is an `fdatasync` that skips the file-size update. A sealed or uploaded segment never includes the zero-filled tail; readers stop at it.
+
 WAL segment rotation is triggered by size (default 50 MB) or age (default 10 s). Sealed segments are uploaded to S3 and deleted locally once the upload confirms. Upload timing depends on `WALSyncUpload`: in the default (`true`) mode the upload blocks the write acknowledgement, guaranteeing durability even on ephemeral storage; with `WALSyncUpload: false` uploads are asynchronous and run every `SegmentMaxAge`, reducing write latency at the cost of a small durability window. In cluster mode the default is still `true` — the quorum commit already provides durability, but sync upload removes the need for any local persistence guarantee.
 
 ### Segment naming

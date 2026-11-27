@@ -338,6 +338,11 @@ func ReadEntryVersion(r io.Reader, version int) (*Entry, error) {
 
 	payloadLen := binary.BigEndian.Uint32(hdr[0:4])
 	wantCRC := binary.BigEndian.Uint32(hdr[4:8])
+	if payloadLen == 0 {
+		// No entry is empty: this is the zero-filled tail of a preallocated
+		// segment, past its last entry.
+		return nil, io.EOF
+	}
 
 	payload := make([]byte, payloadLen)
 	if _, err := io.ReadFull(r, payload); err != nil {
