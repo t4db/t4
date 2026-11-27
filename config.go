@@ -112,6 +112,16 @@ type Config struct {
 	// Required.
 	DataDir string
 
+	// InlineValueMax stores values up to this many bytes in their key's index
+	// entry as well as the change log, so Get and List read them in key order
+	// instead of one log lookup per key: a range of large values (database
+	// pages, say) reads sequentially rather than at random. Live values then
+	// take about twice the space and write bytes. Entries are converted as
+	// keys are next written; turning it off later needs no migration.
+	//
+	// 0, the default, inlines nothing.
+	InlineValueMax int
+
 	// PebbleOptions are appended to T4's Pebble options before opening the
 	// local state machine. This is an expert hook; production deployments
 	// normally leave it empty.
