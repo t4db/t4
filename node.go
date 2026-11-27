@@ -706,6 +706,7 @@ func Open(cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("t4: open store: %w", err)
 	}
 	db.SetHistoryRingSize(cfg.HistoryRingSize)
+	db.SetInlineValueMax(cfg.InlineValueMax)
 	if sstUp != nil {
 		if len(inheritedSSTs) > 0 {
 			sstUp.SetInherited(inheritedSSTs)
@@ -899,6 +900,7 @@ func Open(cfg Config) (*Node, error) {
 				return nil, fmt.Errorf("t4: reopen store after GC-gap fix: %w", rerr)
 			}
 			freshDB.SetHistoryRingSize(cfg.HistoryRingSize)
+			freshDB.SetInlineValueMax(cfg.InlineValueMax)
 			if sstUp != nil {
 				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer reconcileCancel()

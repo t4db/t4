@@ -167,25 +167,35 @@ func encodeCurrentRev(rev int64) []byte {
 //
 //	v1: rev(8)
 //	v2: rev(8) + createRev(8) + version(8) + sub(2)
+//	v3: v2 + prevRev(8) + lease(8) + value
 //
 // v2 carries what a keys-only read returns, so such reads are served from the
 // index without loading the log record, and sub locates the record directly:
 // the sub-op index of a txn record at logKeyWithSub(rev, sub), or idxSubNone
-// for a single-op record at logKey(rev).
+// for a single-op record at logKey(rev). v3, written for values up to
+// SetInlineValueMax, carries the rest of the record, so full reads skip the
+// log too; binaries that know only v2 read its first 26 bytes as v2.
 const (
 	idxValueSizeV2 = 26
+	idxValueSizeV3 = idxValueSizeV2 + 16
 	// idxSubNone marks a single-op record. A txn holds at most 65535 ops, so
 	// sub-op indexes stop at 65534 and never collide with it.
 	idxSubNone = uint16(0xFFFF)
 )
 
-// idxEntry is a decoded index value. Only rev is set for a v1 value.
+// idxEntry is a decoded index value. Only rev is set for a v1 value; the
+// fields after v2 only for a v3 value, whose value aliases the decoded buffer.
 type idxEntry struct {
 	rev            int64
 	createRevision int64
 	version        int64
 	sub            uint16
 	v2             bool
+
+	prevRevision int64
+	lease        int64
+	value        []byte
+	inline       bool
 }
 
 func encodeIdx(rev, createRev, version int64, sub uint16) []byte {
@@ -197,6 +207,17 @@ func encodeIdx(rev, createRev, version int64, sub uint16) []byte {
 	return b
 }
 
+// encodeIdxInline encodes a v3 index value: r's record inline after the v2
+// fields.
+func encodeIdxInline(rev int64, sub uint16, r *record) []byte {
+	b := make([]byte, idxValueSizeV3+len(r.value))
+	copy(b, encodeIdx(rev, r.createRevision, r.version, sub))
+	binary.BigEndian.PutUint64(b[26:34], uint64(r.prevRevision))
+	binary.BigEndian.PutUint64(b[34:42], uint64(r.lease))
+	copy(b[idxValueSizeV3:], r.value)
+	return b
+}
+
 func decodeIdx(b []byte) idxEntry {
 	e := idxEntry{rev: decodeRev(b)}
 	if len(b) >= idxValueSizeV2 {
@@ -204,6 +225,12 @@ func decodeIdx(b []byte) idxEntry {
 		e.version = int64(binary.BigEndian.Uint64(b[16:24]))
 		e.sub = binary.BigEndian.Uint16(b[24:26])
 		e.v2 = true
+	}
+	if len(b) >= idxValueSizeV3 {
+		e.prevRevision = int64(binary.BigEndian.Uint64(b[26:34]))
+		e.lease = int64(binary.BigEndian.Uint64(b[34:42]))
+		e.value = b[idxValueSizeV3:]
+		e.inline = true
 	}
 	return e
 }

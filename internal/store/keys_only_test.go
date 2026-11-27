@@ -182,17 +182,32 @@ func TestKeysOnlyListSkipsLog(t *testing.T) {
 }
 
 // TestIdxV2ReadableByRevisionOnlyDecoder pins rollback safety: binaries that
-// predate v2 index values decode only the leading revision.
+// predate v2 index values decode only the leading revision, and binaries that
+// predate v3 decode its first 26 bytes as v2.
 func TestIdxV2ReadableByRevisionOnlyDecoder(t *testing.T) {
 	v := encodeIdx(42, 7, 3, 5)
 	if got := decodeRev(v); got != 42 {
 		t.Fatalf("decodeRev(v2) = %d, want 42", got)
 	}
-	if got := decodeIdx(encodeRev(42)); got != (idxEntry{rev: 42}) {
+	if got := decodeIdx(encodeRev(42)); !reflect.DeepEqual(got, idxEntry{rev: 42}) {
 		t.Fatalf("decodeIdx(v1) = %+v, want rev only", got)
 	}
-	if got, want := decodeIdx(v), (idxEntry{rev: 42, createRevision: 7, version: 3, sub: 5, v2: true}); got != want {
-		t.Fatalf("decodeIdx(v2) = %+v, want %+v", got, want)
+	v2 := idxEntry{rev: 42, createRevision: 7, version: 3, sub: 5, v2: true}
+	if got := decodeIdx(v); !reflect.DeepEqual(got, v2) {
+		t.Fatalf("decodeIdx(v2) = %+v, want %+v", got, v2)
+	}
+
+	v3 := encodeIdxInline(42, 5, &record{value: []byte("val"), createRevision: 7, prevRevision: 40, version: 3, lease: 9})
+	if got := decodeRev(v3); got != 42 {
+		t.Fatalf("decodeRev(v3) = %d, want 42", got)
+	}
+	if got := decodeIdx(v3[:idxValueSizeV2]); !reflect.DeepEqual(got, v2) {
+		t.Fatalf("v3 read as v2 = %+v, want %+v", got, v2)
+	}
+	want := v2
+	want.prevRevision, want.lease, want.value, want.inline = 40, 9, []byte("val"), true
+	if got := decodeIdx(v3); !reflect.DeepEqual(got, want) {
+		t.Fatalf("decodeIdx(v3) = %+v, want %+v", got, want)
 	}
 }
 

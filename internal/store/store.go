@@ -57,6 +57,10 @@ type Store struct {
 	// wholesale by SetHistoryRingSize.
 	hist atomic.Pointer[historyRing]
 
+	// inlineValueMax is the largest value Apply also stores in the key's
+	// index entry; 0 stores none (see SetInlineValueMax).
+	inlineValueMax int
+
 	// posMu guards the leader-known position: the key it is stored under
 	// (nil until SetNodeID) and its value.
 	posMu     sync.Mutex
@@ -385,6 +389,20 @@ func (s *Store) SetHistoryRingSize(n int) {
 		return
 	}
 	s.hist.Store(newHistoryRing(n))
+}
+
+// SetInlineValueMax makes Apply store values up to n bytes in their key's
+// index entry as well as the log, so Get and List read them in key order
+// instead of one log lookup per key. Live values then take about twice the
+// space; n <= 0 stores none. Call it before the store applies anything.
+func (s *Store) SetInlineValueMax(n int) { s.inlineValueMax = n }
+
+// idxValue is the index value for r written at rev and sub.
+func (s *Store) idxValue(rev int64, sub uint16, r *record) []byte {
+	if s.inlineValueMax > 0 && len(r.value) <= s.inlineValueMax {
+		return encodeIdxInline(rev, sub, r)
+	}
+	return encodeIdx(rev, r.createRevision, r.version, sub)
 }
 
 // LastSequence returns the highest WAL/peer-stream sequence applied. Used by
@@ -739,7 +757,7 @@ func (s *Store) applyEntryRev(b *pebble.Batch, la *leaseApply, e *wal.Entry) (co
 			return false, fmt.Errorf("store: delete idx key %q: %w", e.Key, err)
 		}
 	} else {
-		if err := b.Set(ik, encodeIdx(e.Revision, r.createRevision, r.version, idxSubNone), pebble.NoSync); err != nil {
+		if err := b.Set(ik, s.idxValue(e.Revision, idxSubNone, r), pebble.NoSync); err != nil {
 			return false, fmt.Errorf("store: set idx key %q rev=%d: %w", e.Key, e.Revision, err)
 		}
 	}
@@ -789,7 +807,7 @@ func (s *Store) applyTxnEntry(b *pebble.Batch, la *leaseApply, e *wal.Entry) (co
 				return false, fmt.Errorf("store: delete txn idx key %q: %w", op.Key, err)
 			}
 		} else {
-			if err := b.Set(ik, encodeIdx(e.Revision, r.createRevision, r.version, uint16(i)), pebble.NoSync); err != nil {
+			if err := b.Set(ik, s.idxValue(e.Revision, uint16(i), r), pebble.NoSync); err != nil {
 				return false, fmt.Errorf("store: set txn idx key %q rev=%d: %w", op.Key, e.Revision, err)
 			}
 		}
@@ -1255,6 +1273,7 @@ func idxEntryFrom(r pebble.Reader, key string) (idxEntry, error) {
 		return idxEntry{}, fmt.Errorf("store: get idx %q: %w", key, err)
 	}
 	ie := decodeIdx(v)
+	ie.value = cloneValue(ie.value) // v aliases Pebble's buffer until closed
 	closer.Close()
 	return ie, nil
 }
@@ -1268,6 +1287,20 @@ func idxToKeysOnlyKV(key string, ie idxEntry) *KeyValue {
 
 func idxToKeysOnlyKVInto(kv *KeyValue, key string, ie idxEntry) {
 	*kv = KeyValue{Key: key, Revision: ie.rev, CreateRevision: ie.createRevision, Version: ie.version}
+}
+
+// idxToKVInto fills kv from a v3 index value, as viewToKVInto would from the
+// log record it copies.
+func idxToKVInto(kv *KeyValue, key string, ie idxEntry) {
+	*kv = KeyValue{
+		Key:            key,
+		Value:          cloneValue(ie.value),
+		Revision:       ie.rev,
+		CreateRevision: ie.createRevision,
+		PrevRevision:   ie.prevRevision,
+		Version:        logVersion(ie.version, false),
+		Lease:          ie.lease,
+	}
 }
 
 // kvSlab hands out KeyValues from shared backing arrays, so that a listing of
@@ -1370,6 +1403,13 @@ func logEntryForIdx(db pebble.Reader, lk []byte, key string, ie idxEntry) (*KeyV
 // record found where a v2 index value points. Other records come back in a
 // KeyValue of their own.
 func logEntryForIdxInto(db pebble.Reader, lk []byte, key string, ie idxEntry, dst *KeyValue) (*KeyValue, error) {
+	if ie.inline {
+		if dst == nil {
+			dst = &KeyValue{}
+		}
+		idxToKVInto(dst, key, ie)
+		return dst, nil
+	}
 	if !ie.v2 {
 		return logEntryAt(db, lk, key, ie.rev)
 	}
@@ -1763,11 +1803,15 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 		if keysOnly && ie.v2 {
 			// Served from the index; no log record to read.
 			idxToKeysOnlyKVInto(kv, k, ie)
+		} else if ie.inline {
+			// So is a full read of an inline value.
+			idxToKVInto(kv, k, ie)
 		} else {
 			// Hold the key on the KeyValue rather than on the target, so the
 			// target costs no second string header per entry.
 			kv.Key = k
 		}
+		ie.value = nil // aliases the iterator; kv already holds a copy
 		ents = append(ents, logTarget{dst: kv, ie: ie})
 	}
 	if err := iter.Error(); err != nil {
@@ -1781,16 +1825,12 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 	for i, e := range ents {
 		out[i] = e.dst
 	}
-	// Only a keysOnly listing leaves entries needing no record, so only it has
-	// a fetch set narrower than the scan; compact in place rather than build a
-	// second slice.
-	todo := ents
-	if keysOnly {
-		todo = ents[:0]
-		for _, e := range ents {
-			if !e.ie.v2 {
-				todo = append(todo, e)
-			}
+	// Entries served from the index need no record; compact the rest in
+	// place rather than build a second slice.
+	todo := ents[:0]
+	for _, e := range ents {
+		if !e.ie.inline && (!keysOnly || !e.ie.v2) {
+			todo = append(todo, e)
 		}
 	}
 	if err := fetchLogRecords(db, todo, keysOnly); err != nil {
