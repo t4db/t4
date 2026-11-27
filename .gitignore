@@ -4,3 +4,6 @@ bench/kwok/results/
 
 # Output of the Patroni acceptance suite (patroni/run.sh).
 /patroni/output/
+
+# Output of the JuiceFS metadata-engine suite (juicefs/run.sh).
+/juicefs/output/
