@@ -1829,7 +1829,7 @@ func listCurrentFrom(db pebble.Reader, prefix, fromKey string, limit int64, keys
 	// place rather than build a second slice.
 	todo := ents[:0]
 	for _, e := range ents {
-		if !e.ie.inline && !(keysOnly && e.ie.v2) {
+		if !e.ie.inline && (!keysOnly || !e.ie.v2) {
 			todo = append(todo, e)
 		}
 	}
