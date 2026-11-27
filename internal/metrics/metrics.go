@@ -131,6 +131,14 @@ var (
 	// WatchScanRevisionSpan measures the revision span processed by watch delivery.
 	WatchScanRevisionSpan prometheus.Histogram
 
+	// CompactDuration measures the history compaction done on the apply path,
+	// which delays the writes behind it (see internal/store.applyCompact).
+	CompactDuration prometheus.Histogram
+
+	// CompactRecordsTotal counts log records one compaction looked at,
+	// labelled by scanned or reclaimed.
+	CompactRecordsTotal *prometheus.CounterVec
+
 	// WatchScanEntriesTotal counts records decoded once by live dispatch or
 	// replay scans, plus matching deliveries to watch subscribers.
 	WatchScanEntriesTotal *prometheus.CounterVec
@@ -341,6 +349,17 @@ func Register(reg prometheus.Registerer) {
 			Help: "Watch records decoded or delivered, labelled by scanned or matched.",
 		}, []string{"result"})
 
+		CompactDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "t4_compact_duration_seconds",
+			Help:    "Duration of one history compaction on the apply path.",
+			Buckets: []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5},
+		})
+
+		CompactRecordsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "t4_compact_records_total",
+			Help: "Log records history compaction looked at, labelled by scanned or reclaimed.",
+		}, []string{"result"})
+
 		reg.MustRegister(
 			WritesTotal,
 			WriteErrors,
@@ -376,6 +395,8 @@ func Register(reg prometheus.Registerer) {
 			WatchScanDuration,
 			WatchScanRevisionSpan,
 			WatchScanEntriesTotal,
+			CompactDuration,
+			CompactRecordsTotal,
 		)
 	})
 }
