@@ -63,8 +63,9 @@ type Client struct {
 	leaderGone func(context.Context) bool
 
 	// takeoverAfter, if set, ends Follow once the leader has not been heard
-	// for this long; see SetTakeoverAfter.
-	takeoverAfter time.Duration
+	// for this long; see SetTakeoverAfter. Atomic: followOnce's watchdog can
+	// still be reading it when the next Follow call sets it.
+	takeoverAfter atomic.Int64 // time.Duration
 
 	// leaderHeartbeats is set once the leader has sent a heartbeat. From
 	// then on every Follow attempt expects them from the start, so an
@@ -124,9 +125,9 @@ func (c *Client) SetLeaderGoneCheck(f func(context.Context) bool) {
 // attempt finds the leader unheard for d, however few attempts that took. The
 // caller decides with d when a takeover may succeed, rather than counting
 // reconnect attempts toward it. Without a heartbeat ever heard, maxRetries
-// alone decides. Must not be called while Follow runs.
+// alone decides.
 func (c *Client) SetTakeoverAfter(d time.Duration) {
-	c.takeoverAfter = d
+	c.takeoverAfter.Store(int64(d))
 }
 
 // Close releases the underlying gRPC connection.
@@ -233,8 +234,9 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Ent
 			return ErrLeaderUnreachable
 		}
 		wait := FollowerRetryInterval
-		if _, heard := c.LastHeard(); consecutiveFailures > 0 && c.takeoverAfter > 0 && !heard.IsZero() {
-			left := c.takeoverAfter - time.Since(heard)
+		takeoverAfter := time.Duration(c.takeoverAfter.Load())
+		if _, heard := c.LastHeard(); consecutiveFailures > 0 && takeoverAfter > 0 && !heard.IsZero() {
+			left := takeoverAfter - time.Since(heard)
 			if left <= 0 {
 				c.log.Debugf("peer: leader unheard for %v after %d attempts", time.Since(heard).Round(time.Millisecond), consecutiveFailures)
 				return ErrLeaderUnreachable
@@ -295,8 +297,9 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 				}
 				// A reconnect attempt that has not reached the leader by the
 				// takeover delay ends there, so Follow can give up on time.
-				if _, at := c.LastHeard(); c.takeoverAfter > 0 && !at.IsZero() && len(msgC) == 0 &&
-					time.Since(at) >= c.takeoverAfter {
+				takeoverAfter := time.Duration(c.takeoverAfter.Load())
+				if _, at := c.LastHeard(); takeoverAfter > 0 && !at.IsZero() && len(msgC) == 0 &&
+					time.Since(at) >= takeoverAfter {
 					silent.Store(true)
 					streamCancel()
 					return
