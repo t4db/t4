@@ -62,6 +62,10 @@ type Client struct {
 	// SetLeaderGoneCheck.
 	leaderGone func(context.Context) bool
 
+	// takeoverAfter, if set, ends Follow once the leader has not been heard
+	// for this long; see SetTakeoverAfter.
+	takeoverAfter time.Duration
+
 	// leaderHeartbeats is set once the leader has sent a heartbeat. From
 	// then on every Follow attempt expects them from the start, so an
 	// attempt on a dead connection times out instead of hanging.
@@ -114,6 +118,15 @@ func (c *Client) SetLastHeard(term uint64, at time.Time) {
 // called while Follow runs.
 func (c *Client) SetLeaderGoneCheck(f func(context.Context) bool) {
 	c.leaderGone = f
+}
+
+// SetTakeoverAfter makes Follow return ErrLeaderUnreachable once a failed
+// attempt finds the leader unheard for d, however few attempts that took. The
+// caller decides with d when a takeover may succeed, rather than counting
+// reconnect attempts toward it. Without a heartbeat ever heard, maxRetries
+// alone decides. Must not be called while Follow runs.
+func (c *Client) SetTakeoverAfter(d time.Duration) {
+	c.takeoverAfter = d
 }
 
 // Close releases the underlying gRPC connection.
@@ -219,10 +232,20 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Ent
 			c.log.Debugf("peer: leader unreachable after %d attempts", consecutiveFailures)
 			return ErrLeaderUnreachable
 		}
+		wait := FollowerRetryInterval
+		if _, heard := c.LastHeard(); consecutiveFailures > 0 && c.takeoverAfter > 0 && !heard.IsZero() {
+			left := c.takeoverAfter - time.Since(heard)
+			if left <= 0 {
+				c.log.Debugf("peer: leader unheard for %v after %d attempts", time.Since(heard).Round(time.Millisecond), consecutiveFailures)
+				return ErrLeaderUnreachable
+			}
+			// Retry no later than the moment a takeover may succeed.
+			wait = min(wait, left)
+		}
 
 		c.log.Debugf("peer: stream error (attempt %d): %v", consecutiveFailures, err)
 		select {
-		case <-time.After(FollowerRetryInterval):
+		case <-time.After(wait):
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -266,6 +289,14 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 					ref = time.Unix(0, heard)
 				}
 				if c.leaderHeartbeats.Load() && len(msgC) == 0 && time.Since(ref) > HeartbeatTimeout {
+					silent.Store(true)
+					streamCancel()
+					return
+				}
+				// A reconnect attempt that has not reached the leader by the
+				// takeover delay ends there, so Follow can give up on time.
+				if _, at := c.LastHeard(); c.takeoverAfter > 0 && !at.IsZero() && len(msgC) == 0 &&
+					time.Since(at) >= c.takeoverAfter {
 					silent.Store(true)
 					streamCancel()
 					return

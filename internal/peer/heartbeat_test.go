@@ -130,6 +130,60 @@ func TestFollowerDetectsSilentLeader(t *testing.T) {
 	}
 }
 
+// TestFollowerGivesUpAfterTakeoverDelay: with SetTakeoverAfter, a follower
+// that heard the leader gives up once it has not heard it for that long, not
+// after its reconnect attempts run out, so a takeover can start as soon as
+// the caller's safety rules allow one.
+func TestFollowerGivesUpAfterTakeoverDelay(t *testing.T) {
+	srv := peer.NewServer(1000, 0, nil)
+	proxy := newStallingProxy(t, startServer(t, srv))
+	cli := peer.NewClient(proxy.Addr(), "follower-1", 100, nil, nil, nil)
+	defer cli.Close()
+	const after = 3 * time.Second
+	cli.SetTakeoverAfter(after)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	errC := make(chan error, 1)
+	go func() { errC <- cli.Follow(ctx, 1, noopWAL, func([]wal.Entry) error { return nil }) }()
+	waitConnected(t, srv, 1)
+	time.Sleep(2 * peer.HeartbeatInterval)
+
+	proxy.stall()
+	_, heard := cli.LastHeard()
+	select {
+	case err := <-errC:
+		if !peer.IsLeaderUnreachable(err) {
+			t.Fatalf("Follow returned %v, want ErrLeaderUnreachable", err)
+		}
+		// 100 attempts 2 s apart would take minutes; the delay counts from
+		// the last heartbeat, which is at most a heartbeat before the stall.
+		if took := time.Since(heard); took < after || took > after+peer.FollowerRetryInterval {
+			t.Fatalf("gave up %v after last hearing the leader, want about %v", took.Round(time.Millisecond), after)
+		}
+	case <-ctx.Done():
+		t.Fatal("follower kept retrying past the takeover delay")
+	}
+}
+
+// TestTakeoverAfterNeedsAHeartbeat: a follower that never heard the leader
+// has no time to count from, so its reconnect attempts decide alone.
+func TestTakeoverAfterNeedsAHeartbeat(t *testing.T) {
+	cli := peer.NewClient("127.0.0.1:19998", "follower-1", 2, nil, nil, nil)
+	defer cli.Close()
+	cli.SetTakeoverAfter(time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := cli.Follow(ctx, 1, noopWAL, func([]wal.Entry) error { return nil })
+	if !peer.IsLeaderUnreachable(err) {
+		t.Fatalf("Follow returned %v, want ErrLeaderUnreachable", err)
+	}
+	if took := time.Since(start); took < peer.FollowerRetryInterval {
+		t.Fatalf("gave up after %v: before its two attempts, as if it had heard the leader", took.Round(time.Millisecond))
+	}
+}
+
 // TestLeaderDropsSilentFollower: the leader ends the stream of a follower it
 // no longer hears from, which releases writes waiting for that follower.
 func TestLeaderDropsSilentFollower(t *testing.T) {

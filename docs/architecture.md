@@ -154,7 +154,7 @@ The leader and each follower exchange heartbeats on the WAL stream every 500 ms:
 Heartbeats are negotiated when the stream opens, so nodes with and without heartbeat support can run in the same cluster during an upgrade; they simply do not exchange heartbeats with each other.
 
 **TakeOver (follower promoting itself):**
-1. Follower detects a dead leader when the WAL gRPC stream fails, or goes silent, `FollowerMaxRetries` consecutive times.
+1. Follower detects a dead leader when the WAL gRPC stream fails or goes silent and stays down: once it has not heard the leader for 7 s (`knownTakeoverDelay`, the earliest a takeover may succeed), or after `FollowerMaxRetries` consecutive failures if it never heard the leader's heartbeats.
 2. Before attempting takeover, the follower checks the current lock. A follower that heard the leader's heartbeats (its term) within the last minute may promote once it has not heard it for 7 s and the lock has not been renewed for 6 s. Any other node waits until the lock's validity (`ValidUntilNano`) has passed. Otherwise the leader may still be serving and the follower backs off. The check is repeated in `TakeOver` on the record the conditional write replaces.
 3. If the lock has already advanced to a term higher than the follower's `floorTerm` (another candidate already won), the follower backs off and follows the new winner.
 4. Otherwise: read the lock ETag, then `PUT` with `If-Match: <etag>`. Only the candidate that read the same ETag wins; all others get a precondition failure and re-read to find the new leader.
