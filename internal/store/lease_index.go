@@ -60,8 +60,10 @@ func (la *leaseApply) attach(b *pebble.Batch, key string, lease int64) error {
 
 // dropStaleLeaseIdx writes into b the removal of key's entry under lease, for
 // a superseded record compaction drops, unless the key is still attached to
-// lease. cur caches current leases across one compaction.
-func (s *Store) dropStaleLeaseIdx(b *pebble.Batch, la *leaseApply, cur map[string]int64, key string, lease int64) error {
+// lease. cur caches current leases across one compaction. r reads the state
+// compaction sees, which is b itself: an indexed batch, so that the writes
+// earlier in the same batch count (see newApplyBatch).
+func dropStaleLeaseIdx(r pebble.Reader, b *pebble.Batch, la *leaseApply, cur map[string]int64, key string, lease int64) error {
 	if lease <= 0 {
 		return nil
 	}
@@ -72,7 +74,7 @@ func (s *Store) dropStaleLeaseIdx(b *pebble.Batch, la *leaseApply, cur map[strin
 	now, ok := cur[key]
 	if !ok {
 		var err error
-		if now, err = currentLease(s.db, key); err != nil {
+		if now, err = currentLease(r, key); err != nil {
 			return err
 		}
 		cur[key] = now

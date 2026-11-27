@@ -459,13 +459,27 @@ func (s *Store) DeleteRevisionSamplesBefore(cutoff time.Time) error {
 	return nil
 }
 
+// newApplyBatch returns the pebble batch an apply of entries writes into.
+// A compact entry needs an indexed one: applyCompact reads back the history
+// the entries before it in the same batch leave behind, and a plain batch is
+// write-only. Indexing every write costs a skiplist insert per key, so a
+// batch without a compact entry — nearly all of them — stays plain.
+func (s *Store) newApplyBatch(entries []wal.Entry) *pebble.Batch {
+	for i := range entries {
+		if entries[i].Op == wal.OpCompact {
+			return s.db.NewIndexedBatch()
+		}
+	}
+	return s.db.NewBatch()
+}
+
 // Apply applies a batch of WAL entries to the store and notifies watchers.
 // Entries must be ordered by revision. Apply is not safe for concurrent use.
 func (s *Store) Apply(entries []wal.Entry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	b := s.db.NewBatch()
+	b := s.newApplyBatch(entries)
 	var maxRev, maxSeq int64
 	var tip Position
 	// Changes for the history ring, grouped by revision. An empty ring is
@@ -628,7 +642,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	b := s.db.NewBatch()
+	b := s.newApplyBatch(entries)
 	var maxRev, maxSeq int64
 	var tip Position
 	var la leaseApply
@@ -817,7 +831,13 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 	// This is deliberately a single O(entries) pass. The old implementation
 	// scanned the remaining history for every entry to find a later version,
 	// which made compaction O(entries^2) for high-cardinality workloads.
-	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	//
+	// The scan reads through b, not s.db: entries earlier in the same batch
+	// are part of the history being compacted, and only an indexed batch
+	// shows them (see newApplyBatch). Without that, the same WAL entries
+	// retained different amounts of history depending on how they were
+	// grouped into batches.
+	iter, err := b.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 	if err != nil {
 		return fmt.Errorf("store: compact iter: %w", err)
 	}
@@ -847,7 +867,7 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 			return fmt.Errorf("store: compact delete rev=%d: %w", entryRev, err)
 		}
 		if r.lease > 0 {
-			if err := s.dropStaleLeaseIdx(b, la, leaseCur, string(r.key), r.lease); err != nil {
+			if err := dropStaleLeaseIdx(b, b, la, leaseCur, string(r.key), r.lease); err != nil {
 				return err
 			}
 		}
