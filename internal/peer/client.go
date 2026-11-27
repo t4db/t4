@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,7 +165,9 @@ func (c *Client) getConn() (*grpc.ClientConn, error) {
 	}
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(Codec{})),
+		// A txn entry is not bounded by size (a range delete expands on the
+		// leader), and one the follower cannot receive stalls it for good.
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(Codec{}), grpc.MaxCallRecvMsgSize(math.MaxInt32)),
 	}
 	if c.tp != nil {
 		dialOpts = append(dialOpts, grpc.WithStatsHandler(
