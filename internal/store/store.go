@@ -814,13 +814,14 @@ func applyMetaOp(b *pebble.Batch, op wal.Op, key string, value []byte) error {
 func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) error {
 	// The compaction revision only grows: the history below the current one
 	// is gone, so moving it back would let reads there see what is left of it.
-	if compactRev <= atomic.LoadInt64(&s.compactRev) {
+	prevRev := atomic.LoadInt64(&s.compactRev)
+	if compactRev <= prevRev {
 		return nil
 	}
 	if err := b.Set(metaCompactKey, encodeRev(compactRev), pebble.NoSync); err != nil {
 		return err
 	}
-	lo := logKey(atomic.LoadInt64(&s.compactRev))
+	lo := logKey(prevRev)
 	hi := logKey(compactRev + 1)
 
 	// Walk the compacted history backwards. The first record seen for a key is
@@ -843,24 +844,35 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 	}
 	defer func() { _ = iter.Close() }()
 
-	seen := make(map[string]struct{})
+	// link holds each key's entry point into the history below the window,
+	// walked after the scan, and doubles as the set of keys already seen.
+	link := make(map[string]int64)
 	leaseCur := make(map[string]int64)
 	for iter.Last(); iter.Valid(); iter.Prev() {
 		entryRev := decodeLogKey(iter.Key())
-		// The loop reads a record's key and lease and nothing else, so it
-		// decodes a view into pebble's buffer rather than unmarshalling. The
-		// value in particular is never looked at, and copying every
-		// superseded version of every key in the window — which is what a
-		// first compaction of a large store walks — made the scan's garbage
-		// proportional to the history it was removing.
+		// The loop reads a record's key, lease and PrevRevision and nothing
+		// else, so it decodes a view into pebble's buffer rather than
+		// unmarshalling. The value in particular is never looked at, and
+		// copying every superseded version of every key in the window — which
+		// is what a first compaction of a large store walks — made the scan's
+		// garbage proportional to the history it was removing.
 		r, err := decodeRecord(iter.Value())
 		if err != nil {
 			return fmt.Errorf("store: compact decode rev=%d: %w", entryRev, err)
 		}
 		// Looking a []byte up in a map does not allocate; only the insert
-		// does, so a key costs a string once rather than once per version.
-		if _, ok := seen[string(r.key)]; !ok {
-			seen[string(r.key)] = struct{}{}
+		// does.
+		_, seen := link[string(r.key)]
+		keep := !seen
+		// The record that links below the window is the key's oldest one here,
+		// and a chain of versions is contiguous, so exactly one record per key
+		// has a PrevRevision under lo. Writing the link only for that one, and
+		// on first sight to mark the key seen, keeps this to one or two
+		// inserts per key rather than one per superseded version.
+		if !seen || r.prevRevision < prevRev {
+			link[string(r.key)] = r.prevRevision
+		}
+		if keep {
 			continue
 		}
 		if err := b.Delete(iter.Key(), pebble.NoSync); err != nil {
@@ -876,8 +888,92 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 		return fmt.Errorf("store: compact scan: %w", err)
 	}
 
+	// Follow each key's chain of PrevRevision links below the window. The
+	// version a compaction retains as a key's anchor is usually older than
+	// its watermark, so the next window — which starts at that watermark —
+	// does not cover it and no later one ever will. Left alone, one obsolete
+	// version per key per compaction accumulates for the life of the store,
+	// and Pebble cannot reclaim any of it: every version has its own
+	// revision-keyed entry and is live as far as Pebble is concerned.
+	//
+	// In steady state this is two lookups per key touched in the window: the
+	// previous anchor, then the already-reclaimed version below it. A store
+	// that accumulated history before this walk existed pays for the whole
+	// chain once. Each step deletes the record it read, so even a corrupt
+	// chain that points back at itself ends on the next lookup.
+	for key, rev := range link {
+		// A link at or above lo points at a version the scan above already
+		// took, so only the ones reaching below it have anything left to do.
+		for rev > 0 && rev < prevRev {
+			prev, found, err := reclaimVersion(b, la, leaseCur, key, rev)
+			if err != nil {
+				return err
+			}
+			if !found {
+				break
+			}
+			rev = prev
+		}
+	}
+
 	atomic.StoreInt64(&s.compactRev, compactRev)
 	return nil
+}
+
+// reclaimVersion deletes key's record at rev from b and returns that record's
+// PrevRevision, reporting found=false when the log holds no such record — the
+// end of the chain, because an earlier compaction already took it.
+func reclaimVersion(b *pebble.Batch, la *leaseApply, leaseCur map[string]int64, key string, rev int64) (int64, bool, error) {
+	lk := logKey(rev)
+	v, closer, err := b.Get(lk)
+	switch {
+	case err == nil:
+		defer func() { _ = closer.Close() }()
+		r, derr := decodeRecord(v)
+		if derr != nil {
+			return 0, false, fmt.Errorf("store: compact chain decode rev=%d: %w", rev, derr)
+		}
+		// A revision holds either one record or a transaction's sub-ops, so a
+		// single-op record for another key means this one has nothing here.
+		if string(r.key) != key {
+			return 0, false, nil
+		}
+		return r.prevRevision, true, dropVersion(b, la, leaseCur, lk, key, r.lease)
+	case !errors.Is(err, pebble.ErrNotFound):
+		return 0, false, fmt.Errorf("store: compact chain get rev=%d: %w", rev, err)
+	}
+
+	// A version written by a transaction lives at logKeyWithSub(rev, sub),
+	// under a sub index the chain link does not carry, so it takes a scan of
+	// the revision to find.
+	iter, err := b.NewIter(&pebble.IterOptions{LowerBound: logKeyWithSub(rev, 0), UpperBound: logKey(rev + 1)})
+	if err != nil {
+		return 0, false, fmt.Errorf("store: compact chain iter rev=%d: %w", rev, err)
+	}
+	defer func() { _ = iter.Close() }()
+	for iter.First(); iter.Valid(); iter.Next() {
+		r, derr := decodeRecord(iter.Value())
+		if derr != nil {
+			return 0, false, fmt.Errorf("store: compact chain decode rev=%d: %w", rev, derr)
+		}
+		if string(r.key) != key {
+			continue
+		}
+		return r.prevRevision, true, dropVersion(b, la, leaseCur, iter.Key(), key, r.lease)
+	}
+	return 0, false, iter.Error()
+}
+
+// dropVersion deletes the log record at lk and the lease index entry it is
+// the last reason to keep.
+func dropVersion(b *pebble.Batch, la *leaseApply, leaseCur map[string]int64, lk []byte, key string, lease int64) error {
+	if err := b.Delete(lk, pebble.NoSync); err != nil {
+		return fmt.Errorf("store: compact chain delete %q: %w", key, err)
+	}
+	if lease <= 0 {
+		return nil
+	}
+	return dropStaleLeaseIdx(b, b, la, leaseCur, key, lease)
 }
 
 // broadcast replaces the notify channel, waking all current waiters.

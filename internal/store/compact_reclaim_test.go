@@ -35,6 +35,32 @@ func logRecords(t *testing.T, s *Store) []string {
 	return out
 }
 
+// revisionsOf returns the revisions of the retained log records for key.
+func revisionsOf(t *testing.T, s *Store, key string) []int64 {
+	t.Helper()
+	var revs []int64
+	for _, rec := range logRecords(t, s) {
+		var rev int64
+		var k string
+		if _, err := fmt.Sscanf(rec, "%d:%s", &rev, &k); err == nil && k == key {
+			revs = append(revs, rev)
+		}
+	}
+	return revs
+}
+
+func sameRevs(got []int64, want ...int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestCompactSeesPrecedingEntriesInSameBatch: applying the same WAL entries
 // must retain the same history however they are grouped into batches.
 // Compaction used to read the committed database only, so mutations earlier in
@@ -74,5 +100,69 @@ func TestCompactSeesPrecedingEntriesInSameBatch(t *testing.T) {
 				t.Fatalf("retained history %v, want %s", all, want)
 			}
 		})
+	}
+}
+
+// TestCompactReclaimsVersionsBelowPreviousWatermark: the version a compaction
+// retains as a key's anchor is below its watermark, so the next window — which
+// starts at that watermark — does not contain it. Each compaction used to
+// leave one such version behind for every key it touched, forever (#420).
+func TestCompactReclaimsVersionsBelowPreviousWatermark(t *testing.T) {
+	s := openMem(t)
+	var rev int64
+	var prev int64
+	for i := 0; i < 20; i++ {
+		rev++
+		if prev == 0 {
+			apply(t, s, createEntry(rev, "k", []byte("v")))
+		} else {
+			apply(t, s, updateEntry(rev, "k", []byte("v"), 1, prev))
+		}
+		kRev := rev
+		prev = rev
+		// An unrelated write moves the watermark past k's newest version.
+		rev++
+		apply(t, s, createEntry(rev, fmt.Sprintf("other-%d", i), []byte("v")))
+		apply(t, s, compactEntry(rev, rev))
+
+		if got := revisionsOf(t, s, "k"); !sameRevs(got, kRev) {
+			t.Fatalf("after compaction %d at rev %d: k has records %v, want only %d", i, rev, got, kRev)
+		}
+	}
+	// The current value is still readable, and so is the watermark revision.
+	kv, err := s.Get("k")
+	if err != nil || kv == nil || string(kv.Value) != "v" {
+		t.Fatalf("Get k after 20 compactions: %+v err=%v", kv, err)
+	}
+}
+
+// TestCompactReclaimsTxnWrittenVersions: a version written by a transaction
+// lives at logKeyWithSub(rev, sub), which the chain link does not name, so the
+// reclaim walk has to find it by scanning the revision.
+func TestCompactReclaimsTxnWrittenVersions(t *testing.T) {
+	s := openMem(t)
+	txn := func(rev int64, ops ...wal.TxnSubOp) wal.Entry {
+		return wal.Entry{Revision: rev, Term: 1, Op: wal.OpTxn, Value: wal.EncodeTxnOps(ops)}
+	}
+	apply(t, s, txn(1,
+		wal.TxnSubOp{Op: wal.OpCreate, Key: "a", Value: []byte("1"), CreateRevision: 1},
+		wal.TxnSubOp{Op: wal.OpCreate, Key: "k", Value: []byte("1"), CreateRevision: 1},
+	))
+	apply(t, s, createEntry(2, "other", []byte("v")))
+	apply(t, s, compactEntry(2, 2))
+	apply(t, s, txn(3, wal.TxnSubOp{Op: wal.OpUpdate, Key: "k", Value: []byte("2"), CreateRevision: 1, PrevRevision: 1}))
+	apply(t, s, createEntry(4, "other2", []byte("v")))
+	apply(t, s, compactEntry(4, 4))
+
+	if got := revisionsOf(t, s, "k"); !sameRevs(got, 3) {
+		t.Fatalf("k records: %v, want only 3", got)
+	}
+	// The txn sub-op for "a" at rev 1 is still its only version and must stay.
+	if got := revisionsOf(t, s, "a"); !sameRevs(got, 1) {
+		t.Fatalf("a records: %v, want only 1", got)
+	}
+	kv, err := s.Get("k")
+	if err != nil || kv == nil || string(kv.Value) != "2" {
+		t.Fatalf("Get k: %+v err=%v", kv, err)
 	}
 }
