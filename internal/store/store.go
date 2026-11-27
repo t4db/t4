@@ -818,6 +818,7 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 	if compactRev <= prevRev {
 		return nil
 	}
+	start := time.Now()
 	if err := b.Set(metaCompactKey, encodeRev(compactRev), pebble.NoSync); err != nil {
 		return err
 	}
@@ -825,10 +826,9 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 	hi := logKey(compactRev + 1)
 
 	// Walk the compacted history backwards. The first record seen for a key is
-	// its newest version at or before compactRev and is retained as the anchor
-	// for historical reads at and immediately after the watermark, unless it is
-	// a deletion the watermark has passed, which anchors nothing. Any earlier
-	// record for the same key can be removed.
+	// its newest version at or before compactRev and must be retained as the
+	// anchor for historical reads at and immediately after the watermark. Any
+	// earlier record for the same key can be removed.
 	//
 	// This is deliberately a single O(entries) pass. The old implementation
 	// scanned the remaining history for every entry to find a later version,
@@ -849,6 +849,7 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 	// walked after the scan, and doubles as the set of keys already seen.
 	link := make(map[string]int64)
 	leaseCur := make(map[string]int64)
+	var scanned, reclaimed int
 	for iter.Last(); iter.Valid(); iter.Prev() {
 		entryRev := decodeLogKey(iter.Key())
 		// The loop reads a record's key, lease and PrevRevision and nothing
@@ -861,6 +862,7 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 		if err != nil {
 			return fmt.Errorf("store: compact decode rev=%d: %w", entryRev, err)
 		}
+		scanned++
 		// Looking a []byte up in a map does not allocate; only the insert
 		// does.
 		_, seen := link[string(r.key)]
@@ -884,6 +886,7 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 		if err := b.Delete(iter.Key(), pebble.NoSync); err != nil {
 			return fmt.Errorf("store: compact delete rev=%d: %w", entryRev, err)
 		}
+		reclaimed++
 		if r.lease > 0 {
 			if err := dropStaleLeaseIdx(b, b, la, leaseCur, string(r.key), r.lease); err != nil {
 				return err
@@ -918,11 +921,13 @@ func (s *Store) applyCompact(b *pebble.Batch, la *leaseApply, compactRev int64) 
 			if !found {
 				break
 			}
+			reclaimed++
 			rev = prev
 		}
 	}
 
 	atomic.StoreInt64(&s.compactRev, compactRev)
+	recordCompactMetrics(time.Since(start), scanned, reclaimed)
 	return nil
 }
 
@@ -980,6 +985,15 @@ func dropVersion(b *pebble.Batch, la *leaseApply, leaseCur map[string]int64, lk 
 		return nil
 	}
 	return dropStaleLeaseIdx(b, b, la, leaseCur, key, lease)
+}
+
+func recordCompactMetrics(d time.Duration, scanned, reclaimed int) {
+	if metrics.CompactDuration == nil {
+		return
+	}
+	metrics.CompactDuration.Observe(d.Seconds())
+	metrics.CompactRecordsTotal.WithLabelValues("scanned").Add(float64(scanned))
+	metrics.CompactRecordsTotal.WithLabelValues("reclaimed").Add(float64(reclaimed))
 }
 
 // broadcast replaces the notify channel, waking all current waiters.
