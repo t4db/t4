@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -224,10 +225,32 @@ func mergeWALSegments(keys []string, open func(i int) (io.ReadCloser, error), af
 	// upper bound — apply all entries).
 	cutoff := walTermCutoffs(keys)
 
+	// A segment's entries that survive the cutoff all precede the next
+	// segment of its term and its term's cutoff, as GCSegments relies on.
+	// Skip fetching segments that end at or before afterSeq: with sync
+	// upload there is one per write, and a restart would otherwise download
+	// every segment since the last GC.
+	firsts := map[uint64][]int64{}
+	for _, key := range keys {
+		term, first := parseWALKey(key)
+		firsts[term] = append(firsts[term], first)
+	}
+	for _, fs := range firsts {
+		slices.Sort(fs)
+	}
+
 	var all []wal.Entry
 	for i, key := range keys {
-		term, _ := parseWALKey(key)
+		term, first := parseWALKey(key)
 		termCutoff := cutoff[term]
+		end := termCutoff
+		fs := firsts[term]
+		if j, _ := slices.BinarySearch(fs, first+1); j < len(fs) {
+			end = min(end, fs[j])
+		}
+		if end-1 <= afterSeq {
+			continue
+		}
 
 		rc, err := open(i)
 		if err != nil {

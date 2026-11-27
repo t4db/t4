@@ -3,6 +3,7 @@ package t4
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -83,5 +84,34 @@ func TestReplayPinnedSkipsSupersededTerm(t *testing.T) {
 	}
 	if got := db.CurrentRevision(); got != 2 {
 		t.Errorf("CurrentRevision = %d, want 2", got)
+	}
+}
+
+// TestMergeSkipsCoveredSegments checks that replay fetches no segment whose
+// surviving entries all end at or before afterSeq: with sync upload there is
+// one segment per write, and a restart must not download them all.
+func TestMergeSkipsCoveredSegments(t *testing.T) {
+	obj := object.NewMem()
+	put := func(term uint64, rev int64) string {
+		return putSegment(t, obj, term, wal.Entry{Revision: rev, Term: term, Op: wal.OpCreate,
+			Key: fmt.Sprintf("/k%d-%d", term, rev), Value: []byte("v"), CreateRevision: rev, Version: 1}).Key
+	}
+	// Term 1 wrote sequences 1-3; term 2 took over at 3. afterSeq is 2, so only
+	// term 2's segment holds anything to apply.
+	keys := []string{put(1, 1), put(1, 2), put(1, 3), put(2, 3)}
+	var opened []string
+	open := func(i int) (io.ReadCloser, error) {
+		opened = append(opened, keys[i])
+		return obj.Get(context.Background(), keys[i])
+	}
+	merged, err := mergeWALSegments(keys, open, 2, "test", NoopLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != 1 || opened[0] != keys[3] {
+		t.Fatalf("opened %v, want only %s", opened, keys[3])
+	}
+	if len(merged) != 1 || merged[0].Term != 2 || merged[0].Sequence() != 3 {
+		t.Fatalf("merged %+v, want term 2's entry at sequence 3", merged)
 	}
 }
