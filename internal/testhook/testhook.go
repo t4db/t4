@@ -36,3 +36,8 @@ var BeforeMetaGenesis atomic.Pointer[func()]
 // acknowledged it. Tests use it to hold a follower behind what its leader
 // acknowledged.
 var BeforeFollowerApply atomic.Pointer[func(entries []wal.Entry)]
+
+// BeforeLeaderCatchUp, if set, runs in becomeLeader once a node has won the
+// lock, before it catches up from object storage. Tests use it to make that
+// catch-up outlast the lease.
+var BeforeLeaderCatchUp atomic.Pointer[func()]

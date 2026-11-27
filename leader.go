@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,14 @@ import (
 // may then create the database with the meta keyspace (see
 // initMetaAtGenesis); a promotion never does.
 func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *election.LockRecord, lockWriteStart time.Time, opening bool) error {
+	// Catch-up below can outlast the lease won with the lock; keep it until
+	// watchLoop takes over renewing.
+	releaseHold := n.holdLock(lock, rec)
+	defer releaseHold()
+	if f := testhook.BeforeLeaderCatchUp.Load(); f != nil {
+		(*f)()
+	}
+
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	if err := n.recoverLocalWALBeforeLeadership(walDir); err != nil {
 		return err
@@ -108,6 +117,10 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	grpcSrv := grpc.NewServer(serverOpts...)
 	peer.RegisterWalStreamServer(grpcSrv, peerSrv)
 
+	if renewed := releaseHold(); renewed.After(lockWriteStart) {
+		lockWriteStart = renewed
+	}
+
 	// Commit state transition atomically before accepting connections.
 	n.mu.Lock()
 	n.wal = w2
@@ -161,6 +174,54 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.log.Infof("t4: elected leader (term=%d, peer=%s)", rec.Term, n.cfg.PeerListenAddr)
 	go n.watchLoop(bgCtx, lock, rec.Term)
 	return nil
+}
+
+// holdLock renews the lock this node won as rec every fastRenewInterval, with
+// rec's fence, until the returned release is called. release waits for a
+// renewal in flight, so that one landing late cannot fail watchLoop's first
+// conditional write, and returns when the last successful renewal started
+// (the zero time if none did). It is safe to call more than once.
+func (n *Node) holdLock(lock *election.Lock, rec *election.LockRecord) (release func() time.Time) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var last time.Time
+	go func() {
+		defer close(done)
+		t := time.NewTicker(fastRenewInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+			}
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cur, etag, err := lock.ReadETag(ctx)
+			if err == nil && (cur == nil || cur.Term != rec.Term || cur.NodeID != n.cfg.NodeID) {
+				cancel()
+				return // superseded; watchLoop's first renewal steps down
+			}
+			if err == nil {
+				err = lock.Renew(ctx, rec.Term, n.cfg.AdvertisePeerAddr, etag, rec.Fence(), rec.ObjectStoreComplete, start, fastTTL)
+			}
+			cancel()
+			if errors.Is(err, object.ErrPreconditionFailed) {
+				return
+			}
+			if err != nil {
+				n.log.Warnf("t4: renew lock during promotion: %v", err)
+				continue
+			}
+			last = start
+		}
+	}()
+	var once sync.Once
+	return func() time.Time {
+		once.Do(func() { close(stop) })
+		<-done
+		return last
+	}
 }
 
 // recoverLocalWALBeforeLeadership closes the follower WAL, applies every
