@@ -1,5 +1,5 @@
 # Runs Patroni's own acceptance suite (features/*.feature) against T4 instead
-# of etcd. See patroni/README.md.
+# of etcd. See tests/patroni/README.md.
 #
 # Declared before the first FROM so both stages can see them: an ARG after a
 # FROM belongs to that stage only.
@@ -63,11 +63,11 @@ RUN set -ex \
     && chown -R postgres:postgres "$PGHOME" /patroni
 
 COPY --from=builder /t4 /usr/local/bin/t4
-COPY patroni/t4_controller.py /t4_controller.py
+COPY tests/patroni/t4_controller.py /t4_controller.py
 RUN cat /t4_controller.py >> /patroni/features/environment.py \
     && chown postgres:postgres /patroni/features/environment.py
 
-COPY patroni/entrypoint.sh /entrypoint.sh
+COPY tests/patroni/entrypoint.sh /entrypoint.sh
 
 USER postgres
 WORKDIR /patroni

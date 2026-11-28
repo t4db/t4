@@ -1,5 +1,5 @@
 # Runs JuiceFS's own metadata-engine tests (pkg/meta) against T4 instead of
-# etcd. See juicefs/README.md.
+# etcd. See tests/juicefs/README.md.
 #
 # Declared before the first FROM so both stages can see it: an ARG after a
 # FROM belongs to that stage only.
@@ -41,7 +41,7 @@ WORKDIR /juicefs
 RUN go mod download && go test -c -o /dev/null ./pkg/meta/
 
 COPY --from=builder /t4 /usr/local/bin/t4
-COPY juicefs/entrypoint.sh /entrypoint.sh
+COPY tests/juicefs/entrypoint.sh /entrypoint.sh
 
 # Default: the two etcd suites. Pass `go test` arguments to narrow or widen,
 # e.g. -run TestFSOps -rapid.meta=etcd://127.0.0.1:3379/jfs ./pkg/meta/

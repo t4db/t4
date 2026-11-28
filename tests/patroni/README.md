@@ -15,9 +15,9 @@ that answers wrongly under contention, promotes a second primary.
 ## Running
 
 ```bash
-./patroni/run.sh                                     # the whole suite
-./patroni/run.sh features/basic_replication.feature  # one feature
-./patroni/run.sh -n 'add the second node'            # one scenario
+./tests/patroni/run.sh                                     # the whole suite
+./tests/patroni/run.sh features/basic_replication.feature  # one feature
+./tests/patroni/run.sh -n 'add the second node'            # one scenario
 ```
 
 Everything runs in Docker: Postgres, Patroni and `behave` in the container,
@@ -26,7 +26,7 @@ host and no object store is involved — a single T4 node runs with local-only
 durability, the same scope as the `etcd --data-dir` it replaces.
 
 Logs, including each Patroni's own log and the T4 node's, land in
-`patroni/output/`.
+`tests/patroni/output/`.
 
 ## How it hooks in
 
