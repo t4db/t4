@@ -3,6 +3,7 @@ package t4
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -104,7 +105,7 @@ func TestMergeSkipsCoveredSegments(t *testing.T) {
 		opened = append(opened, keys[i])
 		return obj.Get(context.Background(), keys[i])
 	}
-	merged, err := mergeWALSegments(keys, open, 2, "test", NoopLogger)
+	merged, err := mergeWALSegments(keys, open, 2, nil, "test", NoopLogger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,5 +114,53 @@ func TestMergeSkipsCoveredSegments(t *testing.T) {
 	}
 	if len(merged) != 1 || merged[0].Term != 2 || merged[0].Sequence() != 3 {
 		t.Fatalf("merged %+v, want term 2's entry at sequence 3", merged)
+	}
+}
+
+// mergeKeys writes one single-entry segment per (term, seq) and returns the
+// keys and an opener.
+func mergeKeys(t *testing.T, segs ...[2]int64) ([]string, func(int) (io.ReadCloser, error)) {
+	t.Helper()
+	obj := object.NewMem()
+	var keys []string
+	for _, s := range segs {
+		term, rev := uint64(s[0]), s[1]
+		keys = append(keys, putSegment(t, obj, term, wal.Entry{Revision: rev, Term: term, Op: wal.OpCreate,
+			Key: fmt.Sprintf("/k%d-%d", term, rev), Value: []byte("v"), CreateRevision: rev, Version: 1}).Key)
+	}
+	return keys, func(i int) (io.ReadCloser, error) { return obj.Get(context.Background(), keys[i]) }
+}
+
+// The node's entry at afterSeq must be object storage's (#441): a node whose
+// sequence 3 has term 1 must not apply term 2's 4 on top when term 2 took
+// over at 3.
+func TestMergeDetectsBoundaryTermMismatch(t *testing.T) {
+	keys, open := mergeKeys(t, [2]int64{1, 1}, [2]int64{1, 2}, [2]int64{1, 3}, [2]int64{2, 3}, [2]int64{2, 4})
+	_, err := mergeWALSegments(keys, open, 3, &replayBoundary{term: 1}, "test", NoopLogger)
+	var div *divergedError
+	if !errors.As(err, &div) || div.seq != 3 || div.local != 1 || div.remote != 2 || div.newest != 2 {
+		t.Fatalf("got %v, want divergence at 3 (local 1, remote 2, newest 2)", err)
+	}
+	// The same node continuing term 2's log replays normally, without the
+	// boundary entry.
+	merged, err := mergeWALSegments(keys, open, 3, &replayBoundary{term: 2}, "test", NoopLogger)
+	if err != nil || len(merged) != 1 || merged[0].Sequence() != 4 {
+		t.Fatalf("matching boundary: %+v, %v", merged, err)
+	}
+}
+
+// A boundary entry may only be missing where a checkpoint covers it.
+func TestMergeBoundaryUnverified(t *testing.T) {
+	keys, open := mergeKeys(t, [2]int64{2, 5}, [2]int64{2, 6})
+	if _, err := mergeWALSegments(keys, open, 3, &replayBoundary{term: 2, coveredThrough: 2}, "test", NoopLogger); !errors.Is(err, errBoundaryUnverified) {
+		t.Fatalf("uncovered missing boundary: %v", err)
+	}
+	// Covered by a checkpoint: its segment may be gone.
+	if _, err := mergeWALSegments(keys, open, 4, &replayBoundary{term: 2, coveredThrough: 4}, "test", NoopLogger); err != nil {
+		t.Fatalf("covered missing boundary: %v", err)
+	}
+	// Nothing past the boundary: nothing to check or replay.
+	if merged, err := mergeWALSegments(keys, open, 6, &replayBoundary{term: 2}, "test", NoopLogger); err != nil || len(merged) != 0 {
+		t.Fatalf("at the end: %+v, %v", merged, err)
 	}
 }

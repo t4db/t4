@@ -52,7 +52,7 @@ func TestInPlaceRestoreKeepsWaiters(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	if err := follower.resyncFromCheckpoint(follower.bgCtx); err != nil {
+	if _, err := follower.resyncFromCheckpoint(follower.bgCtx); err != nil {
 		t.Fatalf("resync: %v", err)
 	}
 	select {
