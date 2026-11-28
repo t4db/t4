@@ -107,7 +107,7 @@ func TestMarkerOnlyBatchDoesNotEvictSlowWatch(t *testing.T) {
 
 	// Marker-only fan-out: nothing matches /quiet/, so this watch is offered a
 	// standalone marker it cannot accept.
-	s.dispatchWatchEvents([]Event{{Type: EventPut, KV: &KeyValue{Key: "/other/k", Revision: 2}}}, 2, true)
+	s.dispatchWatchEvents([]Event{{Type: EventPut, KV: &KeyValue{Key: "/other/k", Revision: 2}}}, 2, true, 0)
 
 	s.watchHubMu.Lock()
 	_, alive := s.watchers[id]
@@ -117,7 +117,7 @@ func TestMarkerOnlyBatchDoesNotEvictSlowWatch(t *testing.T) {
 	}
 
 	// An events batch it cannot accept still evicts: that is real backpressure.
-	s.dispatchWatchEvents([]Event{{Type: EventPut, KV: &KeyValue{Key: "/quiet/k", Revision: 3}}}, 3, false)
+	s.dispatchWatchEvents([]Event{{Type: EventPut, KV: &KeyValue{Key: "/quiet/k", Revision: 3}}}, 3, false, 0)
 
 	s.watchHubMu.Lock()
 	_, alive = s.watchers[id]

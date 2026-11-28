@@ -2416,6 +2416,15 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 		if err != nil {
 			return
 		}
+		// A compaction past the cursor, applied in the same batch as the
+		// revisions it covers or before the loop reached them, may have removed
+		// records the scan needed. As in replayWatchRange, watches that wanted
+		// them end rather than receive the survivors as if nothing were
+		// missing; applyCompact raises compactRev before its deletions commit.
+		var lostBelow int64
+		if c := atomic.LoadInt64(&s.compactRev); c > nextRev {
+			lostBelow = c
+		}
 		// Standalone markers go to watches that matched nothing; watches that
 		// did receive events carry their marker in the same batch for free and
 		// are never gated here.
@@ -2432,7 +2441,7 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 		if standalone {
 			lastMarkerRev, lastMarkerAt = toRev, time.Now()
 		}
-		matched := s.dispatchWatchEvents(events, toRev, standalone)
+		matched := s.dispatchWatchEvents(events, toRev, standalone, lostBelow)
 		recordWatchScanMetrics(time.Since(start), nextRev, toRev, scanned, matched)
 		nextRev = toRev + 1
 	}
@@ -2449,7 +2458,10 @@ func (s *Store) watchDispatchLoop(nextRev int64) {
 // has nextRev beyond every revision in this batch (the dispatcher only reaches
 // here after scanning up to the committed revision), so it correctly receives
 // nothing from this batch and joins from the next one.
-func (s *Store) dispatchWatchEvents(events []Event, toRev int64, standalone bool) int {
+//
+// Watches whose first wanted revision in the batch is below lostBelow are
+// ended instead: the batch may be missing records compaction removed.
+func (s *Store) dispatchWatchEvents(events []Event, toRev int64, standalone bool, lostBelow int64) int {
 	// snap is a copy of a subscription's routing fields plus a pointer back to
 	// the subscription, taken so PrevKV disk reads below run without the lock.
 	type snap struct {
@@ -2532,6 +2544,13 @@ func (s *Store) dispatchWatchEvents(events []Event, toRev int64, standalone bool
 	s.watchHubMu.Lock()
 	for i, sn := range snaps {
 		batch := batches[i]
+		if sn.nextRev < lostBelow {
+			if current, ok := s.watchers[sn.id]; ok && current == sn.w {
+				delete(s.watchers, sn.id)
+				close(sn.w.live)
+			}
+			continue
+		}
 		markerOnly := false
 		if len(batch) == 0 {
 			if silent == nil || !sn.progress {
