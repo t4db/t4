@@ -36,6 +36,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 
 	for {
 		cli.SetLeaderGoneCheck(func(ctx context.Context) bool { return n.lockReleased(ctx, lock) })
+		cli.SetLastTermFn(func() uint64 { return n.db.Load().LastPosition().Term })
 		// A follower that heard the leader may take over knownTakeoverDelay
 		// after it last did (see mayTakeOver); try then, not only once
 		// FollowerMaxRetries reconnects have failed.
@@ -90,6 +91,17 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			return
 		}
 
+		if term, ok := peer.IsDiverged(err); ok {
+			n.log.Warnf("t4: this node's log diverged from the leader's (term %d) — discarding it for a checkpoint", term)
+			if rerr := n.forcedResync(bgCtx, term); rerr != nil {
+				n.log.Errorf("t4: resync after divergence failed: %v — stopping", rerr)
+				n.stop(fmt.Errorf("t4: resync after divergence: %w", rerr))
+				return
+			}
+			fromRev = n.db.Load().LastSequence() + 1
+			continue
+		}
+
 		if peer.IsResyncRequired(err) {
 			metrics.FollowerResyncsTotal.WithLabelValues("stream_gap").Inc()
 			if n.cfg.ObjectStore == nil {
@@ -102,14 +114,19 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			// the latest S3 checkpoint (if the follower's Pebble is behind it),
 			// then replay any remaining WAL entries from S3.
 			n.log.Warnf("t4: follower resync required — restoring from checkpoint")
-			if cpErr := n.resyncFromCheckpoint(bgCtx); cpErr != nil {
+			covered, cpErr := n.resyncFromCheckpoint(bgCtx)
+			if cpErr != nil {
 				n.log.Errorf("t4: follower in-place resync failed: %v — cancelling", cpErr)
 				n.stop(fmt.Errorf("t4: follower resync from checkpoint: %w", cpErr))
 				return
 			}
 			reCtx, reCancel := context.WithTimeout(bgCtx, 5*time.Minute)
-			rerr := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), n.log)
+			rerr := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), covered, n.log)
 			reCancel()
+			if term, ok := replayDiverged(rerr, n.currentTerm()); ok {
+				n.log.Warnf("t4: %v — discarding this node's log for a checkpoint", rerr)
+				rerr = n.forcedResync(bgCtx, term)
+			}
 			if rerr != nil {
 				n.log.Errorf("t4: follower S3 resync failed: %v — retrying", rerr)
 				select {
@@ -135,7 +152,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 			return
 		}
 
-		if peer.IsLeaderUnreachable(err) || peer.IsLeaderShutdown(err) {
+		if peer.IsLeaderUnreachable(err) || peer.IsLeaderShutdown(err) || peer.IsLeaderStale(err) {
 			if peer.IsLeaderShutdown(err) {
 				n.log.Infof("t4: leader shut down gracefully — attempting immediate election takeover")
 			} else {
@@ -265,13 +282,18 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 			// WAL segments covered by the latest checkpoint may already be
 			// garbage-collected: restore the checkpoint first if this node is
 			// behind it, as the follow loop's resync does.
-			if err := n.resyncFromCheckpoint(bgCtx); err != nil {
+			covered, err := n.resyncFromCheckpoint(bgCtx)
+			if err != nil {
 				n.log.Errorf("t4: takeover catch-up checkpoint restore: %v — will retry", err)
 				return nil, false
 			}
 			catchupCtx, catchupCancel := context.WithTimeout(bgCtx, 2*time.Minute)
-			rerr := replayRemote(catchupCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), n.log)
+			rerr := replayRemote(catchupCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), covered, n.log)
 			catchupCancel()
+			if term, ok := replayDiverged(rerr, n.currentTerm()); ok {
+				n.log.Warnf("t4: takeover catch-up: %v — discarding this node's log for a checkpoint", rerr)
+				rerr = n.forcedResync(bgCtx, term)
+			}
 			if rerr != nil {
 				n.log.Errorf("t4: takeover catch-up replay: %v — will retry", rerr)
 				return nil, false
@@ -425,21 +447,24 @@ func fwdOpLabel(op peer.ForwardOp) string {
 // It uses restoreDBIfBehindCheckpoint to close the WAL gap, then (if a restore
 // was actually performed) replaces the local WAL so subsequent Appends from the
 // live stream start at the correct revision.
-func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
+//
+// covered is the latest checkpoint's sequence, for replayRemote.
+func (n *Node) resyncFromCheckpoint(bgCtx context.Context) (covered int64, err error) {
 	ctx, cancel := context.WithTimeout(bgCtx, 5*time.Minute)
 	defer cancel()
 
-	restored, err := n.restoreDBIfBehindCheckpoint(ctx)
-	if err != nil {
-		return err
+	covered, restored, err := n.restoreDBIfBehindCheckpoint(ctx)
+	if err != nil || !restored {
+		return covered, err
 	}
-	if !restored {
-		return nil
-	}
+	return covered, n.replaceFollowerWAL(bgCtx)
+}
 
-	// ── Phase 3: replace WAL and update node metadata ────────────────────────
-	// followLoop is the sole WAL writer for a follower, so no concurrent
-	// Append calls can race with this replacement.
+// replaceFollowerWAL starts an empty follower WAL after a checkpoint restore,
+// so the old segments are neither replayed on restart nor uploaded if this
+// node is promoted. followLoop is the sole WAL writer for a follower, so no
+// concurrent Append can race with the replacement.
+func (n *Node) replaceFollowerWAL(bgCtx context.Context) error {
 	walDir := filepath.Join(n.cfg.DataDir, "wal")
 	newRev := n.db.Load().CurrentRevision()
 	newSeq := n.db.Load().LastSequence()
@@ -485,4 +510,66 @@ func (n *Node) trimLocalWAL(seq int64) {
 	} else if removed > 0 {
 		n.log.Debugf("t4: trimmed %d local WAL segments through seq %d", removed, seq)
 	}
+}
+
+// forcedResyncTimeout bounds how long a diverged node waits for a checkpoint
+// of the current term before giving up.
+const forcedResyncTimeout = 5 * time.Minute
+
+// forcedResync repairs a node whose log diverged from the leader's or object
+// storage's (#441): it discards its state for a checkpoint of term or later
+// (waiting for one to be written), starts an empty WAL and replays object
+// storage, checked like every replay. Run by followLoop, the follower WAL's
+// only writer.
+func (n *Node) forcedResync(bgCtx context.Context, term uint64) error {
+	if n.cfg.ObjectStore == nil {
+		return errors.New("diverged from the leader and no object store to resync from")
+	}
+	ctx, cancel := context.WithTimeout(bgCtx, forcedResyncTimeout)
+	defer cancel()
+	wait := 500 * time.Millisecond
+	for {
+		covered, _, err := n.restoreDBFromCheckpoint(ctx, term, true)
+		if err == nil {
+			if err = n.replaceFollowerWAL(bgCtx); err != nil {
+				return err
+			}
+			err = replayRemote(ctx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), covered, n.log)
+			if err == nil {
+				n.db.Load().NotifyRevision()
+				n.log.Infof("t4: diverged node resynced from a checkpoint of term >= %d (now at seq=%d)", term, n.db.Load().LastSequence())
+				return nil
+			}
+		}
+		var div *divergedError
+		switch {
+		case errors.As(err, &div):
+			term = max(term, div.newest) // a newer leader wrote meanwhile
+		case errors.Is(err, errCheckpointTooOld), errors.Is(err, errBoundaryUnverified):
+		default:
+			return err
+		}
+		n.log.Infof("t4: diverged node waiting for a checkpoint of term >= %d: %v", term, err)
+		select {
+		case <-time.After(wait):
+			wait = min(2*wait, 10*time.Second)
+		case <-ctx.Done():
+			return fmt.Errorf("resync after divergence: %w (last: %v)", ctx.Err(), err)
+		}
+	}
+}
+
+// replayDiverged reports whether a replay error means this node's log cannot
+// be shown to continue object storage's, and the term a checkpoint that
+// repairs it must have: the newest in object storage when the logs differ,
+// or at least this node's current term when the boundary entry is missing.
+func replayDiverged(err error, current uint64) (uint64, bool) {
+	var div *divergedError
+	switch {
+	case errors.As(err, &div):
+		return max(div.newest, current), true
+	case errors.Is(err, errBoundaryUnverified):
+		return current, true
+	}
+	return 0, false
 }

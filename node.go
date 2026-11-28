@@ -592,6 +592,8 @@ func Open(cfg Config) (*Node, error) {
 	}
 
 	// ── Restore checkpoint ───────────────────────────────────────────────────
+	// coveredThrough is the latest checkpoint's sequence, for replayRemote.
+	var coveredThrough int64
 	switch {
 	case cfg.RestorePoint != nil:
 		// Point-in-time restore from pinned S3 version IDs. Only applied on
@@ -651,6 +653,7 @@ func Open(cfg Config) (*Node, error) {
 			return nil, fmt.Errorf("t4: read manifest: %w", err)
 		}
 		if manifest != nil {
+			coveredThrough = manifest.LastSequence
 			log.Infof("t4: manifest found (rev=%d)", manifest.Revision)
 			if _, err := os.Stat(pebbleDir); errors.Is(err, os.ErrNotExist) {
 				// Retry loop: the checkpoint referenced by the manifest may
@@ -682,6 +685,7 @@ func Open(cfg Config) (*Node, error) {
 					if manifest == nil {
 						break // manifest disappeared; start fresh without checkpoint
 					}
+					coveredThrough = manifest.LastSequence
 				}
 			}
 		}
@@ -806,7 +810,9 @@ func Open(cfg Config) (*Node, error) {
 		if cfg.ObjectStore != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			if err := replayRemote(ctx, db, cfg.ObjectStore, db.LastSequence(), log); err != nil {
+			// Its own object store's manifest is not read here: accept missing
+			// boundary entries, still refuse a different term at one.
+			if err := replayRemote(ctx, db, cfg.ObjectStore, db.LastSequence(), db.LastSequence(), log); err != nil {
 				w.Close()
 				db.Close()
 				return nil, fmt.Errorf("t4: branch WAL replay: %w", err)
@@ -834,7 +840,15 @@ func Open(cfg Config) (*Node, error) {
 		// per checkpoint interval that fires during replay.
 		for range 10 { // cap at 10 iterations; converges in 1-2 on any real cluster
 			startRevBeforeReplay := db.CurrentRevision()
-			replayErr := replayRemote(ctx, db, cfg.ObjectStore, db.LastSequence(), log)
+			replayErr := replayRemote(ctx, db, cfg.ObjectStore, db.LastSequence(), coveredThrough, log)
+			// A local log that diverged from object storage (#441) is not
+			// repaired here, with no leader to say which history won: the node
+			// starts on what it has, and the leader refuses its stream until it
+			// resyncs (followLoop). It must not stack the remote entries on it.
+			if div := (*divergedError)(nil); errors.As(replayErr, &div) || errors.Is(replayErr, errBoundaryUnverified) {
+				log.Warnf("t4: %v — not replaying object storage; the leader will make this node resync", replayErr)
+				break
+			}
 
 			// Always check manifest after replay, even on error: if a WAL
 			// segment was GCed mid-read replayRemote returns ErrNotFound, but
@@ -842,6 +856,9 @@ func Open(cfg Config) (*Node, error) {
 			// from that checkpoint is the correct recovery; returning the error
 			// directly would cause Open() to fail unnecessarily.
 			freshManifest, merr := cp.ReadManifest(ctx, cfg.ObjectStore)
+			if freshManifest != nil {
+				coveredThrough = freshManifest.LastSequence
+			}
 
 			if replayErr != nil {
 				// If the checkpoint has not advanced there is no recovery path —
@@ -889,6 +906,7 @@ func Open(cfg Config) (*Node, error) {
 					w.Close()
 					return nil, fmt.Errorf("t4: re-read manifest after GC: %w", err)
 				}
+				coveredThrough = manifest.LastSequence
 			}
 			_ = newRev // term drives WAL open; startRev is read from Pebble below
 			if sstUp != nil {

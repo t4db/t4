@@ -81,7 +81,7 @@ func TestInPlaceRestoreForgetsReplacedSSTs(t *testing.T) {
 	}
 
 	// 3. The follower restores the checkpoint in place.
-	if err := follower.resyncFromCheckpoint(follower.bgCtx); err != nil {
+	if _, err := follower.resyncFromCheckpoint(follower.bgCtx); err != nil {
 		t.Fatalf("resync: %v", err)
 	}
 	if got := follower.db.Load().LastSequence(); got < m.LastSequence {

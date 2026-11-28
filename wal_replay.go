@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/t4db/t4/internal/checkpoint"
 	istore "github.com/t4db/t4/internal/store"
 	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
@@ -37,7 +38,7 @@ func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, after
 		seg := rp.WALSegments[i]
 		return rp.Store.GetVersioned(ctx, seg.Key, seg.VersionID)
 	}
-	merged, err := mergeWALSegments(keys, open, afterSeq, "replayPinned", log)
+	merged, err := mergeWALSegments(keys, open, afterSeq, nil, "replayPinned", log)
 	if err != nil || len(merged) == 0 {
 		return err
 	}
@@ -56,14 +57,44 @@ func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, after
 // On success n.db and n.term are updated and the function returns true.
 // Returns (false, nil) when no restore was needed (already at or above
 // the latest checkpoint WAL sequence).
-func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
+func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (covered int64, restored bool, err error) {
+	return n.restoreDBFromCheckpoint(ctx, 0, false)
+}
+
+// errCheckpointTooOld means no checkpoint of the required term exists yet.
+var errCheckpointTooOld = errors.New("no checkpoint of the required term yet")
+
+// restoreDBFromCheckpoint is restoreDBIfBehindCheckpoint, or with force a
+// restore of the latest checkpoint even if it is behind this node: a node
+// whose log diverged (#441) discards it. A forced restore needs a checkpoint
+// of term minTerm or later (errCheckpointTooOld otherwise), since an older
+// one may hold the very history being discarded, and it does not keep this
+// node's leader-known position: that may count the discarded entries, and
+// would let this node pass a takeover fence it should not.
+//
+// covered is the sequence of the checkpoint it read, for replayRemote.
+func (n *Node) restoreDBFromCheckpoint(ctx context.Context, minTerm uint64, force bool) (covered int64, restored bool, err error) {
 	manifest, err := n.cp.ReadManifest(ctx, n.cfg.ObjectStore)
 	if err != nil {
-		return false, fmt.Errorf("read manifest: %w", err)
+		return 0, false, fmt.Errorf("read manifest: %w", err)
 	}
-	if manifest == nil || manifest.LastSequence <= n.db.Load().LastSequence() {
-		return false, nil // already at or above checkpoint
+	if manifest != nil {
+		covered = manifest.LastSequence
 	}
+	switch {
+	case force && (manifest == nil || manifest.Term < minTerm):
+		return covered, false, errCheckpointTooOld
+	case !force && (manifest == nil || manifest.LastSequence <= n.db.Load().LastSequence()):
+		return covered, false, nil // already at or above checkpoint
+	}
+	restored, err = n.restoreManifest(ctx, manifest, force)
+	return manifest.LastSequence, restored, err
+}
+
+// restoreManifest restores the checkpoint manifest names (see
+// restoreDBFromCheckpoint).
+func (n *Node) restoreManifest(ctx context.Context, manifest *checkpoint.Manifest, force bool) (bool, error) {
+	var err error
 	n.log.Infof("t4: node at rev=%d seq=%d is behind checkpoint rev=%d seq=%d — restoring in place",
 		n.db.Load().CurrentRevision(), n.db.Load().LastSequence(), manifest.Revision, manifest.LastSequence)
 
@@ -120,8 +151,11 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	n.fenceMu.Lock()
 	oldDB := n.db.Load()
 	// The checkpoint carries the writer's leader-known position, not this
-	// node's: keep this node's own across the swap.
-	known := oldDB.LeaderKnownPosition()
+	// node's: keep this node's own across the swap, unless discarding it.
+	var known istore.Position
+	if !force {
+		known = oldDB.LeaderKnownPosition()
+	}
 	oldDB.SignalClose() // unblocks WaitForRevision waiters before we take readMu.Lock
 	n.readMu.Lock()
 	if rerr := oldDB.Close(); rerr != nil {
@@ -195,24 +229,62 @@ func reconcileSSTs(ctx context.Context, up *istore.SSTUploader, db *istore.Store
 // the highest WAL/peer-stream sequence already applied to db (typically
 // db.LastSequence()); entries with Sequence <= afterSeq are skipped. After
 // merge, the stream is required to be sequence-contiguous starting from
-// afterSeq+1.
-func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, afterSeq int64, log Logger) error {
+// afterSeq+1, and to continue db's log: the entry at afterSeq must have the
+// term db's last entry has (*divergedError otherwise, #441).
+//
+// coveredThrough is the latest checkpoint's sequence, which callers have
+// just read: segments it covers may be garbage-collected, so a missing
+// boundary entry at or below it is not evidence of anything.
+func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, afterSeq, coveredThrough int64, log Logger) error {
 	keys, err := obj.List(ctx, "wal/")
 	if err != nil {
 		return err
 	}
+	// A store too old to record its last term (zero) cannot be checked.
+	var b *replayBoundary
+	if t := db.LastPosition().Term; t > 0 {
+		b = &replayBoundary{term: t, coveredThrough: coveredThrough}
+	}
 	open := func(i int) (io.ReadCloser, error) { return obj.Get(ctx, keys[i]) }
-	merged, err := mergeWALSegments(keys, open, afterSeq, "replayRemote", log)
+	merged, err := mergeWALSegments(keys, open, afterSeq, b, "replayRemote", log)
 	if err != nil || len(merged) == 0 {
 		return err
 	}
 	return db.Recover(merged)
 }
 
+// replayBoundary is what object storage's log must continue: the term of the
+// replaying node's entry at afterSeq. coveredThrough is the latest
+// checkpoint's sequence; at or below it the entry may be gone.
+type replayBoundary struct {
+	term           uint64
+	coveredThrough int64
+}
+
+// divergedError reports that object storage's log does not continue the
+// node's: the entry at seq has term remote there, local here. newest is the
+// highest term in object storage, the earliest a checkpoint that repairs the
+// node may be from.
+type divergedError struct {
+	seq           int64
+	local, remote uint64
+	newest        uint64
+}
+
+func (e *divergedError) Error() string {
+	return fmt.Sprintf("local log diverged from object storage at seq %d (local term %d, object storage term %d)", e.seq, e.local, e.remote)
+}
+
+// errBoundaryUnverified means object storage lacks the entry at the replay
+// boundary although nothing has covered it, so whether its log continues the
+// node's cannot be checked.
+var errBoundaryUnverified = errors.New("object storage lacks the entry at the replay boundary")
+
 // mergeWALSegments reads the WAL segments at object keys, opened through
 // open, and returns their entries with Sequence > afterSeq as one history in
-// sequence order. what names the caller in errors and logs.
-func mergeWALSegments(keys []string, open func(i int) (io.ReadCloser, error), afterSeq int64, what string, log Logger) ([]wal.Entry, error) {
+// sequence order. With a boundary it also checks that the history continues
+// the caller's log at afterSeq. what names the caller in errors and logs.
+func mergeWALSegments(keys []string, open func(i int) (io.ReadCloser, error), afterSeq int64, boundary *replayBoundary, what string, log Logger) ([]wal.Entry, error) {
 	// Build per-term cutoffs to handle leader-change conflicts.
 	//
 	// When a new leader takes over at sequence X, it starts writing a new term
@@ -249,7 +321,7 @@ func mergeWALSegments(keys []string, open func(i int) (io.ReadCloser, error), af
 		if j, _ := slices.BinarySearch(fs, first+1); j < len(fs) {
 			end = min(end, fs[j])
 		}
-		if end-1 <= afterSeq {
+		if end-1 < afterSeq || (end-1 == afterSeq && boundary == nil) {
 			continue
 		}
 
@@ -271,7 +343,7 @@ func mergeWALSegments(keys []string, open func(i int) (io.ReadCloser, error), af
 			log.Warnf("t4: %s: partial segment %q: %v", what, key, readErr)
 		}
 		for _, e := range entries {
-			if e.Sequence() <= afterSeq {
+			if e.Sequence() < afterSeq || (e.Sequence() == afterSeq && boundary == nil) {
 				continue // already covered by checkpoint / local WAL
 			}
 			if e.Sequence() >= termCutoff {
@@ -279,10 +351,6 @@ func mergeWALSegments(keys []string, open func(i int) (io.ReadCloser, error), af
 			}
 			all = append(all, *e)
 		}
-	}
-
-	if len(all) == 0 {
-		return nil, nil
 	}
 
 	// Ensure deterministic order and resolve same-revision duplicates by
@@ -302,6 +370,25 @@ func mergeWALSegments(keys []string, open func(i int) (io.ReadCloser, error), af
 			continue
 		}
 		merged = append(merged, e)
+	}
+
+	if boundary != nil && afterSeq > 0 {
+		if len(merged) > 0 && merged[0].Sequence() == afterSeq {
+			if t := merged[0].Term; t != boundary.term {
+				var newest uint64
+				for _, key := range keys {
+					term, _ := parseWALKey(key)
+					newest = max(newest, term)
+				}
+				return nil, &divergedError{seq: afterSeq, local: boundary.term, remote: t, newest: newest}
+			}
+			merged = merged[1:]
+		} else if len(merged) > 0 && afterSeq > boundary.coveredThrough {
+			return nil, errBoundaryUnverified
+		}
+	}
+	if len(merged) == 0 {
+		return nil, nil
 	}
 
 	// Fail closed on holes: a missing sequence means we likely raced WAL GC

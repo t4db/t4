@@ -64,14 +64,15 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// segments still present in S3.
 	if n.cfg.ObjectStore != nil {
 		cpCtx, cpCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		if _, cpErr := n.restoreDBIfBehindCheckpoint(cpCtx); cpErr != nil {
+		covered, _, cpErr := n.restoreDBIfBehindCheckpoint(cpCtx)
+		if cpErr != nil {
 			cpCancel()
 			return fmt.Errorf("t4: leader checkpoint catch-up: %w", cpErr)
 		}
 		cpCancel()
 
 		reCtx, reCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		if err := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), n.log); err != nil {
+		if err := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), covered, n.log); err != nil {
 			reCancel()
 			return fmt.Errorf("t4: becomeLeader replay remote WAL: %w", err)
 		}
@@ -162,7 +163,8 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// post-compact checkpoint LastSequence > CurrentRevision, so seeding
 	// startRev from CurrentRevision would let stale followers connect from a
 	// sequence that exists only in Pebble/S3 — not the ring buffer.
-	peerSrv.SetStartRev(n.db.Load().LastSequence() + 1)
+	last := n.db.Load().LastPosition()
+	peerSrv.SetStartRev(last.Seq+1, last.Term)
 
 	go func() {
 		if err := grpcSrv.Serve(lis); err != nil {

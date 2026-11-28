@@ -36,9 +36,38 @@ var ErrLeaderUnreachable = status.Error(codes.Unavailable, "leader_unreachable")
 // without waiting for the normal retry cycle to exhaust.
 var ErrLeaderShutdown = status.Error(codes.Unavailable, "leader_shutdown")
 
-// IsResyncRequired reports whether err is an ErrResyncRequired signal.
+// errLeaderStale is returned to a follower whose last entry has a higher
+// term than this leader's: this leader has been deposed. The follower finds
+// the current leader instead of resyncing from this one.
+var errLeaderStale = status.Error(codes.Unavailable, "leader_stale")
+
+// DivergedError reports that the follower's log does not continue the
+// leader's: the follower holds entries the leader of term never wrote. The
+// follower must resync from a checkpoint of that term or later.
+func DivergedError(term uint64) error {
+	return status.Error(codes.FailedPrecondition, fmt.Sprintf("diverged term=%d", term))
+}
+
+// IsResyncRequired reports whether err is an ErrResyncRequired signal, or a
+// DivergedError (check IsDiverged first to tell them apart).
 func IsResyncRequired(err error) bool {
 	return status.Code(err) == codes.FailedPrecondition
+}
+
+// IsDiverged reports whether err is a DivergedError, and its leader's term.
+func IsDiverged(err error) (term uint64, ok bool) {
+	s, isStatus := status.FromError(err)
+	if !isStatus || s.Code() != codes.FailedPrecondition {
+		return 0, false
+	}
+	_, scanErr := fmt.Sscanf(s.Message(), "diverged term=%d", &term)
+	return term, scanErr == nil
+}
+
+// IsLeaderStale reports whether err says the leader was deposed.
+func IsLeaderStale(err error) bool {
+	s, ok := status.FromError(err)
+	return ok && s.Code() == codes.Unavailable && s.Message() == "leader_stale"
 }
 
 // IsLeaderUnreachable reports whether err is an ErrLeaderUnreachable signal.
@@ -213,6 +242,11 @@ type FollowRequest struct {
 	// (wal.WALFormatVersion). Zero means the follower predates this field.
 	// A leader must not stream entries in a newer format to that follower.
 	WALFormat int `json:"wal_format,omitempty"`
+	// LastTerm is the term of the follower's entry at FromRevision-1, valid
+	// when Proto >= 1. The leader refuses a follower whose log does not
+	// continue its own there (DivergedError).
+	LastTerm uint64 `json:"last_term,omitempty"`
+	Proto    int    `json:"follow_proto,omitempty"`
 }
 
 // AckMsg is sent by a follower to the leader on the bidi Follow stream to

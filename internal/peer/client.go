@@ -81,6 +81,10 @@ type Client struct {
 	// uploadedSeq is the last UploadedSeq the leader's heartbeats carried.
 	uploadedSeq atomic.Int64
 
+	// lastTerm returns the term of the follower's last applied entry, sent
+	// with each FollowRequest (SetLastTermFn).
+	lastTerm atomic.Pointer[func() uint64]
+
 	log peerLogger
 }
 
@@ -121,6 +125,12 @@ func (c *Client) SetLastHeard(term uint64, at time.Time) {
 // attempt. When it reports that the leader has left for good, Follow returns
 // ErrLeaderShutdown at once instead of retrying a dead address. Must not be
 // called while Follow runs.
+// SetLastTermFn sets how the client reads the term of the follower's last
+// applied entry, which lets the leader check that the follower's log
+// continues its own. It must describe the entry at the fromRev-1 the client
+// asks from: the follower applies a batch before the client asks for more.
+func (c *Client) SetLastTermFn(f func() uint64) { c.lastTerm.Store(&f) }
+
 // UploadedSeq returns the sequence up to which the leader last reported
 // object storage holds every entry, or 0 if it has not.
 func (c *Client) UploadedSeq() int64 { return c.uploadedSeq.Load() }
@@ -214,6 +224,9 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Ent
 		if IsResyncRequired(err) {
 			c.log.Errorf("peer: leader requires resync from rev=%d: %v", fromRev, err)
 			return err
+		}
+		if IsLeaderStale(err) {
+			return err // the caller finds the current leader
 		}
 		// Not transient: retrying would eventually surface as
 		// ErrLeaderUnreachable and trigger a takeover attempt by a node that
@@ -330,12 +343,20 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 		return errLeaderSilent
 	}
 
-	stream, err := NewWalStreamClient(conn).Follow(streamCtx, &FollowRequest{
+	req := &FollowRequest{
 		FromRevision: fromRev,
 		NodeID:       c.nodeID,
 		Heartbeats:   true,
 		WALFormat:    wal.WALFormatVersion,
-	})
+	}
+	// Terms start at 1: zero means a store too old to record its last term,
+	// which the leader cannot verify and must not take for divergence.
+	if f := c.lastTerm.Load(); f != nil {
+		if t := (*f)(); t > 0 {
+			req.LastTerm, req.Proto = t, 1
+		}
+	}
+	stream, err := NewWalStreamClient(conn).Follow(streamCtx, req)
 	if err != nil {
 		return fromRev, silenced(err)
 	}

@@ -113,6 +113,9 @@ type Server struct {
 	// in S3 (never in this leader's ring buffer) and must re-sync from S3
 	// before it can consume the live stream.
 	startRev int64
+	// prevTerm is the term of the entry at startRev-1: the log this leader
+	// inherited ends there, and a follower at that point must match it.
+	prevTerm uint64
 
 	// gracefulGoodbyes tracks followers that sent a GoodBye RPC before
 	// disconnecting. Their stream disconnect will not trigger DisconnectC.
@@ -173,13 +176,44 @@ func (s *Server) ConnectedFollowers() int {
 // db.LastSequence()+1 immediately after becomeLeader completes its S3
 // replay.  Followers that connect with FromRevision < startRev are missing
 // entries that will never appear in the ring buffer; they must re-sync.
-func (s *Server) SetStartRev(rev int64) {
+func (s *Server) SetStartRev(rev int64, prevTerm uint64) {
 	s.mu.Lock()
-	s.startRev = rev
+	s.startRev, s.prevTerm = rev, prevTerm
 	s.mu.Unlock()
 }
 
-// SetTerm records the leader's term, which heartbeats carry.
+// checkContinuesLog refuses a follower whose log does not continue this
+// leader's at FromRevision-1 (#441). Every entry this leader wrote, from
+// startRev on, has its term, and the log it inherited ends at startRev-1
+// with prevTerm; below that the follower resyncs from object storage, where
+// replay checks its boundary the same way. A follower with a newer term than
+// this leader's means this leader was deposed: it must not make the follower
+// discard anything. A prevTerm of zero (a store too old to record it) is not
+// checked. Called with s.mu held.
+func (s *Server) checkContinuesLog(req *FollowRequest) error {
+	p := req.FromRevision - 1
+	switch {
+	case p <= 0 || s.startRev == 0:
+		return nil
+	case req.Proto < 1:
+		if p >= s.startRev-1 {
+			s.log.Warnf("peer: follower %q predates divergence checks; its log is not verified", req.NodeID)
+			metrics.FollowerResyncsTotal.WithLabelValues("unverified_legacy").Inc()
+		}
+		return nil
+	case req.LastTerm > s.term:
+		s.log.Warnf("peer: follower %q has term %d, newer than this leader's %d — leader is stale", req.NodeID, req.LastTerm, s.term)
+		return errLeaderStale
+	case p >= s.startRev && req.LastTerm != s.term,
+		p == s.startRev-1 && s.prevTerm != 0 && req.LastTerm != s.prevTerm:
+		s.log.Warnf("peer: follower %q diverged: entry %d has term %d, not this leader's log (start=%d prevTerm=%d term=%d)",
+			req.NodeID, p, req.LastTerm, s.startRev, s.prevTerm, s.term)
+		metrics.FollowerResyncsTotal.WithLabelValues("diverged").Inc()
+		return DivergedError(s.term)
+	}
+	return nil
+}
+
 // SetUploadedSource sets what heartbeats report as UploadedSeq.
 func (s *Server) SetUploadedSource(f func() (int64, bool)) { s.uploaded.Store(&f) }
 
@@ -193,6 +227,7 @@ func (s *Server) heartbeat(term uint64) *WalEntryMsg {
 	return m
 }
 
+// SetTerm records the leader's term, which heartbeats carry.
 func (s *Server) SetTerm(term uint64) {
 	s.mu.Lock()
 	s.term = term
@@ -475,6 +510,10 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 			req.NodeID, req.WALFormat, required)
 		return status.Errorf(codes.FailedPrecondition,
 			"wal_format_unsupported: follower reads WAL format %d, leader requires %d", req.WALFormat, required)
+	}
+	if err := s.checkContinuesLog(req); err != nil {
+		s.mu.Unlock()
+		return err
 	}
 	// A follower whose FromRevision is below startRev has missed entries that
 	// were committed by a prior leader and replayed from S3 by this leader —
