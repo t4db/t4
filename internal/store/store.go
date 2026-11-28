@@ -2212,13 +2212,13 @@ func (s *Store) registerWatch(prefix string) func() {
 		s.watchPrefixes = make(map[string]int)
 	}
 	s.watchPrefixes[prefix]++
-	prefixes := len(s.watchPrefixes)
-	s.mu.Unlock()
-
+	// Set the gauge under the lock: it is a snapshot of the map, so a Set that
+	// landed out of order would latch a stale count.
 	if metrics.WatchActive != nil {
 		metrics.WatchActive.Inc()
-		metrics.WatchActivePrefixes.Set(float64(prefixes))
+		metrics.WatchActivePrefixes.Set(float64(len(s.watchPrefixes)))
 	}
+	s.mu.Unlock()
 
 	return func() {
 		s.mu.Lock()
@@ -2227,13 +2227,11 @@ func (s *Store) registerWatch(prefix string) func() {
 		} else {
 			s.watchPrefixes[prefix] = n - 1
 		}
-		prefixes := len(s.watchPrefixes)
-		s.mu.Unlock()
-
 		if metrics.WatchActive != nil {
 			metrics.WatchActive.Dec()
-			metrics.WatchActivePrefixes.Set(float64(prefixes))
+			metrics.WatchActivePrefixes.Set(float64(len(s.watchPrefixes)))
 		}
+		s.mu.Unlock()
 	}
 }
 
