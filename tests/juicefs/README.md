@@ -16,14 +16,14 @@ and writes through transactions that compare `ModRevision`.
 ## Running
 
 ```bash
-./juicefs/run.sh                                   # both etcd suites
-./juicefs/run.sh -run 'TestEtcd$' -v ./pkg/meta/   # one suite, verbose
+./tests/juicefs/run.sh                                   # both etcd suites
+./tests/juicefs/run.sh -run 'TestEtcd$' -v ./pkg/meta/   # one suite, verbose
 ```
 
 Everything runs in Docker: a `t4` binary built from the working tree, a
 JuiceFS clone at a pinned tag, and `go test`. Nothing is installed on the
 host, no object store is involved, and no FUSE mount is made — these tests
-drive the metadata engine directly. T4's log lands in `juicefs/output/`.
+drive the metadata engine directly. T4's log lands in `tests/juicefs/output/`.
 
 Expect the default run to take two to three minutes. Almost all of it is
 JuiceFS doing many small transactions against a single node that fsyncs each
@@ -33,7 +33,7 @@ write, not any one slow operation.
 
 There is nothing to hook. `newKVMeta("etcd", os.Getenv("ETCD_ADDR"), …)` is
 how `pkg/meta`'s tests reach the engine, so pointing `$ETCD_ADDR` at T4 is
-the entire integration — unlike `patroni/`, this directory needs no
+the entire integration — unlike `tests/patroni/`, this directory needs no
 controller shim, and JuiceFS is cloned unpatched.
 
 One thing T4 needs for it to work at all:
@@ -67,7 +67,7 @@ and runs through the same entrypoint, because `-rapid.meta` takes any meta
 URL:
 
 ```bash
-./juicefs/run.sh -run TestFSOps -rapid.meta=etcd://127.0.0.1:3379/jfs \
+./tests/juicefs/run.sh -run TestFSOps -rapid.meta=etcd://127.0.0.1:3379/jfs \
   -rapid.seed=1 -rapid.checks=30 -rapid.steps=100 -timeout 60m ./pkg/meta/
 ```
 
