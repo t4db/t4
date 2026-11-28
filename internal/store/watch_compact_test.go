@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/t4db/t4/internal/wal"
 )
 
 // TestWatchReplayEndsOnCompactedHistory: a watch whose history is compacted
@@ -67,6 +69,48 @@ func TestWatchReplayAtCompactRevision(t *testing.T) {
 			}
 		case <-ctx.Done():
 			t.Fatalf("no event at revision %d", want)
+		}
+	}
+}
+
+// TestLiveWatchEndsOnCompactionInSameBatch: a batch that writes revisions
+// and compacts past them (follower catch-up, WAL recovery) leaves the live
+// dispatcher only the survivors. A watch that wanted the removed revisions
+// ends rather than receive the survivors as a gapless stream.
+func TestLiveWatchEndsOnCompactionInSameBatch(t *testing.T) {
+	s := openMem(t)
+	apply(t, s, createEntry(1, "a", []byte("1")))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ch, err := s.Watch(ctx, "", 1, WatchOptions{Progress: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch []wal.Entry
+	for rev := int64(2); rev <= 10; rev++ {
+		batch = append(batch, updateEntry(rev, "a", []byte(fmt.Sprint(rev)), 1, rev-1))
+	}
+	apply(t, s, append(batch, compactEntry(10, 8))...)
+
+	want := int64(2)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			if ev.Type == EventProgress {
+				continue
+			}
+			if ev.KV.Revision != want {
+				t.Fatalf("got revision %d, want %d: the watch skipped compacted revisions", ev.KV.Revision, want)
+			}
+			if want++; want > 10 {
+				return
+			}
+		case <-ctx.Done():
+			t.Fatal("the watch neither delivered every revision nor ended")
 		}
 	}
 }
