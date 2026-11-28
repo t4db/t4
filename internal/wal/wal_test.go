@@ -297,7 +297,7 @@ func TestTrimThroughKeepsUnsealedAndNewest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w.Start(ctx)
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 	for seq := int64(1); seq <= 5; seq++ {
 		if err := w.Append(&Entry{Revision: seq, Term: 1, Op: OpCreate, Key: "k", Value: []byte("v")}); err != nil {
 			t.Fatal(err)
