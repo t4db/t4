@@ -86,6 +86,10 @@ const (
 //
 // Thread safety: Broadcast and Follow both hold mu.
 type Server struct {
+	// uploaded reports the sequence object storage holds every entry up to;
+	// heartbeats carry it to followers (SetUploadedSource).
+	uploaded atomic.Pointer[func() (int64, bool)]
+
 	mu              sync.Mutex
 	buf             *entryBuffer
 	pending         []*wal.Entry
@@ -176,6 +180,19 @@ func (s *Server) SetStartRev(rev int64) {
 }
 
 // SetTerm records the leader's term, which heartbeats carry.
+// SetUploadedSource sets what heartbeats report as UploadedSeq.
+func (s *Server) SetUploadedSource(f func() (int64, bool)) { s.uploaded.Store(&f) }
+
+func (s *Server) heartbeat(term uint64) *WalEntryMsg {
+	m := &WalEntryMsg{Heartbeat: true, Term: term}
+	if f := s.uploaded.Load(); f != nil {
+		if seq, ok := (*f)(); ok {
+			m.UploadedSeq = seq
+		}
+	}
+	return m
+}
+
 func (s *Server) SetTerm(term uint64) {
 	s.mu.Lock()
 	s.term = term
@@ -575,7 +592,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	tick := time.NewTicker(HeartbeatInterval)
 	defer tick.Stop()
 	if req.Heartbeats {
-		if err := stream.Send(&WalEntryMsg{Heartbeat: true, Term: term}); err != nil {
+		if err := stream.Send(s.heartbeat(term)); err != nil {
 			return err
 		}
 	}
@@ -634,7 +651,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				s.log.Warnf("peer: no heartbeat from follower %q for %v — closing its stream", req.NodeID, silent.Round(time.Millisecond))
 				return errFollowerSilent
 			}
-			if err := stream.Send(&WalEntryMsg{Heartbeat: true, Term: term}); err != nil {
+			if err := stream.Send(s.heartbeat(term)); err != nil {
 				return err
 			}
 		case <-s.shutdownC:

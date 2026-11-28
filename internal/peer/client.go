@@ -78,6 +78,9 @@ type Client struct {
 	heardTerm atomic.Uint64
 	heardNano atomic.Int64
 
+	// uploadedSeq is the last UploadedSeq the leader's heartbeats carried.
+	uploadedSeq atomic.Int64
+
 	log peerLogger
 }
 
@@ -118,6 +121,10 @@ func (c *Client) SetLastHeard(term uint64, at time.Time) {
 // attempt. When it reports that the leader has left for good, Follow returns
 // ErrLeaderShutdown at once instead of retrying a dead address. Must not be
 // called while Follow runs.
+// UploadedSeq returns the sequence up to which the leader last reported
+// object storage holds every entry, or 0 if it has not.
+func (c *Client) UploadedSeq() int64 { return c.uploadedSeq.Load() }
+
 func (c *Client) SetLeaderGoneCheck(f func(context.Context) bool) {
 	c.leaderGone = f
 }
@@ -385,6 +392,9 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 				c.leaderHeartbeats.Store(true)
 				c.heardTerm.Store(msg.Term)
 				c.heardNano.Store(time.Now().UnixNano())
+				if msg.UploadedSeq > 0 {
+					c.uploadedSeq.Store(msg.UploadedSeq)
+				}
 				continue
 			}
 			select {

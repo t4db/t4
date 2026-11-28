@@ -58,9 +58,10 @@ type WAL struct {
 	syncUpload bool     // seal+upload synchronously on every AppendBatch
 	log        walLogger
 
-	mu     sync.Mutex
-	active *SegmentWriter
-	closed bool
+	mu      sync.Mutex
+	active  *SegmentWriter
+	closed  bool
+	lastSeq int64 // last sequence appended, for UploadedThrough
 
 	// uploadCtx is derived from the context passed to Start. It is used for
 	// synchronous S3 uploads inside rotateSyncLocked so that per-request
@@ -379,6 +380,7 @@ func (w *WAL) Append(e *Entry) error {
 	if err := w.active.Append(e); err != nil {
 		return err
 	}
+	w.lastSeq = max(w.lastSeq, e.Sequence())
 	// Size-based rotation happens in the background loop; we only trigger it
 	// here to avoid holding the lock during the potentially slow seal+open.
 	if w.active.Size() >= w.segMaxSize {
@@ -427,7 +429,69 @@ func (w *WAL) AppendBatch(ctx context.Context, entries []*Entry) error {
 	} else if w.active.Size() >= w.segMaxSize {
 		w.rotateLocked()
 	}
+	w.lastSeq = max(w.lastSeq, entries[len(entries)-1].Sequence())
 	return nil
+}
+
+// UploadedThrough returns S such that object storage holds every entry this
+// WAL appended with sequence <= S: one below the first sequence of the oldest
+// segment not yet uploaded (pending, leftover or active), or the last
+// sequence appended when every segment is uploaded. ok is false without an
+// uploader. Followers trim their local copies up to it (TrimThrough).
+func (w *WAL) UploadedThrough() (s int64, ok bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.uploader == nil || w.closed {
+		return 0, false
+	}
+	oldest := int64(-1)
+	if w.active != nil {
+		oldest = w.active.FirstRev()
+	}
+	w.pendingMu.Lock()
+	for _, m := range []map[string]string{w.pending, w.leftover} {
+		for key := range m {
+			if f := parseFirstRev(key); oldest < 0 || f < oldest {
+				oldest = f
+			}
+		}
+	}
+	w.pendingMu.Unlock()
+	if oldest < 0 {
+		return w.lastSeq, true
+	}
+	return oldest - 1, true
+}
+
+// TrimThrough deletes sealed local segments whose entries all have sequence
+// <= s, and returns how many. A segment's last sequence is the next
+// segment's first minus one, so the newest file is always kept, and so is
+// the active segment.
+func (w *WAL) TrimThrough(s int64) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return 0, nil
+	}
+	paths, err := LocalSegments(w.dir)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for i := 0; i+1 < len(paths); i++ {
+		_, next, ok := ParseSegmentName(filepath.Base(paths[i+1]))
+		if !ok || next-1 > s {
+			break
+		}
+		if w.active != nil && paths[i] == w.active.Path() {
+			continue
+		}
+		if err := os.Remove(paths[i]); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 // rotateSyncLocked uploads the active segment to object storage synchronously.
