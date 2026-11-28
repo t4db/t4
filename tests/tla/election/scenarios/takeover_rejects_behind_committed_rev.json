@@ -1,0 +1,41 @@
+{
+  "name": "takeover rejects a candidate behind the leader lock committed revision",
+  "steps": [
+    {
+      "action": "try_acquire",
+      "node": "node-1",
+      "addr": "localhost:2380",
+      "floor_term": 0,
+      "committed_rev": 10,
+      "expect_won": true,
+      "expect_record": {
+        "node_id": "node-1",
+        "term": 1,
+        "committed_rev": 10
+      },
+      "expect_lock": {
+        "node_id": "node-1",
+        "term": 1,
+        "committed_rev": 10
+      }
+    },
+    {
+      "action": "takeover",
+      "node": "node-2",
+      "addr": "localhost:2381",
+      "floor_term": 1,
+      "committed_rev": 9,
+      "expect_won": false,
+      "expect_record": {
+        "node_id": "node-1",
+        "term": 1,
+        "committed_rev": 10
+      },
+      "expect_lock": {
+        "node_id": "node-1",
+        "term": 1,
+        "committed_rev": 10
+      }
+    }
+  ]
+}
