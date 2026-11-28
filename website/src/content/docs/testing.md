@@ -165,11 +165,11 @@ There is no fault injection: T4 runs as a single node. Run it locally with `make
 
 **What it proves:** JuiceFS's own metadata-engine tests pass with T4 as the engine, so a POSIX filesystem can keep its metadata in T4.
 
-[`juicefs`](https://github.com/t4db/t4/tree/main/juicefs) builds a T4 image from the tree, clones JuiceFS at a pinned tag (`v1.4.2` by default) and runs its `pkg/meta` tests against a real `t4 run` process with `$ETCD_ADDR` pointed at it. JuiceFS itself is unpatched: `TestEtcdClient` runs `testMeta`, the contract every JuiceFS metadata engine must satisfy, and `TestEtcd` runs `testTKV`, the key-value and transaction contract underneath it. No FUSE mount is involved — these drive the engine directly.
+[`tests/juicefs`](https://github.com/t4db/t4/tree/main/tests/juicefs) builds a T4 image from the tree, clones JuiceFS at a pinned tag (`v1.4.2` by default) and runs its `pkg/meta` tests against a real `t4 run` process with `$ETCD_ADDR` pointed at it. JuiceFS itself is unpatched: `TestEtcdClient` runs `testMeta`, the contract every JuiceFS metadata engine must satisfy, and `TestEtcd` runs `testTKV`, the key-value and transaction contract underneath it. No FUSE mount is involved — these drive the engine directly.
 
 This is the client that has found the most T4 bugs, because a filesystem rewrites small records constantly and so churns key history far harder than a config store does. The filesystem-level suites upstream runs on etcd (`rmfiles`, `gateway`) are not covered yet.
 
-There is no fault injection: T4 runs as a single node. Run it with `./juicefs/run.sh`.
+There is no fault injection: T4 runs as a single node. Run it with `./tests/juicefs/run.sh`.
 
 **When:** not wired into CI yet; a run takes a few minutes.
 
