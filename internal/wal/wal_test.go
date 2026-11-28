@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -284,5 +285,88 @@ func TestWALSyncUploadRollbackRestoresFormat(t *testing.T) {
 	}
 	if got, want := string(hdr[:4]), segMagic(formatBase); got != want {
 		t.Fatalf("segment header after rollback = %q, want %q", got, want)
+	}
+}
+
+func TestTrimThroughKeepsUnsealedAndNewest(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, 1, 1, WithSegmentMaxAge(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Start(ctx)
+	defer w.Close()
+	for seq := int64(1); seq <= 5; seq++ {
+		if err := w.Append(&Entry{Revision: seq, Term: 1, Op: OpCreate, Key: "k", Value: []byte("v")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.SealAndFlush(seq + 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Append(&Entry{Revision: 6, Term: 1, Op: OpCreate, Key: "k", Value: []byte("v")}); err != nil {
+		t.Fatal(err)
+	}
+	firsts := func() (out []int64) {
+		paths, err := LocalSegments(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range paths {
+			_, f, _ := ParseSegmentName(filepath.Base(p))
+			out = append(out, f)
+		}
+		return out
+	}
+	if n, err := w.TrimThrough(3); err != nil || n != 3 {
+		t.Fatalf("trim through 3: %d %v", n, err)
+	}
+	if got := firsts(); fmt.Sprint(got) != "[4 5 6]" {
+		t.Errorf("after trim through 3: %v", got)
+	}
+	// The newest segment (here the active one) is never deleted.
+	if _, err := w.TrimThrough(100); err != nil {
+		t.Fatal(err)
+	}
+	if got := firsts(); fmt.Sprint(got) != "[6]" {
+		t.Errorf("after trim through 100: %v", got)
+	}
+}
+
+func TestUploadedThroughStopsAtOldestUnuploaded(t *testing.T) {
+	var ok atomic.Bool
+	up := func(ctx context.Context, path, key string) error {
+		if !ok.Load() {
+			return errors.New("object storage down")
+		}
+		return os.Remove(path)
+	}
+	w := startWAL(t, t.TempDir(), up)
+	if s, has := w.UploadedThrough(); !has || s != 0 {
+		t.Fatalf("empty WAL: %d %v", s, has)
+	}
+	sealSegments(t, w, 1, 3)
+	if s, _ := w.UploadedThrough(); s != 0 {
+		t.Errorf("nothing uploaded: %d, want 0", s)
+	}
+	ok.Store(true)
+	w.wakeUploader()
+	deadline := time.Now().Add(5 * time.Second)
+	for pendingCount(w) > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s, _ := w.UploadedThrough(); s != 3 {
+		t.Errorf("all uploaded: %d, want 3", s)
+	}
+	if err := w.Append(&Entry{Revision: 4, Term: 1, Op: OpCreate, Key: "k", Value: []byte("v")}); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := w.UploadedThrough(); s != 3 {
+		t.Errorf("with an active segment from 4: %d, want 3", s)
+	}
+	if _, has := New().UploadedThrough(); has {
+		t.Error("a WAL without an uploader reports an upload position")
 	}
 }

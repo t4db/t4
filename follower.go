@@ -31,6 +31,8 @@ func (n *Node) followLoop(bgCtx context.Context) {
 	fromRev := n.db.Load().LastSequence() + 1
 	// lastTakeover is when the last non-graceful takeover attempt began.
 	var lastTakeover time.Time
+	// lastTrim is when local WAL segments were last trimmed (trimLocalWAL).
+	var lastTrim time.Time
 
 	for {
 		cli.SetLeaderGoneCheck(func(ctx context.Context) bool { return n.lockReleased(ctx, lock) })
@@ -76,6 +78,10 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				// Advance only after a successful apply so a reconnect retries
 				// from the start of the failed batch rather than skipping it.
 				fromRev = entries[len(entries)-1].Sequence() + 1
+				if time.Since(lastTrim) >= followerWALTrimInterval {
+					lastTrim = time.Now()
+					n.trimLocalWAL(min(cli.UploadedSeq(), fromRev-1))
+				}
 				return nil
 			},
 		)
@@ -459,4 +465,24 @@ func (n *Node) resyncFromCheckpoint(bgCtx context.Context) error {
 
 	n.log.Infof("t4: follower in-place resync complete (rev=%d seq=%d term=%d)", newRev, newSeq, n.currentTerm())
 	return nil
+}
+
+// followerWALTrimInterval is how often a follower deletes local WAL segments
+// the leader has uploaded. A variable so tests can shorten it.
+var followerWALTrimInterval = 10 * time.Second
+
+// trimLocalWAL deletes the follower's sealed local WAL segments whose entries
+// are all at or below seq: applied here and, per the leader, in object
+// storage, so the local copies no longer protect anything (#439). Called
+// from followLoop, the follower WAL's only writer.
+func (n *Node) trimLocalWAL(seq int64) {
+	t, ok := n.wal.(interface{ TrimThrough(int64) (int, error) })
+	if !ok || seq <= 0 {
+		return
+	}
+	if removed, err := t.TrimThrough(seq); err != nil {
+		n.log.Warnf("t4: trim local WAL through seq %d: %v", seq, err)
+	} else if removed > 0 {
+		n.log.Debugf("t4: trimmed %d local WAL segments through seq %d", removed, seq)
+	}
 }

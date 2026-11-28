@@ -96,6 +96,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 
 	peerSrv := peer.NewServer(n.cfg.PeerBufferSize, n.cfg.PeerBufferBytes, n.log)
 	peerSrv.SetTerm(rec.Term)
+	peerSrv.SetUploadedSource(w2.UploadedThrough)
 	// A database with the meta keyspace, or one Open is about to create with
 	// it (see initMetaAtGenesis), has WAL entries that followers below format
 	// 3 would misapply: refuse them before serving.

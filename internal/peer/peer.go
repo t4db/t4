@@ -128,7 +128,11 @@ const (
 func marshalWalEntryMsg(m *WalEntryMsg) ([]byte, error) {
 	kl := len(m.Key)
 	vl := len(m.Value)
-	buf := make([]byte, walEntryMsgFixedSize+kl+vl)
+	n := walEntryMsgFixedSize + kl + vl
+	if m.UploadedSeq != 0 {
+		n += 8 // trailing; older peers stop reading after the value
+	}
+	buf := make([]byte, n)
 	binary.LittleEndian.PutUint64(buf[0:], uint64(m.Revision))
 	binary.LittleEndian.PutUint64(buf[8:], m.Term)
 	binary.LittleEndian.PutUint64(buf[16:], uint64(m.CreateRevision))
@@ -152,6 +156,9 @@ func marshalWalEntryMsg(m *WalEntryMsg) ([]byte, error) {
 	copy(buf[80:], m.Key)
 	binary.LittleEndian.PutUint32(buf[80+kl:], uint32(vl))
 	copy(buf[84+kl:], m.Value)
+	if m.UploadedSeq != 0 {
+		binary.LittleEndian.PutUint64(buf[84+kl+vl:], uint64(m.UploadedSeq))
+	}
 	return buf, nil
 }
 
@@ -183,6 +190,9 @@ func unmarshalWalEntryMsg(data []byte, m *WalEntryMsg) error {
 	}
 	m.Value = make([]byte, vl)
 	copy(m.Value, data[84+kl:])
+	if len(data) >= walEntryMsgFixedSize+kl+vl+8 {
+		m.UploadedSeq = int64(binary.LittleEndian.Uint64(data[84+kl+vl:]))
+	}
 	return nil
 }
 
@@ -239,6 +249,9 @@ type WalEntryMsg struct {
 	Commit              bool   `json:"commit,omitempty"`
 	Shutdown            bool   `json:"shutdown,omitempty"`
 	Heartbeat           bool   `json:"heartbeat,omitempty"`
+	// UploadedSeq, on heartbeats, is the sequence up to which object storage
+	// holds every entry: followers delete their local WAL segments up to it.
+	UploadedSeq int64 `json:"uploaded_seq,omitempty"`
 }
 
 func EntryToMsg(e *wal.Entry) *WalEntryMsg {
